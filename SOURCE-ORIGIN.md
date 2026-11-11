@@ -1,0 +1,4 @@
+源码出处：Kozea/CairoSVG
+固定上游提交：3b7a250c9e955db9c3cdf525d5b5027a9a396201
+
+工作副本保留渲染源码与API测试，部分大型回归图像素材未包含。许可证见LICENSE。原生Python环境中使用Cairo动态库，不使用Docker。
