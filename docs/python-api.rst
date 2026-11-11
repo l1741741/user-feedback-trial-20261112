@@ -2026,12 +2026,38 @@ A view that references a column which the transform renamed or dropped will rema
 
 To achieve this, the SQL produced by ``transform_sql()`` turns on ``PRAGMA legacy_alter_table`` for its ``ALTER TABLE ... RENAME TO`` statements, then restores the pragma to the value it had when the SQL was generated - without this, SQLite would attempt to rewrite references to the renamed table in every view definition, which fails when a view references the table that was just dropped.
 
+.. _python_api_transform_preserve_schema:
+
+Preserving dependent schema objects
+------------------------------------
+
+Pass ``preserve_schema=True`` to keep the indexes, triggers and views that depend on the table working after the rebuild:
+
+.. code-block:: python
+
+    table.transform(rename={"name": "full_name"}, preserve_schema=True)
+
+With the option enabled, the stored SQL of each dependent object is rewritten using a token-aware scanner rather than a global string replacement:
+
+- Ordinary, unique, expression and partial indexes are recreated against the renamed columns, keeping their names and uniqueness.
+- Triggers on the table are recreated with their ``UPDATE OF`` lists, ``OLD``/``NEW`` references and body statements rewritten.
+- Local views that read from the table are recreated so they keep exposing the same column names. View aliases, joins and conditional expressions are respected, and same-named columns on other tables, string literals and SQL comments are never touched.
+- Quoted identifiers (``"..."``, ```...``` and ``[...]``) are handled throughout.
+
+The rewrite distinguishes real SQL identifiers from string constants, comments and the same-named columns of other tables, so a literal such as ``'name'`` or a comment containing the old column name is left unchanged.
+
+If dropping a column would break a dependent object, or if a statement cannot be rewritten reliably, ``table.transform()`` raises :py:class:`sqlite_utils.db.TransformError` naming the object before the original table is modified. The method never silently drops an index, trigger or view to make the change succeed. On failure the original rows and the relevant ``sqlite_master`` objects are left intact and no temporary table remains.
+
+The option defaults to ``False``; omitting it keeps the previous behavior and exception messages exactly as before.
+
 .. _python_api_transform_sql:
 
 Custom transformations with .transform_sql()
 --------------------------------------------
 
-The ``.transform()`` method can handle most cases, but it does not automatically upgrade indexes, views or triggers associated with the table that is being transformed.
+The ``.transform()`` method can handle most cases, but without ``preserve_schema=True`` it does not automatically upgrade triggers or views associated with the table that is being transformed.
+
+Passing ``preserve_schema=True`` to ``transform_sql()`` includes the extra ``DROP``/``CREATE`` statements needed to recreate indexes, triggers and dependent views against the rewritten columns, so the returned list is fully self-contained. As with ``.transform()``, an object that cannot be rewritten raises ``TransformError`` while the plan is being built - before any statement that modifies the original table appears.
 
 If you want to do something more advanced, you can call the ``table.transform_sql(...)`` method with the same arguments that you would have passed to ``table.transform(...)``.
 

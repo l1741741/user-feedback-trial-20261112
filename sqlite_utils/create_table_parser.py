@@ -55,7 +55,7 @@ class ParseError(ValueError):
 
 
 @dataclass(frozen=True)
-class _Token:
+class Token:
     kind: str
     text: str
     start: int
@@ -63,6 +63,10 @@ class _Token:
 
     def is_keyword(self, keyword: str) -> bool:
         return self.kind == "word" and self.text.upper() == keyword
+
+
+# Backwards-compatible private alias used by earlier versions of this module.
+_Token = Token
 
 
 _PUNCTUATION = frozenset("(),.;+-*/%<>=!~|&?:")
@@ -829,6 +833,11 @@ def _is_identifier_token(tokens: list[_Token], index: int) -> bool:
     return True
 
 
+def is_identifier_token(tokens: list[Token], index: int) -> bool:
+    """Return True if the token at ``index`` reads as an identifier."""
+    return _is_identifier_token(tokens, index)
+
+
 def check_references_identifier(expression: str, identifier: str) -> bool:
     tokens = _meaningful(_lex(expression))
     folded = _ascii_fold(identifier)
@@ -862,6 +871,11 @@ def _valid_bare_identifier(identifier: str) -> bool:
         char == "_" or char == "$" or char.isalnum() or ord(char) >= 0x80
         for char in identifier[1:]
     )
+
+
+def quote_identifier(identifier: str) -> str:
+    """Quote an identifier (table name, column name, ...) with double quotes."""
+    return '"{}"'.format(identifier.replace('"', '""'))
 
 
 def _quote_replacement(original: str, replacement: str) -> str:

@@ -2724,6 +2724,13 @@ def schema(
     default=None,
     help="Enable or disable STRICT mode (default: preserve current mode)",
 )
+@click.option(
+    "--preserve-schema",
+    is_flag=True,
+    default=False,
+    help="Rewrite indexes, triggers and views so they keep working after the "
+    "transformation; fails instead of dropping objects that cannot be rewritten",
+)
 @click.option("--sql", is_flag=True, help="Output SQL without executing it")
 @load_extension_option
 def transform(
@@ -2742,6 +2749,7 @@ def transform(
     add_foreign_keys,
     drop_foreign_keys,
     strict,
+    preserve_schema,
     sql,
     load_extension,
 ):
@@ -2804,6 +2812,7 @@ def transform(
             drop_foreign_keys=drop_foreign_keys_value,
             add_foreign_keys=add_foreign_keys_value,
             strict=strict,
+            preserve_schema=preserve_schema,
         ):
             click.echo(line)
     else:
@@ -2818,6 +2827,7 @@ def transform(
             drop_foreign_keys=drop_foreign_keys_value,
             add_foreign_keys=add_foreign_keys_value,
             strict=strict,
+            preserve_schema=preserve_schema,
         )
 
 

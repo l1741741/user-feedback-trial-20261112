@@ -10,7 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from sqlite_utils import ANY, Database, cli
-from sqlite_utils.db import ForeignKey, Index
+from sqlite_utils.db import ForeignKey, Index, TransformError
 
 
 def write_json(file_path, data):
@@ -2098,6 +2098,111 @@ def test_transform_add_or_drop_foreign_key(db_path, extra_args, expected_schema)
     assert result.exit_code == 0
     schema = db.table("places").schema
     assert schema == expected_schema
+
+
+def test_transform_preserve_schema_cli(db_path):
+    db = Database(db_path)
+    with db.conn:
+        db.table("dogs").insert({"id": 1, "name": "Cleo"}, pk="id")
+        db.execute("CREATE INDEX idx_name ON dogs(name)")
+        db.execute("CREATE VIEW dogs_view AS SELECT id, name FROM dogs")
+
+    result = CliRunner().invoke(
+        cli.cli,
+        [
+            "transform",
+            db_path,
+            "dogs",
+            "--rename",
+            "name",
+            "full_name",
+            "--preserve-schema",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert db.table("dogs").columns_dict == {"id": int, "full_name": str}
+    assert "idx_name" in {index.name for index in db.table("dogs").indexes}
+    view_sql = db.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'dogs_view'"
+    ).fetchone()[0]
+    assert "full_name" in view_sql
+    assert list(db.view("dogs_view").rows) == [{"id": 1, "full_name": "Cleo"}]
+
+
+def test_transform_preserve_schema_cli_sql_flag(db_path):
+    db = Database(db_path)
+    with db.conn:
+        db.table("dogs").insert({"id": 1, "name": "Cleo"}, pk="id")
+        db.execute("CREATE VIEW dogs_view AS SELECT id, name FROM dogs")
+    schema_before = db.table("dogs").schema
+
+    result = CliRunner().invoke(
+        cli.cli,
+        [
+            "transform",
+            db_path,
+            "dogs",
+            "--rename",
+            "name",
+            "full_name",
+            "--preserve-schema",
+            "--sql",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    # The generated plan recreates the view but nothing was executed.
+    assert "DROP VIEW IF EXISTS" in result.output
+    assert "CREATE VIEW dogs_view" in result.output
+    assert db.table("dogs").schema == schema_before
+
+
+def test_transform_preserve_schema_cli_failure_rolls_back(db_path):
+    db = Database(db_path)
+    with db.conn:
+        db.table("dogs").insert({"id": 1, "name": "Cleo"}, pk="id")
+        db.execute("CREATE VIEW dogs_view AS SELECT id, name FROM dogs")
+    schema_before = db.table("dogs").schema
+
+    result = CliRunner().invoke(
+        cli.cli,
+        [
+            "transform",
+            db_path,
+            "dogs",
+            "--drop",
+            "name",
+            "--preserve-schema",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, TransformError)
+    assert "dogs_view" in str(result.exception)
+    # Table, view and data are all untouched, with no leftover temp table.
+    assert db.table("dogs").schema == schema_before
+    assert "dogs_view" in db.view_names()
+    assert list(db.table("dogs").rows) == [{"id": 1, "name": "Cleo"}]
+    assert not [name for name in db.table_names() if "new_" in name]
+
+
+def test_transform_without_preserve_schema_cli_leaves_view_text(db_path):
+    db = Database(db_path)
+    with db.conn:
+        db.table("dogs").insert({"id": 1, "name": "Cleo"}, pk="id")
+        db.execute("CREATE VIEW dogs_view AS SELECT id, name FROM dogs")
+
+    result = CliRunner().invoke(
+        cli.cli,
+        ["transform", db_path, "dogs", "--rename", "name", "title"],
+    )
+
+    assert result.exit_code == 0, result.output
+    # Default behaviour: view definition is not rewritten.
+    assert db.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'dogs_view'"
+    ).fetchone()[0] == "CREATE VIEW dogs_view AS SELECT id, name FROM dogs"
 
 
 _common_other_schema = (

@@ -40,6 +40,7 @@ from .create_table_parser import (
     rewrite_check_expression,
     sql_ends_in_line_comment,
 )
+from .schema_rewrite import SchemaRewriteError, SchemaRewriter
 from .utils import (
     ANY,
     OperationalError,
@@ -2655,6 +2656,7 @@ class Table(Queryable):
         column_order: list[str] | None = None,
         keep_table: str | None = None,
         strict: bool | None = None,
+        preserve_schema: bool = False,
     ) -> "Table":
         """
         Apply an advanced alter table, including operations that are not supported by
@@ -2684,6 +2686,10 @@ class Table(Queryable):
           dropped
         :param strict: Set to ``True`` to make the table strict or ``False`` to make it
           non-strict. Defaults to ``None``, which preserves the existing strict mode.
+        :param preserve_schema: Set to ``True`` to rewrite indexes, triggers and views
+          that reference the table so they keep working after column renames, type
+          changes or column reordering. Raises ``TransformError`` if a dependent
+          object cannot be rewritten reliably, without modifying the original table.
         """
         if not self.exists():
             raise ValueError("Cannot transform a table that doesn't exist yet")
@@ -2700,6 +2706,7 @@ class Table(Queryable):
             column_order=column_order,
             keep_table=keep_table,
             strict=strict,
+            preserve_schema=preserve_schema,
         )
         pragma_foreign_keys_was_on = bool(
             self.db.execute("PRAGMA foreign_keys").fetchone()[0]
@@ -2786,6 +2793,7 @@ class Table(Queryable):
         tmp_suffix: str | None = None,
         keep_table: str | None = None,
         strict: bool | None = None,
+        preserve_schema: bool = False,
     ) -> list[str]:
         """
         Return a list of SQL statements that should be executed in order to apply this transformation.
@@ -2808,6 +2816,10 @@ class Table(Queryable):
           dropped
         :param strict: Set to ``True`` to make the table strict or ``False`` to make it
           non-strict. Defaults to ``None``, which preserves the existing strict mode.
+        :param preserve_schema: Set to ``True`` to also emit statements that recreate
+          the table's indexes, triggers and dependent views against the rewritten
+          columns. Objects that cannot be rewritten reliably raise ``TransformError``
+          before any statement that modifies the original table is returned.
         """
         if strict is True and not self.db.supports_strict:
             raise TransformError("SQLite does not support STRICT tables")
@@ -3127,6 +3139,18 @@ class Table(Queryable):
             new_cols=", ".join(quote_identifier(col) for col in new_cols),
         )
         sqls.append(copy_sql)
+        # Rewriting of dependent objects is planned up front so that an
+        # unresolvable reference raises before any statement which changes
+        # the original table is returned or executed.
+        schema_rewriter: SchemaRewriter | None = None
+        if preserve_schema and (rename or drop):
+            schema_rewriter = SchemaRewriter(
+                self.name,
+                rename,
+                set(drop),
+                [column.name for column in self.columns],
+                self._rewriter_resolve_columns,
+            )
         # Capture indexes before the old table is changed. Simple indexes that
         # reference renamed columns are recreated from structured PRAGMA
         # metadata instead of editing their stored CREATE INDEX SQL.
@@ -3167,9 +3191,27 @@ class Table(Queryable):
                 (column for column in xindex.columns if column.key),
                 key=lambda column: column.seqno,
             )
-            if (rename or drop) and (
-                index.partial or any(column.name is None for column in indexed_columns)
-            ):
+            is_expression_or_partial = index.partial or any(
+                column.name is None for column in indexed_columns
+            )
+            if schema_rewriter is not None and is_expression_or_partial:
+                # Token-based rewriting handles expression and partial
+                # indexes, including their WHERE clauses.
+                index_rewriter = self._make_rewriter(
+                    rename, set(drop), [column.name for column in self.columns]
+                )
+                try:
+                    index_sql = index_rewriter.rewrite_index_sql(
+                        index_sql, index.name
+                    )
+                except SchemaRewriteError as ex:
+                    raise TransformError(str(ex)) from ex
+                index_drop_sqls.append(
+                    f"DROP INDEX IF EXISTS {quote_identifier(index.name)};"
+                )
+                index_create_sqls.append(index_sql)
+                continue
+            if (rename or drop) and is_expression_or_partial:
                 raise TransformError(
                     f"Index '{index.name}' is a partial or expression index, so it "
                     f"cannot be safely recreated while columns are renamed or dropped. "
@@ -3204,6 +3246,20 @@ class Table(Queryable):
                 )
             index_create_sqls.append(index_sql)
         sqls.extend(index_drop_sqls)
+        # Triggers on this table and views referencing it. These objects are
+        # dropped by SQLite when the old table is dropped, so the rewritten
+        # versions are recreated afterwards. All rewriting happens here -
+        # before any destructive statement - so failures leave the database
+        # untouched.
+        trigger_recreate_sqls: list[str] = []
+        view_recreate_sqls: list[str] = []
+        if preserve_schema and (rename or drop):
+            trigger_recreate_sqls = self._rewrite_triggers(
+                rename, set(drop), [column.name for column in self.columns]
+            )
+            view_recreate_sqls = self._rewrite_views(
+                rename, set(drop), [column.name for column in self.columns]
+            )
         # Drop (or keep) the old table, then rename the new one into place.
         # Since SQLite 3.25 ALTER TABLE ... RENAME TO rewrites references to
         # the renamed table in every view definition, which fails if a view
@@ -3251,7 +3307,104 @@ class Table(Queryable):
             )
         # Re-add existing indexes
         sqls.extend(index_create_sqls)
+        # Recreate triggers and dependent views against the rebuilt table
+        sqls.extend(trigger_recreate_sqls)
+        sqls.extend(view_recreate_sqls)
         return sqls
+
+    def _make_rewriter(
+        self, rename: dict[str, str], drop: set[str], column_names: list[str]
+    ) -> SchemaRewriter:
+        return SchemaRewriter(
+            self.name,
+            rename,
+            drop,
+            column_names,
+            self._rewriter_resolve_columns,
+        )
+
+    def _rewriter_resolve_columns(self, kind: str, folded_name: str) -> list[str] | None:
+        """Look up the columns of a same-database table or view for the rewriter."""
+        if kind == "table":
+            names = self.db.table_names()
+        else:
+            names = self.db.view_names()
+        for name in names:
+            if fold_identifier_case(name) == folded_name:
+                return [column.name for column in self.db.table(name).columns]
+        return None
+
+    def _rewrite_triggers(
+        self, rename: dict[str, str], drop: set[str], column_names: list[str]
+    ) -> list[str]:
+        # Triggers attached to other tables are not rebuilt here; refuse if
+        # one of them references a renamed or dropped column rather than
+        # leaving a silently broken trigger behind.
+        own_trigger_names = {trigger.name for trigger in self.triggers}
+        for trigger in self.db.triggers:
+            if trigger.name in own_trigger_names or not trigger.sql:
+                continue
+            if self._sql_references_changed_column(trigger.sql, rename, drop):
+                raise TransformError(
+                    f"Trigger '{trigger.name}' on table '{trigger.table}' "
+                    f"references a column being renamed or dropped on table "
+                    f"'{self.name}'. It is defined on another table and cannot "
+                    "be rewritten automatically; update or drop it before "
+                    "running this transformation. No changes have been applied."
+                )
+        recreate_sqls: list[str] = []
+        for trigger in self.triggers:
+            if trigger.sql is None:
+                raise TransformError(
+                    f"Trigger '{trigger.name}' on table '{self.name}' does not have "
+                    "a CREATE TRIGGER statement and cannot be preserved"
+                )
+            rewriter = self._make_rewriter(rename, drop, column_names)
+            try:
+                rewritten = rewriter.rewrite_trigger_sql(trigger.sql, trigger.name)
+            except SchemaRewriteError as ex:
+                raise TransformError(str(ex)) from ex
+            recreate_sqls.append(rewritten)
+        return recreate_sqls
+
+    def _sql_references_changed_column(
+        self, sql: str, rename: dict[str, str], drop: set[str]
+    ) -> bool:
+        from .create_table_parser import (
+            _lex,
+            _meaningful,
+            _unquote,
+            is_identifier_token,
+        )
+
+        changed = {fold_identifier_case(column) for column in set(rename) | set(drop)}
+        tokens = _meaningful(_lex(sql))
+        for index, token in enumerate(tokens):
+            if not is_identifier_token(tokens, index):
+                continue
+            if fold_identifier_case(_unquote(token.text)) in changed:
+                return True
+        return False
+
+    def _rewrite_views(
+        self, rename: dict[str, str], drop: set[str], column_names: list[str]
+    ) -> list[str]:
+        recreate_sqls: list[str] = []
+        for row in self.db.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'view'"
+        ).fetchall():
+            view_name, view_sql = row
+            if view_sql is None:
+                continue
+            rewriter = self._make_rewriter(rename, drop, column_names)
+            try:
+                rewritten, changed = rewriter.rewrite_view_sql(view_sql, view_name)
+            except SchemaRewriteError as ex:
+                raise TransformError(str(ex)) from ex
+            if changed:
+                recreate_sqls.append(f"DROP VIEW IF EXISTS {quote_identifier(view_name)};")
+                recreate_sqls.append(rewritten)
+        return recreate_sqls
 
     def extract(
         self,

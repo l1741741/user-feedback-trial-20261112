@@ -4,6 +4,11 @@
  Changelog
 ===========
 
+Unreleased
+----------
+
+- ``table.transform()`` and ``table.transform_sql()`` now accept ``preserve_schema=True``, and the ``sqlite-utils transform`` command accepts ``--preserve-schema``. With it, ordinary, expression and partial indexes, table triggers (including ``OLD``/``NEW`` references) and local views that reference the table are rewritten so they keep working after column renames, type changes or column reordering. Rewriting is token-aware: string literals, comments, quoted identifiers and same-named columns on other tables are distinguished from real column references. Dropping a column that a dependent object needs, or a statement that cannot be rewritten reliably, raises ``TransformError`` naming the object before the original table is touched, and the operation never silently drops an index, trigger or view. Rows, object names, index uniqueness and foreign keys are preserved on success; on failure the data, ``sqlite_master`` objects and ``foreign_keys``/``defer_foreign_keys`` pragma state are restored. The option defaults to off, leaving the previous behavior unchanged.
+
 .. _v4_2_1:
 
 4.2.1 (2026-08-13)

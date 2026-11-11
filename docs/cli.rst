@@ -2277,6 +2277,9 @@ Every option for this table (with the exception of ``--pk-none``) can be specifi
 ``--no-strict``
     Convert a strict table back to a regular non-strict table.
 
+``--preserve-schema``
+    Rewrite the indexes, triggers and views that reference the table so they keep working after column renames, type changes or column reordering. String literals, comments and same-named columns on other tables are never modified. If dropping a column would break a dependent object, or an object cannot be rewritten reliably, the command fails with a named error and leaves the database unchanged instead of dropping the object. See :ref:`python_api_transform_preserve_schema`.
+
 If you want to see the SQL that will be executed to make the change without actually executing it, add the ``--sql`` flag. For example:
 
 .. code-block:: bash
