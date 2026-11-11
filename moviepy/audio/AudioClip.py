@@ -17,6 +17,33 @@ from moviepy.decorators import convert_path_to_string, requires_duration
 from moviepy.tools import extensions_dict
 
 
+def _sample_count(duration, fps):
+    """Number of samples on the half-open timeline ``[0, duration)``.
+
+    The output sample points are ``i / fps`` for the non-negative integers
+    ``i`` such that ``i / fps < duration``. The count is computed exactly
+    with respect to that rule, robust to floating-point error in
+    ``duration * fps``.
+    """
+    if duration is None or duration <= 0:
+        return 0
+    n = int(duration * fps)
+    # Correct the floating-point rounding of ``duration * fps`` so that
+    # ``n`` is exactly the smallest integer with ``n / fps >= duration``.
+    while n > 0 and (n - 1) / fps >= duration:
+        n -= 1
+    while n / fps < duration:
+        n += 1
+    return n
+
+
+def _validate_fps(fps):
+    """Checks that ``fps`` is a usable (positive, finite) frame rate."""
+    if fps is None or not np.isfinite(fps) or fps <= 0:
+        raise ValueError(f"fps must be a positive finite number, got {fps!r}")
+    return fps
+
+
 class AudioClip(Clip):
     """Base class for audio clips.
 
@@ -92,23 +119,44 @@ class AudioClip(Clip):
         nbytes=2,
         logger=None,
     ):
-        """Iterator that returns the whole sound array of the clip by chunks"""
+        """Iterator that returns the whole sound array of the clip by chunks.
+
+        The clip is sampled on the half-open timeline: sample points are
+        ``i / fps`` for the non-negative integers ``i`` such that
+        ``i / fps < duration``. This exact sequence of samples is cut into
+        consecutive chunks of ``chunksize`` samples (the last chunk may be
+        shorter, chunks are never re-distributed and no empty chunk is
+        generated). A clip with ``duration == 0`` yields no chunk at all.
+        """
         if fps is None:
             fps = self.fps
+        fps = _validate_fps(fps)
         logger = proglog.default_bar_logger(logger)
+
         if chunk_duration is not None:
+            if chunk_duration <= 0:
+                raise ValueError(
+                    f"chunk_duration must be positive, got {chunk_duration!r}"
+                )
             chunksize = int(chunk_duration * fps)
+        if chunksize is None:
+            raise ValueError("Provide either chunksize or chunk_duration")
+        chunksize = int(chunksize)
+        if chunksize <= 0:
+            raise ValueError(f"chunksize must be a positive integer, got {chunksize}")
 
-        total_size = int(fps * self.duration)
+        total_size = _sample_count(self.duration, fps)
+        if total_size == 0:
+            return
 
-        nchunks = total_size // chunksize + 1
-
-        positions = np.linspace(0, total_size, nchunks + 1, endpoint=True, dtype=int)
+        nchunks = (total_size + chunksize - 1) // chunksize
 
         for i in logger.iter_bar(chunk=list(range(nchunks))):
-            size = positions[i + 1] - positions[i]
-            assert size <= chunksize
-            timings = (1.0 / fps) * np.arange(positions[i], positions[i + 1])
+            start = i * chunksize
+            stop = min(start + chunksize, total_size)
+            # Integer sample indices divided by fps: no floating-point
+            # stepping, so the frames yielded never depend on chunksize.
+            timings = np.arange(start, stop) / fps
             yield self.to_soundarray(
                 timings, nbytes=nbytes, quantize=quantize, fps=fps, buffersize=chunksize
             )
@@ -136,19 +184,27 @@ class AudioClip(Clip):
         if tt is None:
             if fps is None:
                 fps = self.fps
+            fps = _validate_fps(fps)
 
-            max_duration = 1 * buffersize / fps
+            max_duration = 1.0 * buffersize / fps
             if self.duration > max_duration:
-                stacker = np.vstack if self.nchannels == 2 else np.hstack
-                return stacker(
-                    tuple(
+                # Same sample sequence as below, rendered chunk by chunk and
+                # stacked along the time axis (axis 0) whatever the number of
+                # channels is.
+                return np.concatenate(
+                    list(
                         self.iter_chunks(
-                            fps=fps, quantize=quantize, nbytes=2, chunksize=buffersize
+                            fps=fps,
+                            quantize=quantize,
+                            nbytes=nbytes,
+                            chunksize=buffersize,
                         )
-                    )
+                    ),
+                    axis=0,
                 )
             else:
-                tt = np.arange(0, self.duration, 1.0 / fps)
+                # Half-open timeline: samples i / fps with i / fps < duration.
+                tt = np.arange(_sample_count(self.duration, fps)) / fps
         """
         elif len(tt)> 1.5*buffersize:
             nchunks = int(len(tt)/buffersize+1)
@@ -323,7 +379,8 @@ class AudioArrayClip(AudioClip):
 
     array
       A Numpy array representing the sound, of size Nx1 for mono,
-      Nx2 for stereo.
+      Nx2 for stereo, or more generally NxC for C channels. A 1-D array
+      of size N is treated as a mono (Nx1) sound.
 
     fps
       Frames per second : speed at which the sound is supposed to be
@@ -333,29 +390,45 @@ class AudioArrayClip(AudioClip):
 
     def __init__(self, array, fps):
         Clip.__init__(self)
+        array = np.asarray(array)
+        if array.ndim == 1:
+            array = array.reshape((len(array), 1))
+        if array.ndim != 2:
+            raise ValueError(
+                "AudioArrayClip expects a 2-D (N, C) array, got shape "
+                f"{array.shape}"
+            )
         self.array = array
         self.fps = fps
+        self.nchannels = array.shape[1]
         self.duration = 1.0 * len(array) / fps
 
         def frame_function(t):
             """Complicated, but must be able to handle the case where t
             is a list of the form sin(t).
+
+            Both scalar and vector times are sampled with
+            ``floor(t * fps)`` and the ``[0, duration)`` boundary is
+            decided on the time itself. Out-of-range times return zeros
+            with the clip's number of channels.
             """
             if isinstance(t, np.ndarray):
-                array_inds = np.round(self.fps * t).astype(int)
-                in_array = (array_inds >= 0) & (array_inds < len(self.array))
-                result = np.zeros((len(t), 2))
-                result[in_array] = self.array[array_inds[in_array]]
+                tt = np.atleast_1d(np.asarray(t, dtype=float))
+                in_array = (tt >= 0) & (tt < self.duration)
+                result = np.zeros((len(tt), self.nchannels))
+                if in_array.any():
+                    inds = np.floor(self.fps * tt[in_array]).astype(int)
+                    # Guard against floating-point error at the very end.
+                    inds = np.minimum(inds, len(self.array) - 1)
+                    result[in_array] = self.array[inds]
                 return result
             else:
-                i = int(self.fps * t)
-                if i < 0 or i >= len(self.array):
-                    return 0 * self.array[0]
-                else:
-                    return self.array[i]
+                if t < 0 or t >= self.duration:
+                    return np.zeros(self.nchannels)
+                i = min(int(np.floor(self.fps * t)), len(self.array) - 1)
+                return self.array[i]
 
         self.frame_function = frame_function
-        self.nchannels = len(list(self.get_frame(0)))
 
 
 class CompositeAudioClip(AudioClip):
@@ -403,16 +476,49 @@ class CompositeAudioClip(AudioClip):
         return (clip.end for clip in self.clips)
 
     def frame_function(self, t):
-        """Renders a frame for the composition for the time ``t``."""
+        """Renders a frame for the composition for the time ``t``.
+
+        Channel handling follows an explicit rule: every clip's frame is
+        normalized to a ``(..., nchannels)`` shape; a mono clip is played
+        identically on all channels of the composition, and any other
+        channel count mismatch raises an error instead of silently
+        broadcasting along the wrong axis.
+        """
         played_parts = [clip.is_playing(t) for clip in self.clips]
 
-        sounds = [
-            clip.get_frame(t - clip.start) * np.array([part]).T
-            for clip, part in zip(self.clips, played_parts)
-            if (part is not False)
-        ]
+        vector_time = isinstance(t, np.ndarray)
+        sounds = []
+        for clip, part in zip(self.clips, played_parts):
+            if part is False:
+                continue
+            sound = np.asarray(clip.get_frame(t - clip.start), dtype=float)
+            if vector_time:
+                if sound.ndim == 1:
+                    # Mono clip sampled at vector times: (N,) -> (N, 1)
+                    sound = sound.reshape((len(sound), 1))
+                sound = sound * np.asarray(part).reshape((-1, 1))
+            else:
+                if sound.ndim == 0:
+                    # Mono clip sampled at a scalar time: () -> (1,)
+                    sound = sound.reshape(1)
+                sound = sound * part
 
-        if isinstance(t, np.ndarray):
+            if sound.shape[-1] == self.nchannels:
+                pass
+            elif sound.shape[-1] == 1:
+                # Explicit broadcast rule: mono is centered, i.e. played
+                # identically on every channel of the composition.
+                sound = np.broadcast_to(
+                    sound, sound.shape[:-1] + (self.nchannels,)
+                )
+            else:
+                raise ValueError(
+                    f"Cannot compose a {sound.shape[-1]}-channel clip into a "
+                    f"{self.nchannels}-channel composition"
+                )
+            sounds.append(sound)
+
+        if vector_time:
             zero = np.zeros((len(t), self.nchannels))
         else:
             zero = np.zeros(self.nchannels)
