@@ -1,0 +1,6 @@
+源码出处：pypa/installer
+固定上游提交：d8b9c446604811a3e3e3b2eec6d0223f51cd867a
+
+此工作副本保留本次任务所需的源码、文档及测试。部分大型示例素材未包含；测试和演示使用本地生成样本。许可证见项目原有LICENSE或LICENCE文件。
+
+运行环境：原生Python虚拟环境.venv，不使用Docker。

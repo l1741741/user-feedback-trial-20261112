@@ -1,0 +1,100 @@
+[build-system]
+build-backend = "flit_core.buildapi"
+requires = [
+    "flit_core<5,>=3.11",
+]
+
+[project]
+name = "installer"
+readme = "README.md"
+authors = [
+    { name = "Pradyun Gedam", email = "pradyunsg@gmail.com" },
+]
+requires-python = ">=3.10"
+license = "MIT"
+classifiers = [
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+]
+dynamic = [
+    "description",
+    "version",
+]
+[project.urls]
+"GitHub" = "https://github.com/pypa/installer"
+
+[tool.flit.sdist]
+include = [
+    "docs/",
+    "tests/",
+]
+
+[tool.ruff]
+fix = true
+extend-exclude = [
+    "noxfile.py",
+    "docs/*",
+]
+
+[tool.ruff.lint]
+extend-select = [
+    "ERA", # eradicate
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "ISC", # flake8-implicit-str-concat
+    "PTH", # flake8-use-pathlib
+    "PIE", # flake8-pie
+    "T20", # flake8-print
+    "SIM", # flake8-simplify
+    "TID", # flake8-tidy-imports
+    "TC",  # flake8-type-checking
+    "FLY", # flynt
+    "I",   # isort
+    "N",   # pep8-naming
+    "W",   # pycodestyle warnings
+    "D",   # pydocstyle
+    "PGH", # pygrep-hooks
+    "UP",  # pyupgrade
+    "RUF", # ruff rules
+]
+ignore = [
+    "D105",
+    "D203",
+    "D213",
+    # https://docs.astral.sh/ruff/formatter/#conflicting-lint-rules
+    "W191",
+    "E111",
+    "E114",
+    "E117",
+    "E501",
+    "N818",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]
+"tools/*" = ["D", "T20"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if TYPE_CHECKING:",
+]
+
+[tool.mypy]
+files = "src,tools"
+strict = true
+warn_unreachable = true
+enable_error_code = [
+    "ignore-without-code",
+    "redundant-expr",
+    "truthy-bool",
+]

@@ -1,0 +1,58 @@
+name: CI
+
+on: [push, pull_request, workflow_dispatch]
+
+env:
+  FORCE_COLOR: 1
+
+concurrency:
+  # prettier-ignore
+  group: >-
+    ${{ github.workflow }}-
+    ${{ github.ref_type }}-
+    ${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  tests:
+    name: tests / ${{ matrix.os }} / ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}-latest
+
+    strategy:
+      matrix:
+        os: [Windows, Ubuntu, MacOS]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
+        include:
+          # Only run PyPy jobs, on Ubuntu.
+          - os: Ubuntu
+            python-version: pypy3.10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Get Python to test against
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+          cache: pip
+
+      - run: pip install nox
+
+      # prettier-ignore
+      - run: >
+          nox
+          -s test-${PYTHON_VERSION}
+          doctest-${PYTHON_VERSION}
+          --error-on-missing-interpreters
+        if: matrix.python-version != 'pypy3.10'
+        shell: bash
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+
+      - run: nox --error-on-missing-interpreters -s test-pypy3 doctest-pypy3
+        if: matrix.python-version == 'pypy3.10'
