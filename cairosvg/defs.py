@@ -366,8 +366,15 @@ def use(surface, node):
         # Explicitely specified
         # http://www.w3.org/TR/SVG11/struct.html#UseElement
         tree.tag = 'svg'
-        if 'width' in node and 'height' in node:
-            tree['width'], tree['height'] = node['width'], node['height']
+        # The width and height of the use element each independently
+        # override the corresponding value of the referenced element. A
+        # single specified dimension must still take effect: the missing one
+        # is resolved later by node_format (100% of the current viewport,
+        # the referenced element's own size, or its viewBox size).
+        if 'width' in node:
+            tree['width'] = node['width']
+        if 'height' in node:
+            tree['height'] = node['height']
 
     surface.draw(tree)
     node.get('fill', None)
