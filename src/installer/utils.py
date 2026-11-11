@@ -5,7 +5,9 @@ import contextlib
 import csv
 import hashlib
 import io
+import ntpath
 import os
+import posixpath
 import re
 import sys
 from collections import namedtuple
@@ -21,6 +23,8 @@ from typing import (
     NewType,
     cast,
 )
+
+from installer.exceptions import UnsafePathError
 
 if TYPE_CHECKING:
     from installer.records import RecordEntry
@@ -75,6 +79,58 @@ _ENTRYPOINT_REGEX = re.compile(
 
 # According to https://www.python.org/dev/peps/pep-0427/#id7
 SCHEME_NAMES = cast("AllSchemes", ("purelib", "platlib", "headers", "scripts", "data"))
+
+
+def validate_installation_path(path: str) -> str:
+    """Validate a wheel-relative path for a strict installation.
+
+    Wheel member paths are POSIX-style paths relative to the archive root. This
+    rejects paths that could escape the target directory, including absolute
+    paths, paths containing ``..`` components, empty paths and paths containing
+    NUL bytes.
+
+    The returned value is the normalised POSIX path, so that several spellings
+    of the same path (for example ``pkg//module.py`` and ``pkg/./module.py``)
+    compare equal for conflict detection.
+
+    :raises UnsafePathError: when the path is not a safe, non-empty relative path.
+    """
+    if not path:
+        raise UnsafePathError("Installation path cannot be empty")
+    if "\x00" in path:
+        raise UnsafePathError(f"Installation path cannot contain NUL bytes: {path!r}")
+    if "\\" in path:
+        # Wheel paths use "/" separators. Backslashes are ambiguous across
+        # platforms and, on Windows, can act as separators or introduce drive
+        # and alternate-data-stream syntax.
+        raise UnsafePathError(
+            f"Installation path cannot contain backslashes: {path!r}"
+        )
+    if posixpath.isabs(path) or ntpath.isabs(path):
+        raise UnsafePathError(f"Installation path cannot be absolute: {path!r}")
+    if any(part == ".." for part in path.split("/")):
+        raise UnsafePathError(
+            f"Installation path cannot contain '..' components: {path!r}"
+        )
+
+    normalized = posixpath.normpath(path)
+    if (
+        normalized in ("", ".", "..")
+        or normalized.startswith("../")
+        or posixpath.isabs(normalized)
+    ):
+        raise UnsafePathError(
+            f"Installation path is empty or escapes its root: {path!r}"
+        )
+
+    if os.name == "nt" and ":" in normalized:  # pragma: no cover
+        raise UnsafePathError(
+            f"Installation path cannot contain a drive or stream separator: "
+            f"{path!r}"
+        )
+
+    return normalized
+
 
 
 def parse_metadata_file(contents: str) -> Message:
