@@ -1,0 +1,4 @@
+源码出处：Zulko/moviepy
+固定上游提交：211e4b15f6ce4f34a6a9efbfff40590e43a68f77
+
+保留完整moviepy包源码及本次运行需要的配置文件，部分大型示例素材和文档未包含。所有测试音频在本地生成。许可证见LICENCE.txt。不使用Docker。

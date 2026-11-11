@@ -1,0 +1,21 @@
+-e .
+decorator==5.3.1
+hypothesis==6.170.15
+imageio==2.38.1
+imageio-ffmpeg==0.8.1
+iniconfig==2.3.1
+numpy==2.5.4
+opencv-python-headless==5.0.0.93
+packaging==26.3
+pillow==13.0.0
+pluggy==1.7.0
+proglog==0.1.12
+pygments==2.21.0
+pytest==9.2.0
+pytest-asyncio==1.4.1.post1
+pytest-mock==3.17.0
+python-dotenv==1.2.4
+sortedcontainers==2.4.0
+testfixtures==12.4.0
+tqdm==4.70.1
+typing-extensions==4.16.0
