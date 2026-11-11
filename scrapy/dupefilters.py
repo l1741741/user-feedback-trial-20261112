@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from io import BytesIO
 from pathlib import Path
 from shutil import rmtree
 from tempfile import mkdtemp
@@ -19,6 +20,7 @@ from scrapy.utils.request import (
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Iterator
+    from typing import BinaryIO
 
     from twisted.internet.defer import Deferred
 
@@ -28,19 +30,83 @@ if TYPE_CHECKING:
 
 
 _SIZE_BYTES = 2
+_FINGERPRINT_ID_FILENAME = "requests.seen.id"
+_REQUESTS_SEEN_MIGRATED = "requests.seen.migrated"
+
+
+class _RequestsSeenCorruptionError(ValueError):
+    """The ``requests.seen`` file contains a complete zero-length record."""
+
+
+class _RequestsSeenReader:
+    """Reads fingerprints from a ``requests.seen`` file.
+
+    Iteration stops at a truncated final record, which an unclean shutdown can
+    leave behind, and exposes the offset up to which the file is valid. A
+    complete zero-length record is corruption and raises instead of being
+    skipped, since skipping it would misalign every record that follows.
+    """
+
+    def __init__(self, file: BinaryIO, path: Path | None = None) -> None:
+        self._file = file
+        self._path = path
+        self.valid_end = 0
+
+    def __iter__(self) -> Iterator[bytes]:
+        self._file.seek(0)
+        while True:
+            offset = self._file.tell()
+            header = self._file.read(_SIZE_BYTES)
+            if len(header) < _SIZE_BYTES:
+                return
+            size = int.from_bytes(header, "big")
+            if not size:
+                raise _RequestsSeenCorruptionError(
+                    f"{self._path or 'requests.seen'} is corrupt:"
+                    f" zero-length fingerprint record at offset {offset}"
+                )
+            fingerprint = self._file.read(size)
+            if len(fingerprint) < size:
+                return
+            self.valid_end = self._file.tell()
+            yield fingerprint
 
 
 def _read_fingerprints(data: bytes) -> Iterator[bytes]:
-    pos = 0
-    while pos + _SIZE_BYTES <= len(data):
-        size = int.from_bytes(data[pos : pos + _SIZE_BYTES], "big")
-        pos += _SIZE_BYTES
-        fingerprint = data[pos : pos + size]
-        if len(fingerprint) < size:
-            # Truncated by an unclean shutdown.
-            return
-        yield fingerprint
-        pos += size
+    """Yield the complete fingerprints stored in *data*."""
+    yield from _RequestsSeenReader(BytesIO(data))
+
+
+def _read_fingerprint_id(path: Path) -> str | None:
+    try:
+        value = Path(path, _FINGERPRINT_ID_FILENAME).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    return value.strip() or None
+
+
+def _write_fingerprint_id(path: Path, fingerprint_id: str) -> None:
+    id_path = Path(path, _FINGERPRINT_ID_FILENAME)
+    # Write to a temporary file first so that a crash cannot leave a partially
+    # written ID behind, which would otherwise be taken as the recorded one.
+    tmp_path = id_path.with_name(f"{id_path.name}.tmp")
+    tmp_path.write_text(fingerprint_id, encoding="utf-8")
+    tmp_path.replace(id_path)
+
+
+def _check_fingerprint_id(path: Path, fingerprint_id: str | None) -> str | None:
+    recorded = _read_fingerprint_id(path)
+    if recorded is None:
+        if fingerprint_id is not None:
+            _write_fingerprint_id(path, fingerprint_id)
+        return fingerprint_id
+    if fingerprint_id is not None and fingerprint_id != recorded:
+        raise ValueError(
+            "JOBDIR_FINGERPRINTER_ID mismatch:"
+            f" the job directory {str(path)!r} recorded fingerprint ID"
+            f" {recorded!r}, which does not match {fingerprint_id!r}"
+        )
+    return recorded
 
 
 class BaseDupeFilter:
@@ -95,12 +161,14 @@ class RFPDupeFilter(BaseDupeFilter):
         debug: bool = False,
         *,
         fingerprinter: RequestFingerprinterProtocol | None = None,
+        fingerprint_id: str | None = None,
     ) -> None:
         self.file = None
         self.fingerprinter: RequestFingerprinterProtocol = (
             fingerprinter or RequestFingerprinter()
         )
         self._fingerprints: set[bytes] = set()
+        self._fingerprint_id = fingerprint_id
         self.logdupes = True
         self.debug = debug
         self.logger = logging.getLogger(__name__)
@@ -115,9 +183,21 @@ class RFPDupeFilter(BaseDupeFilter):
                 stacklevel=2,
             )
         if path:
-            self.file = Path(path, "requests.seen").open("a+b")
-            self.file.seek(0)
-            self._fingerprints.update(_read_fingerprints(self.file.read()))
+            self._fingerprint_id = _check_fingerprint_id(Path(path), fingerprint_id)
+            seen_path = Path(path, "requests.seen")
+            self.file = seen_path.open("a+b")
+            try:
+                reader = _RequestsSeenReader(self.file, seen_path)
+                self._fingerprints.update(reader)
+                if reader.valid_end != self.file.tell():
+                    # Drop a record left incomplete by an unclean shutdown so
+                    # that the next record is written at a valid offset.
+                    self.file.seek(reader.valid_end)
+                    self.file.truncate()
+            except BaseException:
+                self.file.close()
+                self.file = None
+                raise
 
     @property
     def fingerprints(self) -> frozenset[str]:
@@ -131,11 +211,13 @@ class RFPDupeFilter(BaseDupeFilter):
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
         debug = crawler.settings.getbool("DUPEFILTER_DEBUG")
-        return cls(
-            _job_dir(crawler.settings),
-            debug,
-            fingerprinter=crawler.request_fingerprinter,
-        )
+        kwargs: dict[str, Any] = {
+            "fingerprinter": crawler.request_fingerprinter,
+        }
+        fingerprint_id = crawler.settings.get("JOBDIR_FINGERPRINTER_ID")
+        if fingerprint_id is not None:
+            kwargs["fingerprint_id"] = str(fingerprint_id)
+        return cls(_job_dir(crawler.settings), debug, **kwargs)
 
     def request_seen(self, request: Request) -> bool:
         fp = self._fingerprint(request)
@@ -203,21 +285,70 @@ class DiskDupeFilter(RFPDupeFilter):
         debug: bool = False,
         *,
         fingerprinter: RequestFingerprinterProtocol | None = None,
+        fingerprint_id: str | None = None,
     ) -> None:
-        super().__init__(debug=debug, fingerprinter=fingerprinter)
+        super().__init__(
+            debug=debug,
+            fingerprinter=fingerprinter,
+            fingerprint_id=fingerprint_id,
+        )
         if path:
             self._tempdir: str | None = None
+            self._fingerprint_id = _check_fingerprint_id(Path(path), fingerprint_id)
+            seen_path: Path | None = Path(path, "requests.seen")
+            db_path = Path(path, "requests.seen.db")
         else:
             self._tempdir = path = mkdtemp()
-        self._db = sqlite3.connect(Path(path, "requests.seen.db"))
-        self._db.execute("PRAGMA journal_mode=WAL").close()
-        self._db.execute("PRAGMA synchronous=NORMAL")
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS seen (fingerprint BLOB PRIMARY KEY)"
-            " WITHOUT ROWID"
-        )
+            seen_path = None
+            db_path = Path(path, "requests.seen.db")
+        self._db = sqlite3.connect(db_path)
+        try:
+            self._db.execute("PRAGMA journal_mode=WAL").close()
+            self._db.execute("PRAGMA synchronous=NORMAL")
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS seen (fingerprint BLOB PRIMARY KEY)"
+                " WITHOUT ROWID"
+            )
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,"
+                " value TEXT NOT NULL) WITHOUT ROWID"
+            )
+            self._db.commit()
+            if seen_path is not None:
+                self._migrate_requests_seen(seen_path)
+        except BaseException:
+            self._db.close()
+            raise
         self._sync_every = 0
         self._changes = 0
+
+    def _migrate_requests_seen(self, seen_path: Path) -> None:
+        """Import the binary ``requests.seen`` file into SQLite, once.
+
+        Records are streamed and inserted in a single transaction together
+        with the completion marker, so an interrupted migration leaves neither
+        imported rows nor a marker behind and can be retried.
+        """
+        if not seen_path.exists() or self._requests_seen_migrated():
+            return
+        with seen_path.open("rb") as file:
+            reader = _RequestsSeenReader(file, seen_path)
+            with self._db:
+                for fingerprint in reader:
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO seen (fingerprint) VALUES (?)",
+                        (fingerprint,),
+                    )
+                self._db.execute(
+                    "INSERT INTO metadata (key, value) VALUES (?, ?)",
+                    (_REQUESTS_SEEN_MIGRATED, "1"),
+                )
+
+    def _requests_seen_migrated(self) -> bool:
+        row = self._db.execute(
+            "SELECT 1 FROM metadata WHERE key = ?", (_REQUESTS_SEEN_MIGRATED,)
+        ).fetchone()
+        return row is not None
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:

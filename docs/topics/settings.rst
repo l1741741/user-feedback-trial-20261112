@@ -1714,6 +1714,32 @@ A string indicating the directory for storing the state of a crawl when
 :ref:`pausing and resuming crawls <topics-jobs>`.
 
 
+.. setting:: JOBDIR_FINGERPRINTER_ID
+
+JOBDIR_FINGERPRINTER_ID
+-----------------------
+
+.. versionadded:: 2.21.0
+
+Default: ``None``
+
+An identifier for the request fingerprinting policy used with
+:setting:`JOBDIR`.
+
+On the first run with this setting set, Scrapy records the value in the job
+directory. Later runs must use the same value; a different value raises an
+error before any seen request data is changed, which prevents resuming a job
+whose requests were filtered with a different fingerprinting policy. When
+unset, job directories created by earlier versions keep working as before.
+
+This setting applies to :class:`~scrapy.dupefilters.RFPDupeFilter` and
+:class:`~scrapy.dupefilters.DiskDupeFilter`. A job directory created by
+:class:`~scrapy.dupefilters.RFPDupeFilter` can be resumed with
+:class:`~scrapy.dupefilters.DiskDupeFilter` using the same identifier; the
+existing ``requests.seen`` records are imported into the database on first
+use.
+
+
 .. setting:: JOBDIR_SYNC_EVERY
 
 JOBDIR_SYNC_EVERY
