@@ -1,0 +1,6 @@
+源码出处：scrapy/scrapy
+固定上游提交：f7b1fd3f2f57c9d01f45276c1c3194f58cb0c1ea
+
+此工作副本保留本次任务所需的源码、文档及测试。部分大型示例素材未包含；测试和演示使用本地生成样本。许可证见项目原有LICENSE或LICENCE文件。
+
+运行环境：原生Python虚拟环境.venv，不使用Docker。
