@@ -56,3 +56,6 @@ urllib3==2.8.0
 w3lib==2.6.0
 yarl==1.25.1
 zope-interface==8.7
+pyftpdlib==2.2.0
+pyasynchat==1.0.5
+pyasyncore==1.0.5
