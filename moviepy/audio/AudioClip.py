@@ -406,16 +406,27 @@ class CompositeAudioClip(AudioClip):
         """Renders a frame for the composition for the time ``t``."""
         played_parts = [clip.is_playing(t) for clip in self.clips]
 
-        sounds = [
-            clip.get_frame(t - clip.start) * np.array([part]).T
-            for clip, part in zip(self.clips, played_parts)
-            if (part is not False)
-        ]
+        sounds = []
+        for clip, part in zip(self.clips, played_parts):
+            if part is False:
+                continue
+            frame = clip.get_frame(t - clip.start)
+            if self.nchannels == 1:
+                # Mono frames are scalars or 1D arrays. The playing mask must
+                # keep that shape instead of growing a trailing axis which
+                # would broadcast against the time axis.
+                sounds.append(frame * np.asarray(part))
+            else:
+                sounds.append(frame * np.array([part]).T)
 
         if isinstance(t, np.ndarray):
-            zero = np.zeros((len(t), self.nchannels))
+            zero = (
+                np.zeros(len(t))
+                if self.nchannels == 1
+                else np.zeros((len(t), self.nchannels))
+            )
         else:
-            zero = np.zeros(self.nchannels)
+            zero = 0.0 if self.nchannels == 1 else np.zeros(self.nchannels)
 
         return zero + sum(sounds)
 

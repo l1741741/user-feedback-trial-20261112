@@ -18,6 +18,7 @@ class AudioFadeIn(Effect):
 
     duration : float
         How long does it take for the sound to return to its normal level.
+        Must be a finite, strictly positive number.
 
     Examples
     --------
@@ -32,16 +33,27 @@ class AudioFadeIn(Effect):
 
     def __post_init__(self):
         self.duration = convert_to_seconds(self.duration)
+        if not isinstance(
+            self.duration, (int, float, np.number)
+        ) or not np.isfinite(self.duration):
+            raise ValueError(
+                "AudioFadeIn 'duration' must be a finite number, got %r"
+                % (self.duration,)
+            )
+        if self.duration <= 0:
+            raise ValueError(
+                "AudioFadeIn 'duration' must be strictly positive, got %r"
+                % (self.duration,)
+            )
 
-    def _mono_factor_getter(self):
-        return lambda t, duration: np.minimum(t / duration, 1)
+    def _get_factor(self, t):
+        """Fade-in gain at local time ``t``.
 
-    def _stereo_factor_getter(self, nchannels):
-        def getter(t, duration):
-            factor = np.minimum(t / duration, 1)
-            return np.array([factor for _ in range(nchannels)]).T
-
-        return getter
+        Works for scalar times as well as numpy array times. The result has
+        the same shape as ``t`` and is clipped to ``[0, 1]`` so times outside
+        the fade-in window are never amplified nor phase-inverted.
+        """
+        return np.clip(np.asarray(t, dtype=float) / self.duration, 0, 1)
 
     @audio_video_effect
     def apply(self, clip: Clip) -> Clip:
@@ -49,12 +61,13 @@ class AudioFadeIn(Effect):
         if clip.duration is None:
             raise ValueError("Attribute 'duration' not set")
 
-        get_factor = (
-            self._mono_factor_getter()
-            if clip.nchannels == 1
-            else self._stereo_factor_getter(clip.nchannels)
-        )
+        def filter_frame(get_frame, t):
+            frame = get_frame(t)
+            factor = self._get_factor(t)
+            if np.ndim(frame) > np.ndim(factor):
+                # Multi-channel frame (..., C): apply the gain along the
+                # time axis, never along the channel axis.
+                factor = np.expand_dims(factor, axis=-1)
+            return factor * frame
 
-        return clip.transform(
-            lambda get_frame, t: get_factor(t, self.duration) * get_frame(t),
-        )
+        return clip.transform(filter_frame)
