@@ -3,6 +3,19 @@
 ======
 
 
+Unreleased
+==========
+
+* Add optional ``resource_policy`` parameter to ``svg2png``, ``svg2pdf``,
+  ``svg2ps``, ``svg2eps`` and ``svg2svg`` for converting untrusted SVG
+  documents. ``cairosvg.ResourcePolicy(root=…, allow_data=…,
+  max_resource_bytes=…)`` forbids network protocols, confines file reads to
+  the real location of a caller-defined root directory (resisting ``..``,
+  percent-encoding and symlink escapes) and limits resource sizes, raising
+  the public ``cairosvg.ResourceAccessError`` on denial. Not passing a
+  policy keeps the previous behavior.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

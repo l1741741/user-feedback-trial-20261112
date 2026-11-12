@@ -354,7 +354,16 @@ class Tree(Node):
         tree_cache = kwargs.get('tree_cache')
         element_id = None
 
-        self.url_fetcher = kwargs.get('url_fetcher', fetch)
+        resource_policy = kwargs.get('resource_policy')
+        if resource_policy is not None:
+            # The policy wraps the user-defined fetcher (or the default
+            # reader) so that every resource loaded through this tree,
+            # including nested SVG and CSS documents, goes through the same
+            # policy checks.
+            self.url_fetcher = resource_policy.wrap_fetcher(
+                kwargs.get('url_fetcher'))
+        else:
+            self.url_fetcher = kwargs.get('url_fetcher', fetch)
 
         if bytestring is not None:
             self.url = url
@@ -397,7 +406,8 @@ class Tree(Node):
                 forbid_external=not unsafe)
 
         # Don’t allow fetching external files unless explicitly asked for
-        if 'url_fetcher' not in kwargs and not unsafe:
+        if ('url_fetcher' not in kwargs and resource_policy is None
+                and not unsafe):
             self.url_fetcher = safe_fetch
 
         self.xml_tree = tree

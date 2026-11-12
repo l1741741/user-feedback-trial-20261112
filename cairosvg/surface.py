@@ -98,7 +98,7 @@ class Surface(object):
                 parent_width=None, parent_height=None, scale=1, unsafe=False,
                 background_color=None, negate_colors=False,
                 invert_images=False, write_to=None, output_width=None,
-                output_height=None, **kwargs):
+                output_height=None, resource_policy=None, **kwargs):
         """Convert an SVG document to the format for this class.
 
         Specify the input by passing one of these:
@@ -119,6 +119,13 @@ class Surface(object):
                        This does NOT restrict fetching of the main SVG input
                        specified via the ``url`` parameter.
                        Applications should validate input URLs to prevent SSRF.
+        :param resource_policy: An optional
+                                :class:`cairosvg.ResourcePolicy` instance
+                                restricting which external resources (the root
+                                document URL, images, ``use`` references, CSS
+                                ``@import`` and ``url()`` references) may be
+                                loaded. Denied accesses raise
+                                :class:`cairosvg.ResourceAccessError`.
 
 
         Specifiy the output with:
@@ -132,7 +139,7 @@ class Surface(object):
         """
         tree = Tree(
             bytestring=bytestring, file_obj=file_obj, url=url, unsafe=unsafe,
-            **kwargs)
+            resource_policy=resource_policy, **kwargs)
         output = write_to or io.BytesIO()
         instance = cls(
             tree, output, dpi, None, parent_width, parent_height, scale,
