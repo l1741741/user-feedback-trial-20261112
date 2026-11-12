@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import email.utils
 import gc
+import gzip
 import logging
+import os
 import pickle
 import shutil
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -26,6 +30,7 @@ from scrapy.utils.asyncio import sleep
 from scrapy.utils.defer import deferred_from_coro, maybe_deferred_to_future
 from scrapy.utils.misc import build_from_crawler, load_object
 from scrapy.utils.test import get_crawler
+from w3lib.http import headers_dict_to_raw
 from tests.utils.decorators import coroutine_test
 
 if TYPE_CHECKING:
@@ -167,10 +172,11 @@ class StorageTestMixin(TestBase):
 
             caplog.clear()
             with caplog.at_level(logging.WARNING):
+                # The storage turns the damaged entry into a cache miss
+                # instead of letting the exception reach the crawl.
                 assert await mw.process_request(self.request) is None
 
             assert "treating it as a cache miss" in caplog.text
-            assert mw.crawler.stats.get_value("httpcache/retrieve_error") == 1
             assert mw.crawler.stats.get_value("httpcache/miss") == 1
 
             # Storing the response again replaces the corrupted cache entry.
@@ -190,7 +196,6 @@ class StorageTestMixin(TestBase):
             with pytest.raises(IgnoreRequest):
                 await mw.process_request(self.request)
 
-            assert mw.crawler.stats.get_value("httpcache/retrieve_error") == 1
             assert mw.crawler.stats.get_value("httpcache/ignore") == 1
 
     def test_storage_no_content_type_header(self):
@@ -858,13 +863,27 @@ class RFC2616PolicyTestMixin(PolicyTestMixin):
 class FilesystemStorageTestMixin(StorageTestMixin):
     storage_class = "scrapy.extensions.httpcache.FilesystemCacheStorage"
 
+    def _entry_dir(self, storage: Any, spider: Spider, request: Request) -> Path:
+        return Path(storage._get_request_path(spider, request))
+
+    def _generation_dir(
+        self, storage: Any, spider: Spider, request: Request
+    ) -> Path | None:
+        """Return the directory holding the published cache generation, or
+        None when the entry uses the legacy layout or has no pointer."""
+        entry_dir = self._entry_dir(storage, spider, request)
+        pointer = entry_dir / storage._POINTER_FILENAME
+        if not pointer.exists():
+            return None
+        return entry_dir / pointer.read_text(encoding="utf-8").strip()
+
     def _corrupt_cache_entry(self, storage, spider, request) -> None:
-        rpath = Path(storage._get_request_path(spider, request))
-        (rpath / "response_body").unlink()
+        generation_dir = self._generation_dir(storage, spider, request)
+        (generation_dir / "response_body").unlink()
 
     def _downgrade_cache_entry(self, storage, spider, request) -> None:
-        rpath = Path(storage._get_request_path(spider, request))
-        (rpath / "response_data").unlink()
+        generation_dir = self._generation_dir(storage, spider, request)
+        (generation_dir / "response_data").unlink()
 
     @pytest.mark.parametrize("filename", ["request_headers", "response_headers"])
     def test_storage_header_file(self, filename: str) -> None:
@@ -883,13 +902,49 @@ class FilesystemStorageTestMixin(StorageTestMixin):
         response = Response("http://www.example.com", headers=headers)
         with self._storage() as (storage, crawler):
             storage.store_response(crawler.spider, request, response)
-            rpath = Path(storage._get_request_path(crawler.spider, request))
-            with storage._open(rpath / filename, "rb") as f:
+            generation_dir = self._generation_dir(storage, crawler.spider, request)
+            with storage._open(generation_dir / filename, "rb") as f:
                 assert f.read() == expected
 
 
 class DbmStorageTestMixin(StorageTestMixin):
     storage_class = "scrapy.extensions.httpcache.DbmCacheStorage"
+
+    # DBM storage lets the middleware handle unreadable entries itself.
+    @coroutine_test
+    async def test_corrupted_cache_entry_is_a_miss(self, caplog):
+        with self._middleware() as mw:
+            spider = mw.crawler.spider
+            assert spider
+            mw.storage.store_response(spider, self.request, self.response)
+            self._corrupt_cache_entry(mw.storage, spider, self.request)
+
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                assert await mw.process_request(self.request) is None
+
+            assert "treating it as a cache miss" in caplog.text
+            assert mw.crawler.stats.get_value("httpcache/retrieve_error") == 1
+            assert mw.crawler.stats.get_value("httpcache/miss") == 1
+
+            mw.storage.store_response(spider, self.request, self.response)
+            self.assertEqualResponse(
+                self.response, mw.storage.retrieve_response(spider, self.request)
+            )
+
+    @coroutine_test
+    async def test_corrupted_cache_entry_ignore_missing(self):
+        with self._middleware(HTTPCACHE_IGNORE_MISSING=True) as mw:
+            spider = mw.crawler.spider
+            assert spider
+            mw.storage.store_response(spider, self.request, self.response)
+            self._corrupt_cache_entry(mw.storage, spider, self.request)
+
+            with pytest.raises(IgnoreRequest):
+                await mw.process_request(self.request)
+
+            assert mw.crawler.stats.get_value("httpcache/retrieve_error") == 1
+            assert mw.crawler.stats.get_value("httpcache/ignore") == 1
 
     def _corrupt_cache_entry(self, storage, spider, request) -> None:
         key = storage._fingerprinter.fingerprint(request).hex()
@@ -944,8 +999,489 @@ class TestFilesystemStorageGzipWithDummyPolicy(TestFilesystemStorageWithDummyPol
 
     def _corrupt_cache_entry(self, storage, spider, request) -> None:
         # A spider killed while writing a gzip file leaves it truncated.
-        body_path = Path(storage._get_request_path(spider, request), "response_body")
+        body_path = self._generation_dir(storage, spider, request) / "response_body"
         body_path.write_bytes(body_path.read_bytes()[:-5])
+
+
+class AtomicFilesystemStorageTestMixin:
+    """Atomic-publish and corruption-isolation behavior of the filesystem
+    cache storage. The same tests run with and without HTTPCACHE_GZIP."""
+
+    storage_class = "scrapy.extensions.httpcache.FilesystemCacheStorage"
+    use_gzip: bool = False
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.request = Request("http://www.example.com", headers={"User-Agent": "test"})
+        self.response = Response(
+            "http://www.example.com",
+            headers={"Content-Type": "text/html"},
+            body=b"test body",
+            status=202,
+        )
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir)
+
+    @contextmanager
+    def _storage(self, **new_settings: Any):
+        settings = {
+            "HTTPCACHE_ENABLED": True,
+            "HTTPCACHE_DIR": self.tmpdir,
+            "HTTPCACHE_GZIP": self.use_gzip,
+            "HTTPCACHE_POLICY": "scrapy.extensions.httpcache.DummyPolicy",
+            "HTTPCACHE_STORAGE": self.storage_class,
+        }
+        settings.update(new_settings)
+        crawler = get_crawler(Spider, settings)
+        spider = crawler._create_spider("example.com")
+        storage = load_object(self.storage_class)(crawler.settings)
+        storage.open_spider(spider)
+        try:
+            yield storage, spider
+        finally:
+            storage.close_spider(spider)
+
+    def _entry_dir(self, storage: Any, spider: Spider, request: Request) -> Path:
+        return Path(storage._get_request_path(spider, request))
+
+    def _write_legacy_entry(
+        self, storage: Any, spider: Spider, request: Request, response: Response
+    ) -> Path:
+        """Write an entry using the pre-generation, flat layout."""
+        entry_dir = self._entry_dir(storage, spider, request)
+        entry_dir.mkdir(parents=True)
+        metadata = {
+            "url": request.url,
+            "method": request.method,
+            "status": response.status,
+            "response_url": response.url,
+            "timestamp": time.time(),
+        }
+        with storage._open(entry_dir / "meta", "wb") as f:
+            f.write(repr(metadata).encode())
+        with storage._open(entry_dir / "pickled_meta", "wb") as f:
+            pickle.dump(metadata, f, protocol=4)
+        with storage._open(entry_dir / "response_headers", "wb") as f:
+            f.write(headers_dict_to_raw(response.headers))
+        with storage._open(entry_dir / "response_body", "wb") as f:
+            f.write(response.body)
+        with storage._open(entry_dir / "request_headers", "wb") as f:
+            f.write(headers_dict_to_raw(request.headers))
+        with storage._open(entry_dir / "request_body", "wb") as f:
+            f.write(request.body)
+        return entry_dir
+
+    def test_normal_hit_publishes_pointer_and_generation(self):
+        with self._storage() as (storage, spider):
+            assert storage.retrieve_response(spider, self.request) is None
+            storage.store_response(spider, self.request, self.response)
+
+            entry_dir = self._entry_dir(storage, spider, self.request)
+            pointer = entry_dir / storage._POINTER_FILENAME
+            assert pointer.exists()
+            generation_dir = entry_dir / pointer.read_text(encoding="utf-8").strip()
+            assert generation_dir.is_dir()
+            # The temporary generation directory is renamed on completion.
+            assert not list(entry_dir.glob("*.tmp"))
+            for name in (
+                "meta",
+                "pickled_meta",
+                "response_headers",
+                "response_body",
+                "response_data",
+                "request_headers",
+                "request_body",
+            ):
+                assert (generation_dir / name).exists()
+
+            cached = storage.retrieve_response(spider, self.request.copy())
+            assert isinstance(cached, HtmlResponse)
+            assert cached.url == self.response.url
+            assert cached.status == self.response.status
+            assert cached.headers == self.response.headers
+            assert cached.body == self.response.body
+
+    @pytest.mark.parametrize(
+        "fail_at",
+        ["meta", "pickled_meta", "response_headers", "response_body", "response_data"],
+    )
+    def test_write_failure_keeps_previous_response(self, fail_at: str):
+        with self._storage() as (storage, spider):
+            storage.store_response(spider, self.request, self.response)
+            entry_dir = self._entry_dir(storage, spider, self.request)
+            old_pointer = (entry_dir / storage._POINTER_FILENAME).read_text()
+            old_generation = entry_dir / old_pointer
+            assert old_generation.is_dir()
+
+            new_response = self.response.replace(body=b"brand new body")
+            real_open = storage._open
+
+            def failing_open(path: Any, mode: str = "rb", *args: Any, **kwargs: Any):
+                if "w" in mode and Path(path).name == fail_at:
+                    raise OSError(f"injected failure while writing {fail_at}")
+                return real_open(path, mode, *args, **kwargs)
+
+            with mock.patch.object(storage, "_open", side_effect=failing_open):
+                with pytest.raises(OSError, match="injected failure"):
+                    storage.store_response(spider, self.request, new_response)
+
+            # The pointer still names the old, complete generation.
+            assert (entry_dir / storage._POINTER_FILENAME).read_text() == old_pointer
+            assert old_generation.is_dir()
+            # No half-written generation or pointer temp file is left behind.
+            assert not list(entry_dir.glob("*.tmp"))
+            cached = storage.retrieve_response(spider, self.request.copy())
+            assert cached is not None
+            assert cached.body == self.response.body
+
+    def test_failed_first_write_is_not_a_cache_entry(self):
+        with self._storage() as (storage, spider):
+            real_open = storage._open
+
+            def failing_open(path: Any, mode: str = "rb", *args: Any, **kwargs: Any):
+                if "w" in mode and Path(path).name == "response_body":
+                    raise OSError("injected failure")
+                return real_open(path, mode, *args, **kwargs)
+
+            with mock.patch.object(storage, "_open", side_effect=failing_open):
+                with pytest.raises(OSError, match="injected failure"):
+                    storage.store_response(spider, self.request, self.response)
+
+            entry_dir = self._entry_dir(storage, spider, self.request)
+            assert not (entry_dir / storage._POINTER_FILENAME).exists()
+            assert not list(entry_dir.glob("*.tmp"))
+            assert storage.retrieve_response(spider, self.request) is None
+
+    def test_interrupted_tmp_generation_is_pruned_on_next_store(self):
+        with self._storage() as (storage, spider):
+            storage.store_response(spider, self.request, self.response)
+            entry_dir = self._entry_dir(storage, spider, self.request)
+            stale_tmp = entry_dir / (
+                storage._new_generation_name() + storage._TMP_SUFFIX
+            )
+            stale_tmp.mkdir()
+            (stale_tmp / "partial").write_bytes(b"x")
+
+            storage.store_response(
+                spider, self.request, self.response.replace(body=b"second")
+            )
+            assert not stale_tmp.exists()
+            cached = storage.retrieve_response(spider, self.request)
+            assert cached is not None and cached.body == b"second"
+
+    @pytest.mark.parametrize(
+        "damage",
+        [
+            "missing_body",
+            "missing_headers",
+            "garbage_pickle",
+            "wrong_pickle_type",
+            "missing_generation",
+            "invalid_pointer",
+            "truncated_gzip",
+        ],
+    )
+    def test_corrupted_entry_is_a_miss_and_isolated(self, damage: str, caplog):
+        other_request = Request("http://www.example.com/other")
+        other_response = Response(other_request.url, body=b"other body")
+        with self._storage() as (storage, spider):
+            storage.store_response(spider, self.request, self.response)
+            storage.store_response(spider, other_request, other_response)
+            entry_dir = self._entry_dir(storage, spider, self.request)
+            pointer = entry_dir / storage._POINTER_FILENAME
+            generation = entry_dir / pointer.read_text(encoding="utf-8").strip()
+
+            if damage == "missing_body":
+                (generation / "response_body").unlink()
+            elif damage == "missing_headers":
+                (generation / "response_headers").unlink()
+            elif damage == "truncated_gzip":
+                if not self.use_gzip:
+                    pytest.skip("gzip-only damage")
+                body = generation / "response_body"
+                body.write_bytes(body.read_bytes()[:-5])
+            elif damage == "garbage_pickle":
+                with open(generation / "pickled_meta", "wb") as f:
+                    f.write(b"not a pickle at all")
+            elif damage == "wrong_pickle_type":
+                with open(generation / "response_data", "wb") as f:
+                    pickle.dump(["not", "a", "dict"], f, protocol=4)
+            elif damage == "missing_generation":
+                shutil.rmtree(generation)
+            elif damage == "invalid_pointer":
+                pointer.write_text("../escape", encoding="utf-8")
+
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                assert storage.retrieve_response(spider, self.request) is None
+
+            key = storage._fingerprinter.fingerprint(self.request).hex()
+            assert key in caplog.text
+            assert "treating it as a cache miss" in caplog.text
+
+            if damage == "invalid_pointer":
+                # The pointer names an unsafe path, so no generation is
+                # removed; the bad pointer itself stays until a fresh store.
+                assert pointer.exists()
+                assert generation.exists()
+            else:
+                # The damaged generation of this key is cleaned up, but the
+                # other request's entry is completely untouched.
+                assert not pointer.exists()
+                assert not generation.exists()
+            other_cached = storage.retrieve_response(spider, other_request)
+            assert other_cached is not None
+            assert other_cached.body == other_response.body
+
+            # Re-storing the damaged key works and yields a readable entry.
+            storage.store_response(spider, self.request, self.response)
+            cached = storage.retrieve_response(spider, self.request)
+            assert cached is not None
+            assert cached.body == self.response.body
+
+    def test_legacy_flat_layout_is_still_read(self):
+        with self._storage() as (storage, spider):
+            entry_dir = self._write_legacy_entry(
+                storage, spider, self.request, self.response
+            )
+            assert not (entry_dir / storage._POINTER_FILENAME).exists()
+
+            # The legacy layout has no response_data file, like Scrapy 2.14.
+            assert not (entry_dir / "response_data").exists()
+            cached = storage.retrieve_response(spider, self.request.copy())
+            assert isinstance(cached, HtmlResponse)
+            assert cached.url == self.response.url
+            assert cached.status == self.response.status
+            assert cached.headers == self.response.headers
+            assert cached.body == self.response.body
+
+            # A legacy entry that does carry response_data reads it too.
+            legacy_data = {"_class": "scrapy.http.Response", "flags": ["legacy"]}
+            with storage._open(entry_dir / "response_data", "wb") as f:
+                pickle.dump(legacy_data, f, protocol=4)
+            cached = storage.retrieve_response(spider, self.request.copy())
+            assert cached is not None
+            assert cached.flags == ["legacy"]
+            (entry_dir / "response_data").unlink()
+            cached = storage.retrieve_response(spider, self.request.copy())
+            assert cached is not None and cached.body == self.response.body
+
+    def test_legacy_entry_is_not_deleted_when_damaged(self):
+        with self._storage() as (storage, spider):
+            entry_dir = self._write_legacy_entry(
+                storage, spider, self.request, self.response
+            )
+            (entry_dir / "response_body").unlink()
+
+            assert storage.retrieve_response(spider, self.request) is None
+            # The legacy files on disk are left for the operator to inspect.
+            assert (entry_dir / "pickled_meta").exists()
+            assert not (entry_dir / storage._POINTER_FILENAME).exists()
+
+    def test_legacy_entry_respects_the_expiration_policy(self):
+        with self._storage(HTTPCACHE_EXPIRATION_SECS=100) as (storage, spider):
+            self._write_legacy_entry(storage, spider, self.request, self.response)
+            assert storage.retrieve_response(spider, self.request) is not None
+
+            future = time.time() + storage.expiration_secs + 1
+            with mock.patch("scrapy.extensions.httpcache.time", return_value=future):
+                assert storage.retrieve_response(spider, self.request) is None
+            # Expiry does not delete the legacy files on disk.
+            entry_dir = self._entry_dir(storage, spider, self.request)
+            assert (entry_dir / "pickled_meta").exists()
+
+    def test_pointer_tmp_failure_leaves_previous_response(self):
+        with self._storage() as (storage, spider):
+            storage.store_response(spider, self.request, self.response)
+            entry_dir = self._entry_dir(storage, spider, self.request)
+            old_pointer = (entry_dir / storage._POINTER_FILENAME).read_text()
+
+            real_replace = os.replace
+
+            def failing_replace(src: Any, dst: Any) -> None:
+                if Path(dst).name == storage._POINTER_FILENAME:
+                    raise OSError("injected pointer publish failure")
+                real_replace(src, dst)
+
+            with mock.patch(
+                "scrapy.extensions.httpcache.os.replace",
+                side_effect=failing_replace,
+            ):
+                with pytest.raises(OSError, match="pointer publish"):
+                    storage.store_response(
+                        spider,
+                        self.request,
+                        self.response.replace(body=b"unpublished"),
+                    )
+
+            assert (entry_dir / storage._POINTER_FILENAME).read_text() == old_pointer
+            assert not list(entry_dir.glob("*.tmp"))
+            cached = storage.retrieve_response(spider, self.request)
+            assert cached is not None and cached.body == self.response.body
+
+    def test_publishing_new_generation_replaces_old_one(self):
+        with self._storage() as (storage, spider):
+            storage.store_response(spider, self.request, self.response)
+            entry_dir = self._entry_dir(storage, spider, self.request)
+            first_generation = (
+                entry_dir / (entry_dir / storage._POINTER_FILENAME).read_text()
+            )
+
+            new_response = self.response.replace(
+                body=b"second body", status=201, headers={"Content-Type": "text/plain"}
+            )
+            storage.store_response(spider, self.request, new_response)
+            second_generation = (
+                entry_dir / (entry_dir / storage._POINTER_FILENAME).read_text()
+            )
+            assert second_generation != first_generation
+            cached = storage.retrieve_response(spider, self.request)
+            assert cached is not None
+            assert cached.body == b"second body"
+            assert cached.status == 201
+            assert cached.headers == new_response.headers
+
+    def test_concurrent_readers_see_a_consistent_generation(self):
+        with self._storage() as (storage, spider):
+            seed = Response(
+                self.request.url,
+                headers={
+                    "Content-Type": "text/html",
+                    "X-Generation": "0",
+                },
+                body=b"body-0",
+            )
+            storage.store_response(spider, self.request, seed)
+            entry_dir = self._entry_dir(storage, spider, self.request)
+
+            stop = threading.Event()
+            errors: list[str] = []
+
+            def reader() -> None:
+                # Each read must return one generation whose headers and body
+                # belong together, before and while a new generation is
+                # published.
+                marker = 0
+                while not stop.is_set():
+                    cached = storage.retrieve_response(spider, self.request.copy())
+                    if cached is None:
+                        errors.append("unexpected cache miss")
+                        return
+                    body_generation = int(cached.body.split(b"-")[-1])
+                    header_generation = int(
+                        cached.headers[b"X-Generation"].decode()
+                    )
+                    if body_generation != header_generation:
+                        errors.append(
+                            f"mixed generations: body {body_generation}, "
+                            f"header {header_generation}"
+                        )
+                        return
+                    if body_generation < marker:
+                        errors.append("generation went backwards")
+                        return
+                    marker = body_generation
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = [pool.submit(reader) for _ in range(8)]
+                for index in range(1, 21):
+                    response = Response(
+                        self.request.url,
+                        headers={
+                            "Content-Type": "text/html",
+                            "X-Generation": str(index),
+                        },
+                        body=f"body-{index}".encode(),
+                    )
+                    storage.store_response(spider, self.request, response)
+                    time.sleep(0.001)
+                stop.set()
+                for future in futures:
+                    future.result()
+            assert errors == []
+            # Every generation directory on disk is a complete, readable set.
+            for generation_dir in entry_dir.glob(
+                f"{storage._GENERATION_PREFIX}*"
+            ):
+                if generation_dir.name.endswith(storage._TMP_SUFFIX):
+                    continue
+                for name in ("pickled_meta", "response_body", "response_headers"):
+                    assert (generation_dir / name).is_file()
+
+    def test_demo_hit_miss_and_recovery(self, caplog):
+        """End-to-end demonstration: a normal hit, a miss after corruption,
+        and the previous response surviving a failed write."""
+        with self._storage() as (storage, spider):
+            # 1. Normal hit.
+            storage.store_response(spider, self.request, self.response)
+            hit = storage.retrieve_response(spider, self.request)
+            assert hit is not None and hit.body == b"test body"
+
+            # 2. Corruption turns the entry into a logged cache miss.
+            entry_dir = self._entry_dir(storage, spider, self.request)
+            generation = entry_dir / (
+                entry_dir / storage._POINTER_FILENAME
+            ).read_text(encoding="utf-8").strip()
+            (generation / "response_body").unlink()
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                assert storage.retrieve_response(spider, self.request) is None
+            assert "treating it as a cache miss" in caplog.text
+
+            # 3. After the entry is stored again, a failing rewrite leaves the
+            # last complete response readable.
+            storage.store_response(spider, self.request, self.response)
+            real_open = storage._open
+
+            def failing_open(path: Any, mode: str = "rb", *args: Any, **kwargs: Any):
+                if "w" in mode and Path(path).name == "response_body":
+                    raise OSError("disk full")
+                return real_open(path, mode, *args, **kwargs)
+
+            with mock.patch.object(storage, "_open", side_effect=failing_open):
+                with pytest.raises(OSError, match="disk full"):
+                    storage.store_response(
+                        spider,
+                        self.request,
+                        self.response.replace(body=b"never written"),
+                    )
+            recovered = storage.retrieve_response(spider, self.request)
+            assert recovered is not None and recovered.body == b"test body"
+
+
+class TestAtomicFilesystemStorage(AtomicFilesystemStorageTestMixin):
+    pass
+
+
+class TestAtomicFilesystemStorageGzip(AtomicFilesystemStorageTestMixin):
+    use_gzip = True
+
+    def test_truncated_gzip_is_a_miss(self, caplog):
+        with self._storage() as (storage, spider):
+            storage.store_response(spider, self.request, self.response)
+            entry_dir = self._entry_dir(storage, spider, self.request)
+            generation = entry_dir / (
+                entry_dir / storage._POINTER_FILENAME
+            ).read_text(encoding="utf-8").strip()
+            body = generation / "response_body"
+            body.write_bytes(body.read_bytes()[:-8])
+
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                assert storage.retrieve_response(spider, self.request) is None
+            assert "treating it as a cache miss" in caplog.text
+            assert not generation.exists()
+
+    def test_gzip_files_are_actually_gzipped(self):
+        with self._storage() as (storage, spider):
+            storage.store_response(spider, self.request, self.response)
+            entry_dir = self._entry_dir(storage, spider, self.request)
+            generation = entry_dir / (
+                entry_dir / storage._POINTER_FILENAME
+            ).read_text(encoding="utf-8").strip()
+            with gzip.open(generation / "response_body", "rb") as f:
+                assert f.read() == self.response.body
 
 
 class _LateMiddleware:

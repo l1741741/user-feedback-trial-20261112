@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import gzip
 import logging
+import os
 import pickle
+import shutil
+from contextlib import ExitStack
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from importlib import import_module
@@ -316,6 +320,15 @@ class DbmCacheStorage:
 
 
 class FilesystemCacheStorage:
+    # A cache entry is a directory named after the request fingerprint. Each
+    # fully written response lives in its own generation directory inside it,
+    # and the "current" pointer file names the generation that reads must use.
+    # Entries written before generations existed keep their files directly in
+    # the entry directory (the legacy layout) and are still read as-is.
+    _POINTER_FILENAME = "current"
+    _GENERATION_PREFIX = "gen-"
+    _TMP_SUFFIX = ".tmp"
+
     def __init__(self, settings: BaseSettings):
         self.cachedir: str = data_path(settings["HTTPCACHE_DIR"])
         self.expiration_secs: int = settings.getint("HTTPCACHE_EXPIRATION_SECS")
@@ -327,6 +340,8 @@ class FilesystemCacheStorage:
         ] = (
             gzip.open if self.use_gzip else open  # type: ignore[assignment]
         )
+        # Disambiguates generation directories created within the same second.
+        self._generation_counter = 0
 
     def open_spider(self, spider: Spider) -> None:
         logger.debug(
@@ -341,66 +356,91 @@ class FilesystemCacheStorage:
         pass
 
     def retrieve_response(self, spider: Spider, request: Request) -> Response | None:
-        """Return response if present in cache, or None otherwise."""
-        metadata = self._read_meta(spider, request)
-        if metadata is None:
-            return None  # not cached
-        rpath = Path(self._get_request_path(spider, request))
-        with self._open(rpath / "response_body", "rb") as f:
-            body = f.read()
-        with self._open(rpath / "response_headers", "rb") as f:
-            rawheaders = f.read()
-        data = {
-            "url": metadata["response_url"],
-            "status": metadata["status"],
-            "headers": headers_raw_to_dict(rawheaders),
-            "body": body,
-        }
-        datapath = rpath / "response_data"
-        if datapath.exists():
-            with self._open(datapath, "rb") as f:
-                data.update(pickle.load(f))  # noqa: S301
+        """Return response if present in cache, or None otherwise.
+
+        Unreadable or truncated cache content is treated as a cache miss
+        instead of being raised, so that one damaged entry cannot break a
+        crawl. Only the damaged generation of this request is removed; other
+        requests and the previous, still readable generation are untouched.
+        """
+        entry_dir, key = self._get_request_dir_and_key(spider, request)
+        try:
+            generation = self._current_generation(entry_dir)
+            if generation is None:
+                # No pointer: the entry is either absent or written in the
+                # legacy layout, with files directly in the entry directory.
+                if not (entry_dir / "pickled_meta").exists():
+                    return None  # not cached
+                source_dir = entry_dir
+            else:
+                source_dir = entry_dir / generation
+                if not source_dir.is_dir():
+                    raise CacheUnreadableError(
+                        f"pointer names missing generation {generation!r}"
+                    )
+            metadata = self._load_metadata(entry_dir, key, source_dir)
+            if metadata is None:
+                return None  # expired
+            data = self._load_response(source_dir, metadata)
+        except CacheUnreadableError as exc:
+            # Structural problems detected by the storage itself. An unsafe
+            # pointer cannot be mapped to a generation, so nothing is removed.
+            self._handle_unreadable(
+                entry_dir,
+                key,
+                clean_up=not exc.unsafe_pointer,
+            )
+            return None
+        except (OSError, EOFError, pickle.PickleError, ValueError, KeyError):
+            self._handle_unreadable(entry_dir, key)
+            return None
         request.meta["cache_timestamp"] = metadata["timestamp"]
         return response_from_dict(data)
 
     def store_response(
         self, spider: Spider, request: Request, response: Response
     ) -> None:
-        """Store the given response in the cache."""
-        rpath = Path(self._get_request_path(spider, request))
-        if not rpath.exists():
-            rpath.mkdir(parents=True)
-        metadata = {
-            "url": request.url,
-            "method": request.method,
-            "status": response.status,
-            "response_url": response.url,
-            "timestamp": time(),
-        }
-        with self._open(rpath / "meta", "wb") as f:
-            f.write(repr(metadata).encode())
-        with self._open(rpath / "pickled_meta", "wb") as f:
-            pickle.dump(metadata, f, protocol=4)
-        with self._open(rpath / "response_headers", "wb") as f:
-            f.write(headers_dict_to_raw(response.headers))
-        with self._open(rpath / "response_body", "wb") as f:
-            f.write(response.body)
-        data = {
-            key: value
-            for key, value in response.to_dict().items()
-            if key not in {"url", "status", "headers", "body"}
-        }
-        with self._open(rpath / "response_data", "wb") as f:
-            pickle.dump(data, f, protocol=4)
-        with self._open(rpath / "request_headers", "wb") as f:
-            f.write(headers_dict_to_raw(request.headers))
-        with self._open(rpath / "request_body", "wb") as f:
-            f.write(request.body)
+        """Store the given response in the cache.
+
+        All files are first written into a fresh generation directory. The
+        generation is published by atomically replacing the pointer file, so
+        readers only ever see complete generations and never a mix of the old
+        and the new metadata, headers and body. A failure while writing leaves
+        the previous generation and the pointer to it in place.
+        """
+        entry_dir, _key = self._get_request_dir_and_key(spider, request)
+        entry_dir.mkdir(parents=True, exist_ok=True)
+        self._prune_tmp_generations(entry_dir)
+        # The directory keeps the tmp suffix until every file is written, so a
+        # reader following the pointer can never open it mid-write.
+        generation_name = self._new_generation_name()
+        tmp_dir = entry_dir / f"{generation_name}{self._TMP_SUFFIX}"
+        generation_dir = entry_dir / generation_name
+        pointer_tmp = entry_dir / f"{self._POINTER_FILENAME}{self._TMP_SUFFIX}"
+        try:
+            self._write_generation(tmp_dir, request, response)
+            os.replace(tmp_dir, generation_dir)
+            pointer_tmp.write_text(generation_name, encoding="utf-8")
+            os.replace(pointer_tmp, entry_dir / self._POINTER_FILENAME)
+        except BaseException:
+            # Remove the unpublished generation and pointer temp file. The
+            # published generation and its pointer, if any, stay readable.
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            shutil.rmtree(generation_dir, ignore_errors=True)
+            with contextlib.suppress(OSError):
+                pointer_tmp.unlink()
+            raise
 
     def _get_request_path(self, spider: Spider, request: Request) -> str:
+        path, _key = self._get_request_dir_and_key(spider, request)
+        return str(path)
+
+    def _get_request_dir_and_key(
+        self, spider: Spider, request: Request
+    ) -> tuple[Path, str]:
         key = self._fingerprinter.fingerprint(request).hex()
         scope_path = self._get_scope_path(spider, request)
-        return str(Path(self.cachedir, scope_path, key[0:2], key))
+        return Path(self.cachedir, scope_path, key[0:2], key), key
 
     def _get_scope_path(self, spider: Spider, request: Request) -> str:
         if self._scope == "spider":
@@ -411,16 +451,155 @@ class FilesystemCacheStorage:
             return quote(urlparse_cached(request).hostname or "_", safe="")
         return ""
 
-    def _read_meta(self, spider: Spider, request: Request) -> dict[str, Any] | None:
-        rpath = Path(self._get_request_path(spider, request))
-        metapath = rpath / "pickled_meta"
+    def _new_generation_name(self) -> str:
+        self._generation_counter += 1
+        return (
+            f"{self._GENERATION_PREFIX}{int(time())}-"
+            f"{os.getpid()}-{self._generation_counter}"
+        )
+
+    def _write_generation(
+        self, generation_dir: Path, request: Request, response: Response
+    ) -> None:
+        generation_dir.mkdir()
+        metadata = {
+            "url": request.url,
+            "method": request.method,
+            "status": response.status,
+            "response_url": response.url,
+            "timestamp": time(),
+        }
+        data = {
+            key: value
+            for key, value in response.to_dict().items()
+            if key not in {"url", "status", "headers", "body"}
+        }
+        files = (
+            ("meta", repr(metadata).encode()),
+            ("pickled_meta", pickle.dumps(metadata, protocol=4)),
+            ("response_headers", headers_dict_to_raw(response.headers)),
+            ("response_body", response.body),
+            ("response_data", pickle.dumps(data, protocol=4)),
+            ("request_headers", headers_dict_to_raw(request.headers)),
+            ("request_body", request.body),
+        )
+        with ExitStack() as stack:
+            for name, content in files:
+                handle = stack.enter_context(
+                    self._open(generation_dir / name, "wb")
+                )
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+    def _current_generation(self, entry_dir: Path) -> str | None:
+        pointer = entry_dir / self._POINTER_FILENAME
+        if not pointer.exists():
+            return None
+        generation = pointer.read_text(encoding="utf-8").strip()
+        if (
+            not generation
+            or generation in {os.curdir, os.pardir}
+            or os.sep in generation
+            or (os.altsep is not None and os.altsep in generation)
+        ):
+            raise CacheUnreadableError(
+                f"pointer names invalid entry {generation!r}", unsafe_pointer=True
+            )
+        return generation
+
+    def _load_metadata(
+        self, entry_dir: Path, key: str, source_dir: Path
+    ) -> dict[str, Any] | None:
+        metapath = source_dir / "pickled_meta"
         if not metapath.exists():
-            return None  # not found
+            raise CacheUnreadableError("pickled_meta is missing")
         mtime = metapath.stat().st_mtime
         if 0 < self.expiration_secs < time() - mtime:
+            logger.debug(
+                f"Cache entry for request key {key} in {entry_dir} has "
+                "expired, treating it as a cache miss."
+            )
             return None  # expired
         with self._open(metapath, "rb") as f:
-            return cast("dict[str, Any]", pickle.load(f))  # noqa: S301
+            metadata = cast("dict[str, Any]", pickle.load(f))  # noqa: S301
+        if not isinstance(metadata, dict):
+            raise CacheUnreadableError("pickled_meta does not contain a dict")
+        return metadata
+
+    def _load_response(
+        self, source_dir: Path, metadata: dict[str, Any]
+    ) -> dict[str, Any]:
+        with self._open(source_dir / "response_body", "rb") as f:
+            body = f.read()
+        with self._open(source_dir / "response_headers", "rb") as f:
+            rawheaders = f.read()
+        data = {
+            "url": metadata["response_url"],
+            "status": metadata["status"],
+            "headers": headers_raw_to_dict(rawheaders),
+            "body": body,
+        }
+        datapath = source_dir / "response_data"
+        if datapath.exists():
+            with self._open(datapath, "rb") as f:
+                extra = pickle.load(f)  # noqa: S301
+            if not isinstance(extra, dict):
+                raise CacheUnreadableError("response_data does not contain a dict")
+            data.update(extra)
+        return data
+
+    def _handle_unreadable(
+        self, entry_dir: Path, key: str, *, clean_up: bool = True
+    ) -> None:
+        logger.warning(
+            f"Could not read the cache entry for request key {key} in "
+            f"{entry_dir}, treating it as a cache miss.",
+            exc_info=True,
+        )
+        if not clean_up:
+            return
+        # Only the generation this entry's pointer names is damaged. Legacy
+        # entries and the directories of other requests are never removed.
+        pointer = entry_dir / self._POINTER_FILENAME
+        if not pointer.exists():
+            return
+        try:
+            generation = pointer.read_text(encoding="utf-8").strip()
+            if generation and os.sep not in generation:
+                shutil.rmtree(entry_dir / generation, ignore_errors=True)
+            pointer.unlink()
+        except OSError:
+            logger.warning(
+                f"Could not remove the damaged cache generation for request "
+                f"key {key}.",
+                exc_info=True,
+            )
+
+    def _prune_tmp_generations(self, entry_dir: Path) -> None:
+        """Remove generation directories left by interrupted writes."""
+        try:
+            children = list(entry_dir.iterdir())
+        except OSError:
+            return
+        for child in children:
+            if child.name.startswith(self._GENERATION_PREFIX) and child.name.endswith(
+                self._TMP_SUFFIX
+            ):
+                shutil.rmtree(child, ignore_errors=True)
+
+
+class CacheUnreadableError(Exception):
+    """A cache generation on disk is missing or damaged.
+
+    *unsafe_pointer* marks a pointer whose content cannot be mapped to a
+    generation directory safely. The pointer and every generation are then
+    left on disk instead of removing anything.
+    """
+
+    def __init__(self, message: str, *, unsafe_pointer: bool = False) -> None:
+        super().__init__(message)
+        self.unsafe_pointer = unsafe_pointer
 
 
 def parse_cachecontrol(header: bytes) -> dict[bytes, bytes | None]:
