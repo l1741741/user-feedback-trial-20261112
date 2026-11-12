@@ -306,18 +306,35 @@ class XmlItemExporter(BaseItemExporter):
 
 
 class CsvItemExporter(BaseItemExporter):
+    """Exports items in CSV format to the given file-like object.
+
+    .. versionadded:: VERSION
+       The *escape_formulas* parameter.
+
+    If *escape_formulas* is ``True``, string cells whose first
+    non-whitespace character (ignoring spaces, tabs, CR and LF) is ``=``,
+    ``+``, ``-`` or ``@`` are prefixed with a single quote (``'``) to
+    prevent spreadsheet software from interpreting them as formulas. The
+    prefix is added to the original string, which is otherwise left
+    unmodified, and strings already starting with a single quote are kept
+    as-is. Non-string values, such as numbers, are never modified.
+    """
+
     def __init__(
         self,
         file: BytesIO,
         include_headers_line: bool = True,
         join_multivalued: str = ",",
         errors: str | None = None,
+        *,
+        escape_formulas: bool = False,
         **kwargs: Any,
     ):
         super().__init__(dont_fail=True, **kwargs)
         if not self.encoding:
             self.encoding = "utf-8"
         self.include_headers_line = include_headers_line
+        self._escape_formulas = escape_formulas
         self.stream = TextIOWrapper(
             file,
             line_buffering=False,
@@ -378,9 +395,19 @@ class CsvItemExporter(BaseItemExporter):
     def _build_row(self, values: Iterable[Any]) -> Iterable[Any]:
         for s in values:
             try:
-                yield to_unicode(s, self.encoding)
+                s = to_unicode(s, self.encoding)
             except TypeError:
                 yield s
+            else:
+                if self._escape_formulas:
+                    s = self._escape_formula(s)
+                yield s
+
+    @staticmethod
+    def _escape_formula(value: str) -> str:
+        if value.lstrip(" \t\r\n").startswith(("=", "+", "-", "@")):
+            return "'" + value
+        return value
 
     def _write_headers_and_set_fields_to_export(self, item: Any) -> None:
         if self.include_headers_line:

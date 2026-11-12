@@ -1,4 +1,6 @@
+import csv
 import dataclasses
+import io
 import json
 import marshal
 import pickle
@@ -6,6 +8,7 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from decimal import Decimal
 from io import BytesIO
 from typing import Any
 
@@ -444,6 +447,128 @@ class TestCsvItemExporter(TestBaseItemExporter):
         assert len(caplog.records) == 1
         assert "CSVExporter dropped fields" in caplog.text
         assert "price" in caplog.text
+
+    def _export_rows(self, items, **kwargs: Any) -> list[list[str]]:
+        fp = BytesIO()
+        ie = CsvItemExporter(fp, **kwargs)
+        ie.start_exporting()
+        for item in items:
+            ie.export_item(item)
+        ie.finish_exporting()
+        del ie  # See the first “del self.ie” in this file for context.
+        return list(csv.reader(io.StringIO(fp.getvalue().decode("utf-8"))))
+
+    def test_escape_formulas_default_off(self):
+        rows = self._export_rows([{"name": "=1+1"}])
+        assert rows == [["name"], ["=1+1"]]
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("=1+1", "'=1+1"),
+            ("+cmd", "'+cmd"),
+            ("-2+3", "'-2+3"),
+            ("@SUM(A1)", "'@SUM(A1)"),
+            # Leading whitespace is preserved, the prefix goes before it.
+            ("  =1+1", "'  =1+1"),
+            ("\t\r\n@cmd", "'\t\r\n@cmd"),
+            # Already-prefixed values are not prefixed again.
+            ("'=1+1", "'=1+1"),
+            ("''=1+1", "''=1+1"),
+            # Safe values are left untouched.
+            ("", ""),
+            (" ", " "),
+            ("hello", "hello"),
+            ("a=b", "a=b"),
+            ("'", "'"),
+        ],
+    )
+    def test_escape_formulas(self, value: str, expected: str) -> None:
+        rows = self._export_rows([{"name": value}], escape_formulas=True)
+        assert rows == [["name"], [expected]]
+
+    def test_escape_formulas_non_string_types(self):
+        item = {
+            "neg_int": -12,
+            "neg_float": -3.14,
+            "decimal": Decimal("-1.5"),
+            "flag": False,
+            "nothing": None,
+            "text": "héllo, \"world\"\nnew",
+        }
+        rows = self._export_rows([item], escape_formulas=True)
+        assert rows[1] == ["-12", "-3.14", "-1.5", "False", "", 'héllo, "world"\nnew']
+
+    def test_escape_formulas_headers(self):
+        rows = self._export_rows(
+            [{"name": "John"}],
+            fields_to_export={"name": "=evil"},
+            escape_formulas=True,
+        )
+        assert rows == [["'=evil"], ["John"]]
+
+    def test_escape_formulas_multivalued(self):
+        rows = self._export_rows(
+            [{"friends": ["=bad", "ok"]}],
+            escape_formulas=True,
+        )
+        assert rows == [["friends"], ["'=bad,ok"]]
+
+    def test_escape_formulas_dialect(self):
+        fp = BytesIO()
+        ie = CsvItemExporter(
+            fp,
+            escape_formulas=True,
+            encoding="latin-1",
+            delimiter=";",
+            quotechar="|",
+        )
+        ie.start_exporting()
+        ie.export_item({"name": "=héllo;|"})
+        ie.finish_exporting()
+        del ie  # See the first “del self.ie” in this file for context.
+        rows = list(
+            csv.reader(
+                io.StringIO(fp.getvalue().decode("latin-1")),
+                delimiter=";",
+                quotechar="|",
+            )
+        )
+        assert rows == [["name"], ["'=héllo;|"]]
+
+    def test_escape_formulas_serializer_called_once(self):
+        calls = []
+
+        def counting_serializer(value):
+            calls.append(value)
+            return "=1+1"
+
+        class CountingItem(Item):
+            name = Field(serializer=counting_serializer)
+
+        rows = self._export_rows([CountingItem(name="x")], escape_formulas=True)
+        assert rows == [["name"], ["'=1+1"]]
+        assert calls == ["x"]
+
+    def test_escape_formulas_repeated_export_keeps_item(self):
+        item = {"name": "=1+1", "friends": ["=bad", "ok"]}
+        snapshot = {"name": "=1+1", "friends": ["=bad", "ok"]}
+        rows = self._export_rows([item, item], escape_formulas=True)
+        assert item == snapshot
+        assert rows == [
+            ["name", "friends"],
+            ["'=1+1", "'=bad,ok"],
+            ["'=1+1", "'=bad,ok"],
+        ]
+
+    def test_escape_formulas_json_exporter_unaffected(self):
+        fp = BytesIO()
+        ie = JsonItemExporter(fp)
+        ie.start_exporting()
+        ie.export_item({"name": "=1+1"})
+        ie.finish_exporting()
+        del ie  # See the first “del self.ie” in this file for context.
+        assert fp.getvalue() == b'[{"name": "=1+1"}]'
 
 
 class TestCsvItemExporterDataclass(TestCsvItemExporter):

@@ -325,3 +325,30 @@ async def test_extend_kwargs(
     }
     data = await export_by_format(mockserver, items, settings)
     assert data["csv"] == expected
+
+
+@pytest.mark.parametrize(
+    ("escape_formulas", "expected"),
+    [
+        pytest.param(True, b"foo,bar\r\n'=1+1,ok\r\n", id="escaped"),
+        pytest.param(False, b"foo,bar\r\n=1+1,ok\r\n", id="not-escaped"),
+    ],
+)
+@coroutine_test
+async def test_extend_kwargs_escape_formulas(
+    escape_formulas: bool,
+    expected: bytes,
+    mockserver: MockServer,
+    tmp_path: Path,
+) -> None:
+    items = [{"foo": "=1+1", "bar": "ok"}]
+    settings = {
+        "FEEDS": {
+            unique_path(tmp_path): {
+                "format": "csv",
+                "item_export_kwargs": {"escape_formulas": escape_formulas},
+            },
+        },
+    }
+    data = await export_by_format(mockserver, items, settings)
+    assert data["csv"] == expected

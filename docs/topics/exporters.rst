@@ -402,7 +402,7 @@ XmlItemExporter
 CsvItemExporter
 ---------------
 
-.. class:: CsvItemExporter(file, include_headers_line=True, join_multivalued=',', errors=None, **kwargs)
+.. class:: CsvItemExporter(file, include_headers_line=True, join_multivalued=',', errors=None, *, escape_formulas=False, **kwargs)
 
    Exports items in CSV format to the given file-like object. If the
    :attr:`fields_to_export` attribute is set, it will be used to define the
@@ -426,6 +426,15 @@ CsvItemExporter
       errors are to be handled. For more information see
       :class:`io.TextIOWrapper`.
    :type errors: str
+
+   :param escape_formulas: If enabled, string cells (including header cells)
+      whose first non-whitespace character is ``=``, ``+``, ``-`` or ``@``
+      are prefixed with a single quote (``'``), so that spreadsheet software
+      does not interpret them as formulas. Non-string values, such as
+      numbers, are never modified.
+
+      .. versionadded:: VERSION
+   :type escape_formulas: bool
 
    The additional keyword arguments of this ``__init__`` method are passed to the
    :class:`BaseItemExporter` ``__init__`` method, and the leftover arguments to the

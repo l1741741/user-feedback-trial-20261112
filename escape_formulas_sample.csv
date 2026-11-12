@@ -1,0 +1,5 @@
+name,price,note,tags,ok,misc
+"'=HYPERLINK(""http://evil.example"",""click"")",-12,'  =TRIM(me),"'=bad,fine",True,
+'@SUM(A1:A9),3.14,'=already safe,plain,False,"héllo, ""q""
+line2"
+plain text,-1.5,'-2+3 as text,,True,'+also text
