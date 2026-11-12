@@ -10,6 +10,7 @@ import pytest
 
 from installer.records import RecordEntry
 from installer.utils import (
+    InvalidEntryPoint,
     WheelFilename,
     canonicalize_name,
     construct_record_file,
@@ -263,4 +264,235 @@ class TestParseEntryPoints:
     )
     def test_valid(self, script, expected):
         iterable = parse_entrypoints(textwrap.dedent(script))
+        assert list(iterable) == expected, expected
+
+    @pytest.mark.parametrize(
+        ("script", "expected"),
+        [
+            pytest.param(
+                """
+                    [console_scripts]
+                    package = package.__main__:package [extra-a, extra_b]
+                """,
+                [
+                    ("package", "package.__main__", "package", "console"),
+                ],
+                id="extras",
+            ),
+            pytest.param(
+                """
+                    [console_scripts]
+                    package = package.__main__ : package.nested.callable_
+                """,
+                [
+                    ("package", "package.__main__", "package.nested.callable_", "console"),
+                ],
+                id="nested-attr-and-whitespace",
+            ),
+            pytest.param(
+                """
+                    [console_scripts]
+                    föö = föö.päckage:main
+                """,
+                [
+                    ("föö", "föö.päckage", "main", "console"),
+                ],
+                id="unicode-identifiers",
+            ),
+            pytest.param(
+                """
+                    [console_scripts]
+                    importer = package.importer:main
+                """,
+                [
+                    ("importer", "package.importer", "main", "console"),
+                ],
+                id="keyword-prefix-is-not-keyword",
+            ),
+        ],
+    )
+    def test_valid_strict(self, script, expected):
+        iterable = parse_entrypoints(textwrap.dedent(script))
+        assert list(iterable) == expected, expected
+
+    @pytest.mark.parametrize(
+        ("script", "group", "name"),
+        [
+            pytest.param(
+                "[console_scripts]\nfoo = foo-bar:main\n",
+                "console_scripts",
+                "foo",
+                id="module-not-identifier",
+            ),
+            pytest.param(
+                "[console_scripts]\nfoo = import:main\n",
+                "console_scripts",
+                "foo",
+                id="module-segment-is-keyword",
+            ),
+            pytest.param(
+                "[console_scripts]\nfoo = foo:main.import\n",
+                "console_scripts",
+                "foo",
+                id="attr-segment-is-keyword",
+            ),
+            pytest.param(
+                "[console_scripts]\nfoo = foo:main.\n",
+                "console_scripts",
+                "foo",
+                id="attr-trailing-dot",
+            ),
+            pytest.param(
+                "[console_scripts]\nfoo = foo..bar:main\n",
+                "console_scripts",
+                "foo",
+                id="module-empty-segment",
+            ),
+            pytest.param(
+                "[console_scripts]\nfoo = foo\n",
+                "console_scripts",
+                "foo",
+                id="missing-attr",
+            ),
+            pytest.param(
+                "[console_scripts]\nfoo = foo:main junk\n",
+                "console_scripts",
+                "foo",
+                id="trailing-garbage",
+            ),
+            pytest.param(
+                "[console_scripts]\nfoo = foo:main [extra]; import os\n",
+                "console_scripts",
+                "foo",
+                id="trailing-garbage-after-extras",
+            ),
+            pytest.param(
+                "[console_scripts]\nfoo = foo:main [extra;import os]\n",
+                "console_scripts",
+                "foo",
+                id="extras-with-expression",
+            ),
+            pytest.param(
+                "[console_scripts]\nfoo = foo:main []\n",
+                "console_scripts",
+                "foo",
+                id="empty-extras",
+            ),
+            pytest.param(
+                "[console_scripts]\nfoo = foo:main [extra-a, extra_b]\nbar = %(foo)s:main\n",
+                "console_scripts",
+                "bar",
+                id="interpolation-syntax",
+            ),
+            pytest.param(
+                "[console_scripts]\nfoo = a:b\nfoo = c:d\n",
+                "console_scripts",
+                "foo",
+                id="duplicate-in-group",
+            ),
+            pytest.param(
+                "[console_scripts]\nfoo = a:b\n\n[gui_scripts]\nfoo = c:d\n",
+                "gui_scripts",
+                "foo",
+                id="duplicate-across-groups",
+            ),
+            pytest.param(
+                "[console_scripts]\na/b = foo:main\n",
+                "console_scripts",
+                "a/b",
+                id="name-with-slash",
+            ),
+            pytest.param(
+                "[console_scripts]\na\\b = foo:main\n",
+                "console_scripts",
+                "a\\b",
+                id="name-with-backslash",
+            ),
+            pytest.param(
+                "[console_scripts]\n. = foo:main\n",
+                "console_scripts",
+                ".",
+                id="name-dot",
+            ),
+            pytest.param(
+                "[console_scripts]\n.. = foo:main\n",
+                "console_scripts",
+                "..",
+                id="name-dotdot",
+            ),
+            pytest.param(
+                "[console_scripts]\nC:foo = foo:main\n",
+                "console_scripts",
+                "C:foo",
+                id="name-drive-prefix",
+            ),
+            pytest.param(
+                "[console_scripts]\na\x00b = foo:main\n",
+                "console_scripts",
+                "a\x00b",
+                id="name-with-nul",
+            ),
+            pytest.param(
+                "[DEFAULT]\nfoo = foo:main\n\n[console_scripts]\nbar = foo:main\n",
+                "DEFAULT",
+                "foo",
+                id="default-section",
+            ),
+        ],
+    )
+    def test_invalid_strict(self, script, group, name):
+        with pytest.raises(InvalidEntryPoint) as ctx:
+            parse_entrypoints(textwrap.dedent(script))
+
+        assert ctx.value.group == group
+        assert ctx.value.name == name
+        assert group in str(ctx.value)
+        assert repr(name) in str(ctx.value)
+
+    def test_invalid_strict_not_parseable(self):
+        with pytest.raises(InvalidEntryPoint):
+            parse_entrypoints("foo = foo:main\n")
+
+    def test_strict_validates_everything_before_producing_entries(self):
+        script = textwrap.dedent(
+            """\
+            [console_scripts]
+            good = good.module:main
+            bad = bad.module:main'); import os #
+            """
+        )
+        with pytest.raises(InvalidEntryPoint):
+            parse_entrypoints(script)
+
+    @pytest.mark.parametrize(
+        ("script", "expected"),
+        [
+            pytest.param(
+                """
+                    [console_scripts]
+                    foo = import:main
+                """,
+                [("foo", "import", "main", "console")],
+                id="keyword-module-accepted",
+            ),
+            pytest.param(
+                """
+                    [console_scripts]
+                    a/b = foo:main
+                """,
+                [("a/b", "foo", "main", "console")],
+                id="unsafe-name-accepted",
+            ),
+            pytest.param(
+                """
+                    [foo]
+                    foo = foo.bar
+                """,
+                [],
+                id="unrelated-section-ignored",
+            ),
+        ],
+    )
+    def test_lenient_mode_keeps_legacy_behaviour(self, script, expected):
+        iterable = parse_entrypoints(textwrap.dedent(script), strict=False)
         assert list(iterable) == expected, expected

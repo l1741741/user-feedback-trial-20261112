@@ -67,3 +67,54 @@ def test_script_generate_launcher_error(section, kind):
     script = Script("foo", "foo.bar", "baz.qux", section=section)
     with pytest.raises(InvalidScript):
         script.generate("#!C:\\path to my\\python.exe\n", kind=kind)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        "../evil",
+        "foo/bar",
+        "foo\\bar",
+        ".",
+        "..",
+        "C:foo",
+        "a\x00b",
+        "a\nb",
+    ],
+)
+def test_script_generate_rejects_unsafe_names(name):
+    script = Script(name, "foo.bar", "baz", section="console")
+    with pytest.raises(InvalidScript):
+        script.generate("/path/to/my/python", kind="posix")
+
+
+@pytest.mark.parametrize(
+    ("module", "attr"),
+    [
+        # Code injection through the module position of the template.
+        ("foo'); import os #", "main"),
+        # Code injection through the attribute/call position of the template.
+        ("foo", "main() or __import__('os').system('id') #"),
+        # Python keywords are not valid identifiers.
+        ("import", "main"),
+        ("foo", "main.import"),
+        # Empty segments / empty values.
+        ("foo..bar", "main"),
+        ("", "main"),
+        ("foo", ""),
+    ],
+)
+def test_script_generate_rejects_unsafe_module_attr(module, attr):
+    script = Script("foo", module, attr, section="console")
+    with pytest.raises(InvalidScript):
+        script.generate("/path/to/my/python", kind="posix")
+
+
+def test_script_generate_accepts_unicode_and_nested_attr():
+    script = Script("föö", "föö.päckage", "main.run", section="console")
+    name, data = script.generate("/path/to/my/python", kind="posix")
+
+    assert name == "föö"
+    assert "from föö.päckage import main".encode() in data
+    assert b"main.run()" in data

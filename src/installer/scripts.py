@@ -10,6 +10,7 @@ from importlib.resources import files
 from typing import TYPE_CHECKING
 
 from installer import _scripts
+from installer.utils import _dotted_identifier_error, _script_name_error
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -86,6 +87,22 @@ class Script:
             executable = os.path.join(dn, fn)  # noqa: PTH118
         return executable
 
+    def _validate(self) -> None:
+        """Ensure this script's fields are safe to embed in a generated script.
+
+        The module and attribute are interpolated into a Python code template,
+        and the name becomes a file name, so all three must be validated even
+        when a :any:`Script` is constructed directly (bypassing
+        :any:`installer.utils.parse_entrypoints`).
+        """
+        error = _script_name_error(self.name)
+        if error is not None:
+            raise InvalidScript(f"Invalid script name {self.name!r}: {error}")
+        for kind, value in (("module", self.module), ("attribute", self.attr)):
+            error = _dotted_identifier_error(value, kind=kind)
+            if error is not None:
+                raise InvalidScript(f"Invalid entry point {value!r}: {error}")
+
     def generate(self, executable: str, kind: "LauncherKind") -> tuple[str, bytes]:
         """Generate a launcher for this script.
 
@@ -95,9 +112,11 @@ class Script:
             ``"win-arm"``.
         :type kind: str
 
-        :raises InvalidScript: if no appropriate template is available.
+        :raises InvalidScript: if no appropriate template is available, or if
+            the script's name, module or attribute are not safe to use.
         :return: The name and contents of the launcher file.
         """
+        self._validate()
         launcher = self._get_launcher_data(kind)
         executable = self._get_alternate_executable(executable, kind)
         shebang = self._build_shebang(executable, forlauncher=bool(launcher))

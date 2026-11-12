@@ -9,6 +9,7 @@ from installer import install
 from installer.exceptions import InvalidWheelSource
 from installer.records import RecordEntry
 from installer.sources import WheelSource
+from installer.utils import InvalidEntryPoint
 
 
 # --------------------------------------------------------------------------------------
@@ -987,3 +988,191 @@ class TestInstall:
         assert sub_good_path in record_paths
         assert top_pycache_path not in record_paths
         assert sub_pycache_path not in record_paths
+
+
+# --------------------------------------------------------------------------------------
+# Entry point validation during install
+# --------------------------------------------------------------------------------------
+def _fancy_source(*, entry_points=None, extra_regular_files=None):
+    """Build a minimal valid FancyWheelSource, with customizable entry points."""
+    regular_files = {
+        "fancy/__init__.py": b"""\
+            def main():
+                print("I'm a fancy package")
+        """,
+    }
+    regular_files.update(extra_regular_files or {})
+
+    dist_info_files = {
+        "WHEEL": b"""\
+            Wheel-Version: 1.0
+            Generator: magic (1.0.0)
+            Root-Is-Purelib: true
+            Tag: py3-none-any
+        """,
+        "METADATA": b"""\
+            Metadata-Version: 2.1
+            Name: fancy
+            Version: 1.0.0
+        """,
+    }
+    if entry_points is not None:
+        dist_info_files["entry_points.txt"] = entry_points
+
+    return FakeWheelSource(
+        distribution="fancy",
+        version="1.0.0",
+        regular_files=regular_files,
+        dist_info_files=dist_info_files,
+    )
+
+
+def _assert_no_writes(mock_destination):
+    mock_destination.write_script.assert_not_called()
+    mock_destination.write_file.assert_not_called()
+    mock_destination.finalize_installation.assert_not_called()
+
+
+class TestInstallEntryPointValidation:
+    def test_invalid_entrypoint_writes_nothing(self, mock_destination):
+        # A valid declaration comes first; the invalid one comes second. No
+        # script for the valid declaration may be written before the error.
+        source = _fancy_source(
+            entry_points=b"""\
+                [console_scripts]
+                fancy = fancy:main
+                evil = fancy:main'); import os #
+            """,
+        )
+
+        with pytest.raises(InvalidEntryPoint) as ctx:
+            install(source=source, destination=mock_destination, additional_metadata={})
+
+        assert ctx.value.group == "console_scripts"
+        assert ctx.value.name == "evil"
+        _assert_no_writes(mock_destination)
+
+    def test_duplicate_across_groups_writes_nothing(self, mock_destination):
+        source = _fancy_source(
+            entry_points=b"""\
+                [console_scripts]
+                fancy = fancy:main
+
+                [gui_scripts]
+                fancy = fancy:main
+            """,
+        )
+
+        with pytest.raises(InvalidEntryPoint) as ctx:
+            install(source=source, destination=mock_destination, additional_metadata={})
+
+        assert ctx.value.group == "gui_scripts"
+        assert ctx.value.name == "fancy"
+        _assert_no_writes(mock_destination)
+
+    def test_entrypoint_conflicts_with_data_scripts_member(self, mock_destination):
+        source = _fancy_source(
+            entry_points=b"""\
+                [console_scripts]
+                fancy = fancy:main
+            """,
+            extra_regular_files={
+                "fancy-1.0.0.data/scripts/fancy": b"""\
+                    #!/bin/sh
+                    echo pre-existing script
+                """,
+            },
+        )
+
+        with pytest.raises(InvalidWheelSource) as ctx:
+            install(source=source, destination=mock_destination, additional_metadata={})
+
+        assert "fancy" in str(ctx.value)
+        _assert_no_writes(mock_destination)
+
+    def test_entrypoint_conflicts_with_data_scripts_member_case_insensitive(
+        self, mock_destination
+    ):
+        source = _fancy_source(
+            entry_points=b"""\
+                [console_scripts]
+                fancy = fancy:main
+            """,
+            extra_regular_files={
+                "fancy-1.0.0.data/scripts/FANCY": b"""\
+                    #!/bin/sh
+                    echo pre-existing script
+                """,
+            },
+        )
+
+        with pytest.raises(InvalidWheelSource):
+            install(source=source, destination=mock_destination, additional_metadata={})
+
+        _assert_no_writes(mock_destination)
+
+    def test_entrypoint_conflicts_with_windows_exe_member(self, mock_destination):
+        # The .exe suffix of Windows launchers participates in the conflict
+        # check, even when not installing on Windows.
+        source = _fancy_source(
+            entry_points=b"""\
+                [console_scripts]
+                fancy = fancy:main
+            """,
+            extra_regular_files={
+                "fancy-1.0.0.data/scripts/fancy.exe": b"MZ pre-existing launcher",
+            },
+        )
+
+        with pytest.raises(InvalidWheelSource) as ctx:
+            install(source=source, destination=mock_destination, additional_metadata={})
+
+        assert "fancy.exe" in str(ctx.value)
+        _assert_no_writes(mock_destination)
+
+    def test_entrypoints_conflicting_through_exe_suffix(self, mock_destination):
+        # "fancy" generates "fancy.exe" on Windows, colliding with the script
+        # explicitly named "fancy.exe".
+        source = _fancy_source(
+            entry_points=b"""\
+                [console_scripts]
+                fancy = fancy:main
+                fancy.exe = fancy:main
+            """,
+        )
+
+        with pytest.raises(InvalidWheelSource):
+            install(source=source, destination=mock_destination, additional_metadata={})
+
+        _assert_no_writes(mock_destination)
+
+    def test_valid_entrypoints_still_install(self, mock_destination):
+        source = _fancy_source(
+            entry_points=b"""\
+                [console_scripts]
+                fancy = fancy:main
+
+                [gui_scripts]
+                fancy-gui = fancy:main
+            """,
+            extra_regular_files={
+                "fancy-1.0.0.data/scripts/other-tool": b"""\
+                    #!/bin/sh
+                    echo unrelated script
+                """,
+            },
+        )
+
+        install(source=source, destination=mock_destination, additional_metadata={})
+
+        mock_destination.assert_has_calls(
+            [
+                mock.call.write_script(
+                    name="fancy", module="fancy", attr="main", section="console"
+                ),
+                mock.call.write_script(
+                    name="fancy-gui", module="fancy", attr="main", section="gui"
+                ),
+            ]
+        )
+        assert mock_destination.finalize_installation.called

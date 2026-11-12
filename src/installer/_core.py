@@ -3,13 +3,16 @@
 import posixpath
 import warnings
 from io import BytesIO
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from installer.destinations import WheelDestination
 from installer.exceptions import InvalidWheelSource
-from installer.records import RecordEntry
+from installer.records import RecordEntry, parse_record_file
 from installer.sources import WheelSource
 from installer.utils import SCHEME_NAMES, Scheme, parse_entrypoints, parse_metadata_file
+
+if TYPE_CHECKING:
+    from installer.scripts import ScriptSection
 
 __all__ = ["install"]
 
@@ -62,6 +65,62 @@ def _determine_scheme(
     return cast("Scheme", scheme_name), posixpath.join(*reversed(parts[:-1]))
 
 
+def _normalized_script_target(path: str) -> str:
+    """Normalize a script output path, for conflict detection.
+
+    Case-folded and separator-normalized, so that names which would collide
+    on case-insensitive filesystems (or as Windows launchers) compare equal.
+    """
+    return posixpath.normpath(path.replace("\\", "/")).casefold()
+
+
+def _scripts_scheme_members(source: WheelSource, root_scheme: Scheme) -> dict[str, str]:
+    """Map normalized destination paths of `.data/scripts` members to their paths."""
+    record_lines = source.read_dist_info("RECORD").splitlines()
+    members = {}
+    for elements in parse_record_file(record_lines):
+        path = elements[0]
+        scheme, destination_path = _determine_scheme(
+            path=path, source=source, root_scheme=root_scheme
+        )
+        if scheme == "scripts":
+            members[_normalized_script_target(destination_path)] = destination_path
+    return members
+
+
+def _validate_script_targets(
+    source: WheelSource,
+    root_scheme: Scheme,
+    script_entries: list[tuple[str, str, str, "ScriptSection"]],
+) -> None:
+    """Ensure generated scripts will not overwrite each other or wheel files.
+
+    Each entry point may produce ``name`` (POSIX) or ``name.exe`` (Windows
+    launcher), so both forms participate in the conflict check, regardless of
+    the current platform.
+    """
+    outputs: dict[str, str] = {}  # normalized target -> script name
+    for name, _, _, _ in script_entries:
+        for candidate in (name, f"{name}.exe"):
+            key = _normalized_script_target(candidate)
+            if key in outputs:
+                message = (
+                    f"Script {name!r} would overwrite the script generated "
+                    f"for {outputs[key]!r}."
+                )
+                raise InvalidWheelSource(source, message)
+            outputs[key] = name
+
+    members = _scripts_scheme_members(source, root_scheme)
+    for key, name in outputs.items():
+        if key in members:
+            message = (
+                f"Script {name!r} from entry points would overwrite "
+                f"{members[key]!r} from the wheel's .data/scripts directory."
+            )
+            raise InvalidWheelSource(source, message)
+
+
 def install(
     source: WheelSource,
     destination: WheelDestination,
@@ -81,17 +140,25 @@ def install(
     record_file_path = posixpath.join(source.dist_info_dir, "RECORD")
     written_records = []
 
-    # Write the entry_points based scripts.
+    # Fully parse and validate all entry point declarations, and check their
+    # output targets for conflicts, *before* writing anything to the
+    # destination. This ensures an invalid or conflicting declaration cannot
+    # leave a partially-installed set of scripts behind.
+    script_entries: list[tuple[str, str, str, "ScriptSection"]] = []
     if "entry_points.txt" in source.dist_info_filenames:
         entrypoints_text = source.read_dist_info("entry_points.txt")
-        for name, module, attr, section in parse_entrypoints(entrypoints_text):
-            record = destination.write_script(
-                name=name,
-                module=module,
-                attr=attr,
-                section=section,
-            )
-            written_records.append((Scheme("scripts"), record))
+        script_entries = list(parse_entrypoints(entrypoints_text))
+        _validate_script_targets(source, root_scheme, script_entries)
+
+    # Write the entry_points based scripts.
+    for name, module, attr, section in script_entries:
+        record = destination.write_script(
+            name=name,
+            module=module,
+            attr=attr,
+            section=section,
+        )
+        written_records.append((Scheme("scripts"), record))
 
     # Write all the files from the wheel.
     for record_elements, stream, is_executable in source.get_contents():

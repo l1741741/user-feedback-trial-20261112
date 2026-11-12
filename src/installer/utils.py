@@ -1,10 +1,12 @@
 """Utilities related to handling / interacting with wheel files."""
 
 import base64
+import configparser
 import contextlib
 import csv
 import hashlib
 import io
+import keyword
 import os
 import re
 import sys
@@ -31,6 +33,7 @@ AllSchemes = tuple[Scheme, ...]
 
 __all__ = [
     "SCHEME_NAMES",
+    "InvalidEntryPoint",
     "WheelFilename",
     "construct_record_file",
     "copyfileobj_with_hashing",
@@ -224,13 +227,191 @@ def construct_record_file(
     return stream.detach()
 
 
-def parse_entrypoints(text: str) -> Iterable[tuple[str, str, str, "ScriptSection"]]:
-    """Parse ``entry_points.txt``-style files.
+class InvalidEntryPoint(ValueError):
+    """Raised when an entry point declaration is invalid.
 
-    :param text: entire contents of the file
-    :return:
-        name of the script, module to use, attribute to call, kind of script (cli / gui)
+    Carries the entry point ``group`` (e.g. ``console_scripts``) and the
+    ``name`` of the offending declaration, when they could be determined.
     """
+
+    def __init__(
+        self, reason: str, *, group: str | None = None, name: str | None = None
+    ) -> None:
+        """Initialize an InvalidEntryPoint error.
+
+        :param reason: why the declaration is invalid
+        :param group: entry point group (section) of the declaration
+        :param name: name of the offending declaration
+        """
+        self.reason = reason
+        self.group = group
+        self.name = name
+        location = ""
+        if group is not None:
+            location = f" in group {group!r}"
+            if name is not None:
+                location = f" for {name!r} in group {group!r}"
+        super().__init__(f"Invalid entry point{location}: {reason}")
+
+
+# A "drive prefix" like ``C:`` at the start of a would-be file name.
+_DRIVE_PREFIX_REGEX = re.compile(r"^[A-Za-z]:")
+
+# A valid "extra" name, per PEP 508.
+_EXTRA_NAME_REGEX = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+
+# Overall shape of a strict entry point value: ``module:attr[.sub] [extras]``.
+# Components are validated individually after this match.
+_ENTRYPOINT_VALUE_REGEX = re.compile(
+    r"""
+    (?P<module>[^\s:\[\]]+?)
+    \s*:\s*
+    (?P<attrs>[^\s:\[\]]+?)
+    \s*
+    (?:\[\s*(?P<extras>[^\[\]]*?)\s*\])?
+    \s*
+    """,
+    re.VERBOSE | re.UNICODE,
+)
+
+
+def _dotted_identifier_error(value: str, *, kind: str) -> str | None:
+    """Return a reason why ``value`` is not valid dotted Python identifiers."""
+    for segment in value.split("."):
+        if not segment.isidentifier():
+            return f"{kind} segment {segment!r} is not a valid Python identifier"
+        if keyword.iskeyword(segment):
+            return f"{kind} segment {segment!r} is a Python keyword"
+    return None
+
+
+def _script_name_error(name: str) -> str | None:
+    """Return a reason why ``name`` is not a safe script (file) name."""
+    if not name:
+        return "script name must not be empty"
+    if "\x00" in name:
+        return "script name must not contain NUL bytes"
+    if "\n" in name or "\r" in name:
+        return "script name must not contain newlines"
+    if "/" in name or "\\" in name:
+        return "script name must not contain directory separators"
+    if name in (".", ".."):
+        return "script name must not be a dot directory"
+    if _DRIVE_PREFIX_REGEX.match(name):
+        return "script name must not start with a drive prefix"
+    return None
+
+
+def _validate_entrypoint_value(
+    value: str, *, group: str, name: str
+) -> tuple[str, str]:
+    """Validate a strict entry point value, returning (module, attrs)."""
+    if "%" in value:
+        raise InvalidEntryPoint(
+            "configuration interpolation syntax is not allowed",
+            group=group,
+            name=name,
+        )
+    match = _ENTRYPOINT_VALUE_REGEX.fullmatch(value)
+    if match is None:
+        raise InvalidEntryPoint(
+            f"malformed declaration {value!r}, expected 'module:attr [extras]'",
+            group=group,
+            name=name,
+        )
+
+    module = match.group("module")
+    error = _dotted_identifier_error(module, kind="module")
+    if error is not None:
+        raise InvalidEntryPoint(error, group=group, name=name)
+
+    attrs = match.group("attrs")
+    error = _dotted_identifier_error(attrs, kind="attribute")
+    if error is not None:
+        raise InvalidEntryPoint(error, group=group, name=name)
+
+    extras = match.group("extras")
+    if extras is not None:
+        tokens = [token.strip() for token in extras.split(",")]
+        if not all(
+            token and _EXTRA_NAME_REGEX.fullmatch(token) for token in tokens
+        ):
+            raise InvalidEntryPoint(
+                f"invalid extras declaration [{extras}]",
+                group=group,
+                name=name,
+            )
+
+    return module, attrs
+
+
+def _parse_entrypoints_strict(
+    text: str,
+) -> list[tuple[str, str, str, "ScriptSection"]]:
+    """Fully validate and parse ``entry_points.txt``-style contents.
+
+    The entire file is validated before any entry is produced: either the
+    returned list describes every declaration in the ``console_scripts`` and
+    ``gui_scripts`` groups, or an :any:`InvalidEntryPoint` is raised and no
+    entries are produced at all.
+    """
+    config = ConfigParser(delimiters="=", interpolation=None, strict=True)
+    config.optionxform = str  # type: ignore[assignment, method-assign]
+    try:
+        config.read_string(text)
+    except configparser.DuplicateSectionError as exc:
+        raise InvalidEntryPoint(
+            "duplicate section declaration", group=exc.section
+        ) from exc
+    except configparser.DuplicateOptionError as exc:
+        raise InvalidEntryPoint(
+            "duplicate entry point declaration", group=exc.section, name=exc.option
+        ) from exc
+    except configparser.Error as exc:
+        raise InvalidEntryPoint(
+            f"cannot parse file: {exc.message or exc!r}"
+        ) from exc
+
+    if config.defaults():
+        name = next(iter(config.defaults()))
+        raise InvalidEntryPoint(
+            "a DEFAULT section is not allowed",
+            group=config.default_section,
+            name=name,
+        )
+
+    entries: list[tuple[str, str, str, "ScriptSection"]] = []
+    seen: dict[str, str] = {}  # script name -> group that declared it
+    for section in config.sections():
+        if section not in ("console_scripts", "gui_scripts"):
+            continue
+
+        for name, value in config.items(section):
+            error = _script_name_error(name)
+            if error is not None:
+                raise InvalidEntryPoint(error, group=section, name=name)
+
+            module, attrs = _validate_entrypoint_value(value, group=section, name=name)
+
+            if name in seen:
+                raise InvalidEntryPoint(
+                    f"already declared in group {seen[name]!r},"
+                    " script names must be unique across groups",
+                    group=section,
+                    name=name,
+                )
+            seen[name] = section
+
+            script_section = cast("ScriptSection", section[: -len("_scripts")])
+            entries.append((name, module, attrs, script_section))
+
+    return entries
+
+
+def _parse_entrypoints_lenient(
+    text: str,
+) -> Iterable[tuple[str, str, str, "ScriptSection"]]:
+    """Parse ``entry_points.txt``-style files, with the legacy lenient rules."""
     # Borrowed from https://github.com/python/importlib_metadata/blob/v3.4.0/importlib_metadata/__init__.py#L115
     config = ConfigParser(delimiters="=")
     config.optionxform = str  # type: ignore[assignment, method-assign]
@@ -256,6 +437,26 @@ def parse_entrypoints(text: str) -> Iterable[tuple[str, str, str, "ScriptSection
             script_section = cast("ScriptSection", section[: -len("_scripts")])
 
             yield name, module, attrs, script_section
+
+
+def parse_entrypoints(
+    text: str, *, strict: bool = True
+) -> Iterable[tuple[str, str, str, "ScriptSection"]]:
+    """Parse ``entry_points.txt``-style files.
+
+    :param text: entire contents of the file
+    :param strict:
+        When true (the default), fully validate the ``console_scripts`` and
+        ``gui_scripts`` groups before producing any entries, raising
+        :any:`InvalidEntryPoint` on the first invalid declaration. Unrecognized
+        groups are still ignored. When false, use the legacy lenient parsing
+        behaviour, for compatibility with older callers.
+    :return:
+        name of the script, module to use, attribute to call, kind of script (cli / gui)
+    """
+    if strict:
+        return _parse_entrypoints_strict(text)
+    return _parse_entrypoints_lenient(text)
 
 
 def _current_umask() -> int:
