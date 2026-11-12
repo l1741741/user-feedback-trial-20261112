@@ -5,6 +5,9 @@ This module handles clips, gradients, masks, patterns and external nodes.
 
 """
 
+import copy
+import sys
+
 from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
 from .features import match_features
 from .helpers import paint, size, transform
@@ -116,41 +119,108 @@ def clip_path(surface, node):
         surface.paths[node['id']] = node
 
 
+def apply_luminance(cairo_surface):
+    """Turn an ARGB32 image surface into a luminance mask.
+
+    Replace the alpha channel of each pixel by the luminance of its RGB
+    channels multiplied by its alpha, as defined for
+    ``mask-type: luminance`` by the CSS Masking specification. The
+    luminance coefficients (0.2126, 0.7152, 0.0722) are linear in the
+    color components, so the result can be computed directly on the
+    premultiplied channels: luminance(R, G, B) * alpha is
+    luminance(R * alpha, G * alpha, B * alpha).
+
+    """
+    cairo_surface.flush()
+    width = cairo_surface.get_width()
+    height = cairo_surface.get_height()
+    stride = cairo_surface.get_stride()
+    data = memoryview(cairo_surface.get_data())
+    if sys.byteorder == 'little':
+        blue, green, red = 0, 1, 2
+    else:
+        red, green, blue = 1, 2, 3
+    for row in range(height):
+        offset = row * stride
+        for column in range(width):
+            i = offset + 4 * column
+            alpha = (
+                2126 * data[i + red] + 7152 * data[i + green]
+                + 722 * data[i + blue] + 5000) // 10000
+            # Store a white pixel masked by the computed alpha
+            data[i] = data[i + 1] = data[i + 2] = data[i + 3] = alpha
+    cairo_surface.mark_dirty()
+
+
 def paint_mask(surface, node, name, opacity):
     """Paint the mask of the current surface."""
-    mask_node = surface.masks[name]
+    # Work on a copy of the definition: the mask region, the content
+    # coordinate system and the outer opacity are computed for each
+    # referencing element, and must never pollute the stored definition
+    # that can be referenced again with a different geometry or opacity.
+    mask_node = copy.copy(surface.masks[name])
     mask_node.tag = 'g'
     mask_node['opacity'] = opacity
 
+    # Bounding box of the referencing element, in current user
+    # coordinates, used as reference by objectBoundingBox units
+    bounding_box = calculate_bounding_box(surface, node)
+
+    # Mask region defined by the x, y, width and height attributes
     if mask_node.get('maskUnits') == 'userSpaceOnUse':
-        width_ref, height_ref = 'x', 'y'
+        x = size(surface, mask_node.get('x', '-10%'), 'x')
+        y = size(surface, mask_node.get('y', '-10%'), 'y')
+        width = size(surface, mask_node.get('width', '120%'), 'x')
+        height = size(surface, mask_node.get('height', '120%'), 'y')
     else:
-        x = size(surface, node.get('x'), 'x')
-        y = size(surface, node.get('y'), 'y')
-        width = size(surface, node.get('width'), 'x')
-        height = size(surface, node.get('height'), 'y')
-        width_ref = width or surface.width
-        height_ref = height or surface.height
+        # objectBoundingBox: fractions of the element's bounding box
+        if not is_non_empty_bounding_box(bounding_box):
+            # No geometry to mask, paint nothing
+            return
+        box_x, box_y, box_width, box_height = bounding_box
+        x = box_x + size(surface, mask_node.get('x', '-10%'), 1) * box_width
+        y = box_y + size(surface, mask_node.get('y', '-10%'), 1) * box_height
+        width = size(surface, mask_node.get('width', '120%'), 1) * box_width
+        height = size(surface, mask_node.get('height', '120%'), 1) * box_height
 
-    mask_node['x'] = size(surface, mask_node.get('x', '-10%'), width_ref)
-    mask_node['y'] = size(surface, mask_node.get('y', '-10%'), height_ref)
-    mask_node['height'] = size(
-        surface, mask_node.get('height', '120%'), height_ref)
-    mask_node['width'] = size(
-        surface, mask_node.get('width', '120%'), width_ref)
+    if width <= 0 or height <= 0:
+        # Empty mask region, paint nothing
+        return
 
-    if mask_node.get('maskUnits') == 'userSpaceOnUse':
-        x = mask_node['x']
-        y = mask_node['y']
-        mask_node['viewBox'] = '{x} {y} {width} {height}'.format(**mask_node)
+    # Coordinate system of the mask content
+    mask_node.pop('x', None)
+    mask_node.pop('y', None)
+    mask_node['width'] = width
+    mask_node['height'] = height
+    mask_node['preserveAspectRatio'] = 'none'
+    if mask_node.get('maskContentUnits') == 'objectBoundingBox':
+        if not is_non_empty_bounding_box(bounding_box):
+            # No geometry to define the content system, paint nothing
+            return
+        box_x, box_y, box_width, box_height = bounding_box
+        mask_node['viewBox'] = '{} {} {} {}'.format(
+            (x - box_x) / box_width, (y - box_y) / box_height,
+            width / box_width, height / box_height)
+    else:
+        mask_node['viewBox'] = f'{x} {y} {width} {height}'
 
-    from .surface import SVGSurface  # circular import
-    mask_surface = SVGSurface(mask_node, None, surface.dpi, surface)
+    from .surface import PNGSurface, SVGSurface  # circular import
+    if mask_node.get('mask-type', 'luminance') == 'alpha':
+        # Alpha mask: only the alpha channel of the content is used
+        mask_surface = SVGSurface(mask_node, None, surface.dpi, surface)
+    else:
+        # Luminance mask (default): render the content on a raster
+        # surface and multiply its alpha channel by the RGB luminance
+        if not (round(width) and round(height)):
+            # Region too small to hold a pixel, paint nothing
+            return
+        mask_surface = PNGSurface(mask_node, None, surface.dpi, surface)
+        apply_luminance(mask_surface.cairo)
+
     surface.context.save()
     surface.context.translate(x, y)
     surface.context.scale(
-        mask_node['width'] / mask_surface.width,
-        mask_node['height'] / mask_surface.height)
+        width / mask_surface.width, height / mask_surface.height)
     surface.context.mask_surface(mask_surface.cairo)
     surface.context.restore()
 
