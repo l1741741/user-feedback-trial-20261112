@@ -3245,6 +3245,12 @@ def _generate_convert_help():
     type=click.Choice(["integer", "float", "blob", "text"]),
 )
 @click.option("--drop", is_flag=True, help="Drop original column afterwards")
+@click.option(
+    "--atomic",
+    is_flag=True,
+    help="Run the whole conversion as a single atomic operation, restoring the "
+    "table to its previous state if anything fails",
+)
 @click.option("-s", "--silent", is_flag=True, help="Don't show a progress bar")
 @click.option("pdb_", "--pdb", is_flag=True, help="Open pdb debugger on first error")
 def convert(
@@ -3260,6 +3266,7 @@ def convert(
     output,
     output_type,
     drop,
+    atomic,
     silent,
     pdb_,
 ):
@@ -3334,11 +3341,19 @@ def convert(
                 drop=drop,
                 multi=multi,
                 show_progress=not silent,
+                atomic=atomic,
             )
         except BadMultiValues as e:
             raise click.ClickException(
                 f"When using --multi code must return a Python dictionary - returned: {e.values!r}"
             )
+        except sqlite3.Error as e:
+            # Report the real failure - with --atomic the table has already
+            # been restored to its previous state by the core implementation
+            raise click.ClickException(str(e))
+        except Exception as e:
+            # e.g. an exception raised by the conversion code itself
+            raise click.ClickException(f"{type(e).__name__}: {e}")
 
 
 @cli.command("add-geometry-column")

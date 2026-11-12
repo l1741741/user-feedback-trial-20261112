@@ -4185,6 +4185,7 @@ class Table(Queryable):
         where: str | None = None,
         where_args: Sequence | dict[str, Any] | None = None,
         show_progress: bool = False,
+        atomic: bool = False,
     ) -> "Table":
         """
         Apply conversion function ``fn`` to every value in the specified columns.
@@ -4201,6 +4202,12 @@ class Table(Queryable):
           is applied, for example ``age > ?`` or ``age > :age``.
         :param where_args: List of arguments (if using ``?``) or a dictionary (if using ``:age``).
         :param show_progress: Should a progress bar be displayed?
+        :param atomic: If ``True``, run the entire conversion - schema changes (new output
+          columns, dropped columns) and all data changes - as a single atomic operation.
+          If anything fails, the table is restored to its previous state. If the caller
+          already has a transaction open, a savepoint is used instead: only this
+          conversion is rolled back on failure, and the caller's transaction is never
+          committed. Defaults to ``False``, which preserves the previous behavior.
 
         See :ref:`python_api_convert`.
         """
@@ -4208,6 +4215,47 @@ class Table(Queryable):
             columns = [columns]
         columns = [resolve_casing(c, self.columns_dict) for c in columns]
 
+        if atomic:
+            # Schema changes and data changes become a single unit of work.
+            # db.atomic() uses a savepoint if the caller already has a
+            # transaction open, so a failure here rolls back only this
+            # conversion and a success never commits the caller's work.
+            with self.db.atomic():
+                return self._convert(
+                    columns,
+                    fn,
+                    output=output,
+                    output_type=output_type,
+                    drop=drop,
+                    multi=multi,
+                    where=where,
+                    where_args=where_args,
+                    show_progress=show_progress,
+                )
+        return self._convert(
+            columns,
+            fn,
+            output=output,
+            output_type=output_type,
+            drop=drop,
+            multi=multi,
+            where=where,
+            where_args=where_args,
+            show_progress=show_progress,
+        )
+
+    def _convert(
+        self,
+        columns: list[str],
+        fn: Callable,
+        output: str | None = None,
+        output_type: Any | None = None,
+        drop: bool = False,
+        multi: bool = False,
+        where: str | None = None,
+        where_args: Sequence | dict[str, Any] | None = None,
+        show_progress: bool = False,
+    ) -> "Table":
         if multi:
             return self._convert_multi(
                 columns[0],

@@ -1864,6 +1864,15 @@ You can include named parameters in your where clause and populate them using on
 
 The ``--dry-run`` option will output a preview of the conversion against the first ten rows, without modifying the database.
 
+The ``--atomic`` option runs the whole conversion as a single atomic operation. If the conversion fails partway through - for example if your code raises an exception on a later row, or a write violates a SQLite constraint - the table is restored to its exact previous state, including any columns that were added (``--output`` or ``--multi``) or dropped (``--drop``):
+
+.. code-block:: bash
+
+    sqlite-utils convert content.db articles headline 'value.upper()' \
+        --output headline_upper --drop --atomic
+
+Without ``--atomic`` the ``UPDATE`` itself is still transactional, but schema changes such as a new ``--output`` column can be left behind if the conversion fails.
+
 .. note::
     In Python: :ref:`table.convert() <python_api_convert>`  CLI reference: :ref:`sqlite-utils convert <cli_ref_convert>`
 

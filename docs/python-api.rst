@@ -1332,6 +1332,21 @@ The ``.convert()`` method accepts optional ``where=`` and ``where_args=`` parame
 
 These behave the same as the corresponding parameters to the :ref:`.rows_where() <python_api_rows>` method, so you can use ``?`` placeholders and a list of values instead of ``:named`` placeholders with a dictionary.
 
+.. _python_api_convert_atomic:
+
+Atomic conversions
+------------------
+
+By default a conversion is not a single unit of work: the ``UPDATE`` itself is transactional, but schema changes such as adding an ``output=`` column or the new columns created by ``multi=True`` happen separately, so a failure partway through can leave those columns behind. Pass ``atomic=True`` to run the entire conversion - schema changes and all data changes - as a single atomic operation:
+
+.. code-block:: python
+
+    table.convert("title", lambda v: v.upper(), output="upper", drop=True, atomic=True)
+
+If the conversion function raises, returns an unexpected type or a write triggers a SQLite constraint failure, the table is restored to its exact previous state: already-converted rows, added output columns, columns created by ``multi=True``, dropped original columns and any index or trigger changes are all rolled back.
+
+If you call ``convert(..., atomic=True)`` while you already have a transaction open - inside a ``with db.atomic():`` block or after ``db.begin()`` - the conversion runs in a savepoint inside your transaction. A failure rolls back only the conversion, leaving your earlier pending changes intact, and a success does not commit your transaction - see :ref:`python_api_transactions`.
+
 .. _python_api_lookup_tables:
 
 Working with lookup tables
