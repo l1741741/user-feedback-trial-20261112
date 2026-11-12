@@ -898,7 +898,11 @@ class VideoClip(Clip):
 
         bg_copy[y1_bg:y2_bg, x1_bg:x2_bg] = np.round(result).astype(np.uint8)
 
-        bg_mask_copy[y1_bg:y2_bg, x1_bg:x2_bg] = final_alpha.squeeze()
+        # Drop the broadcasting axis without collapsing genuine dimensions:
+        # squeeze() would break 1-pixel-wide or 1-pixel-tall regions
+        if final_alpha.ndim == 3:
+            final_alpha = final_alpha[..., 0]
+        bg_mask_copy[y1_bg:y2_bg, x1_bg:x2_bg] = final_alpha
         return (bg_copy, bg_mask_copy)
 
     def compose_mask(self, background_mask: np.ndarray, t: float) -> np.ndarray:

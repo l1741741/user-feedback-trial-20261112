@@ -12,6 +12,10 @@ For performances reason a very minor change to the API of CompositeVideoClip hav
 This mean you need to specifically set `bg_color=None` if you want to generate a video with a transparent background.
 
 ### Fixed
+- Fix transparent `CompositeVideoClip` mask depending on mask/RGB access order: image and mask are now produced by a single compositing routine shared by `get_frame` and `mask.get_frame`, so both agree in whichever order and whichever time order they are queried, and nested composites match their flattened equivalent
+- Fix unbounded `memoize_mask` cache accumulating one mask per rendered frame: the cache is now bounded to the most recent times and only ever serves the exact time an entry was computed for
+- Fix `compose_on` failing on 1-pixel-wide/tall overlap regions (`squeeze()` collapsing genuine dimensions)
+- Support semi-transparent RGBA `bg_color` (alpha < 255) and masked background clips with `use_bgclip=True`: the composite is now correctly transparent instead of silently dropping the alpha
 - Strongly improve performances to make them more consistent with thoses of v1
 - Fix circular reference in ImageSequenceClip leading to memory leak
 - Fix TextClip broken with Pillow > 11.2
