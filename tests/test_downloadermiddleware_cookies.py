@@ -6,6 +6,7 @@ from typing import Any, NamedTuple
 import pytest
 from _pytest.mark import ParameterSet
 
+from scrapy import signals
 from scrapy.downloadermiddlewares.cookies import CookiesMiddleware
 from scrapy.downloadermiddlewares.defaultheaders import DefaultHeadersMiddleware
 from scrapy.downloadermiddlewares.redirect import RedirectMiddleware
@@ -1231,3 +1232,89 @@ class TestCookiesMiddleware:
         request = Request("data:,", cookies={"a": "b"})
         assert self.mw.process_request(request) is None
         assert "Cookie" not in request.headers
+
+
+class TestCookieJarRelease:
+    def setup_method(self):
+        self.crawler = get_crawler(DefaultSpider)
+        self.crawler.spider = self.crawler._create_spider()
+        self.mw = build_from_crawler(CookiesMiddleware, self.crawler)
+
+    def _request(self, key: object) -> Request:
+        request = Request("http://scrapytest.org/", meta={"cookiejar": key})
+        assert self.mw.process_request(request) is None
+        return request
+
+    def _process_response(
+        self, key: object, cookie: str = "C1=value1"
+    ) -> tuple[Request, Response]:
+        request = self._request(key)
+        response = Response(
+            "http://scrapytest.org/",
+            headers={"Set-Cookie": f"{cookie}; path=/"},
+            request=request,
+        )
+        assert self.mw.process_response(request, response) is response
+        return request, response
+
+    def _sent_cookies(self, key: object) -> bytes | None:
+        return self._request(key).headers.get("Cookie")
+
+    def test_jars_isolated(self):
+        self._process_response("a", cookie="shared=one")
+        self._process_response("b", cookie="shared=two")
+        assert self._sent_cookies("a") == b"shared=one"
+        assert self._sent_cookies("b") == b"shared=two"
+
+    def test_release(self):
+        self._process_response("a")
+        self.mw.release_cookiejar("a")
+        assert self._sent_cookies("a") is None
+
+    def test_release_default_jar(self):
+        self._process_response(None)
+        self.mw.release_cookiejar(None)
+        assert self._sent_cookies(None) is None
+
+    def test_release_keeps_other_jars(self):
+        self._process_response("a", cookie="C1=one")
+        self._process_response("b", cookie="C2=two")
+        self.mw.release_cookiejar("a")
+        assert self._sent_cookies("a") is None
+        assert self._sent_cookies("b") == b"C2=two"
+
+    def test_release_unknown_jar(self):
+        self._process_response("a")
+        self.mw.release_cookiejar("unknown")
+        self.mw.release_cookiejar("unknown")
+        assert self._sent_cookies("a") == b"C1=value1"
+
+    def test_reuse_after_release(self):
+        self._process_response("a", cookie="C1=old")
+        self.mw.release_cookiejar("a")
+        self._process_response("a", cookie="C1=new")
+        assert self._sent_cookies("a") == b"C1=new"
+
+    def test_late_response_from_released_jar(self):
+        request1 = self._request("a")
+        self.mw.release_cookiejar("a")
+        # A response to a request sent before the release arrives after a
+        # new session has started with the same jar key.
+        assert self._sent_cookies("a") is None
+        response1 = Response(
+            "http://scrapytest.org/",
+            headers={"Set-Cookie": "C1=stale; path=/"},
+            request=request1,
+        )
+        assert self.mw.process_response(request1, response1) is response1
+        assert self._sent_cookies("a") is None
+
+    def test_spider_closed(self):
+        self._process_response("a", cookie="C1=one")
+        self._process_response("b", cookie="C2=two")
+        self.crawler.signals.send_catch_log(
+            signal=signals.spider_closed, spider=self.crawler.spider
+        )
+        assert not self.mw.jars
+        assert self._sent_cookies("a") is None
+        assert self._sent_cookies("b") is None

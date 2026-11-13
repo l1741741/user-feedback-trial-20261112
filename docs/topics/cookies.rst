@@ -85,6 +85,36 @@ it along on subsequent requests:
         )
 
 
+Releasing cookie jars
+=====================
+
+.. versionadded:: VERSION
+
+Cookie jars are kept in memory until the spider closes, at which point they
+are all discarded. When a crawl opens many sessions, e.g. one per account,
+you can discard a jar as soon as its session is over with
+:meth:`~scrapy.downloadermiddlewares.cookies.CookiesMiddleware.release_cookiejar`:
+
+.. skip: next
+.. code-block:: python
+
+    from scrapy.downloadermiddlewares.cookies import CookiesMiddleware
+
+
+    class MySpider(Spider):
+        def parse_page(self, response):
+            if self.session_is_over:
+                middleware = self.crawler.get_downloader_middleware(
+                    CookiesMiddleware
+                )
+                middleware.release_cookiejar(response.meta["cookiejar"])
+
+Releasing a jar that does not exist has no effect. After a jar is released,
+the next request with the same :reqmeta:`cookiejar` meta key starts with an
+empty jar, and cookies from responses to requests sent before the release
+are discarded instead of being stored in the new jar.
+
+
 .. reqmeta:: dont_merge_cookies
 
 Skipping the cookie jar for a request

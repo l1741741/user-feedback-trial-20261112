@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Self
 
 from tldextract import TLDExtract
 
+from scrapy import signals
 from scrapy.exceptions import NotConfigured
 from scrapy.http import Response
 from scrapy.http.cookies import CookieJar
@@ -48,12 +49,17 @@ def _has_valid_name_prefix(cookie: Cookie, request: Request) -> bool:
 
 
 class CookiesMiddleware:
-    """This middleware enables working with sites that need cookies"""
+    """This middleware enables working with sites that need cookies
+
+    Cookie jars are discarded when the spider closes. To discard a cookie
+    jar earlier, use :meth:`release_cookiejar`.
+    """
 
     crawler: Crawler
 
     def __init__(self, debug: bool = False):
         self.jars: defaultdict[Any, CookieJar] = defaultdict(CookieJar)
+        self._jar_generations: dict[Any, int] = {}
         self.debug: bool = debug
 
     @classmethod
@@ -62,7 +68,26 @@ class CookiesMiddleware:
             raise NotConfigured
         o = cls(crawler.settings.getbool("COOKIES_DEBUG"))
         o.crawler = crawler
+        crawler.signals.connect(o.spider_closed, signal=signals.spider_closed)
         return o
+
+    def release_cookiejar(self, cookiejarkey: Any) -> None:
+        """Discard the cookie jar identified by *cookiejarkey*.
+
+        Releasing a jar that does not exist has no effect. After a jar is
+        released, the next request with the same :reqmeta:`cookiejar` meta
+        key starts with an empty jar, and cookies from responses to
+        requests sent before the release are discarded instead of being
+        stored in the new jar.
+        """
+        self.jars.pop(cookiejarkey, None)
+        self._jar_generations[cookiejarkey] = (
+            self._jar_generations.get(cookiejarkey, 0) + 1
+        )
+
+    def spider_closed(self, spider: Spider) -> None:
+        self.jars.clear()
+        self._jar_generations.clear()
 
     def _process_cookies(
         self, cookies: Iterable[Cookie], *, jar: CookieJar, request: Request
@@ -91,6 +116,9 @@ class CookiesMiddleware:
             return None
 
         cookiejarkey = request.meta.get("cookiejar")
+        request.meta["_cookiejar_generation"] = self._jar_generations.get(
+            cookiejarkey, 0
+        )
         jar = self.jars[cookiejarkey]
         cookies = self._get_request_cookies(jar, request)
         self._process_cookies(cookies, jar=jar, request=request)
@@ -110,6 +138,13 @@ class CookiesMiddleware:
 
         # extract cookies from Set-Cookie and drop invalid/expired cookies
         cookiejarkey = request.meta.get("cookiejar")
+        generation = request.meta.get("_cookiejar_generation")
+        if generation is not None and generation != self._jar_generations.get(
+            cookiejarkey, 0
+        ):
+            # The jar was released after the request was sent, so the
+            # response belongs to a session that no longer exists.
+            return response
         jar = self.jars[cookiejarkey]
         cookies = [
             cookie
