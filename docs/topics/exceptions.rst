@@ -14,6 +14,8 @@ the :ref:`download handler exceptions <download-handlers-exceptions>`.
 
 .. autoexception:: DecompressionError
 
+.. autoexception:: DownloadDeadlineExceededError
+
 .. autoexception:: DontCloseSpider
 
 .. autoexception:: DropItem

@@ -1239,6 +1239,27 @@ key, in which case they keep that slot.
    original request, even when they pointed to a different domain.
 
 
+.. setting:: DOWNLOAD_DEADLINE
+
+DOWNLOAD_DEADLINE
+-----------------
+
+.. versionadded:: VERSION
+
+Default: ``0``
+
+The total amount of time (in seconds) that the downloads of a request and of
+the requests derived from it, e.g. retries and redirects, may take altogether.
+``0`` (the default) means no limit.
+
+The countdown starts when the first request of the chain reaches the
+downloader, and is measured with a monotonic clock, so it is not affected by
+system clock changes. The timeout of each download in the chain is the
+remaining time or :setting:`DOWNLOAD_TIMEOUT` (or the
+:reqmeta:`download_timeout` :attr:`.Request.meta` key), whichever is lower.
+Once the time is up, no new download is started and the request fails with
+:exc:`~scrapy.exceptions.DownloadDeadlineExceededError`.
+
 .. setting:: DOWNLOAD_TIMEOUT
 
 DOWNLOAD_TIMEOUT
