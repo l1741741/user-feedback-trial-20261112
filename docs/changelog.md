@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+- Harden `WheelFile.validate_record` into a full pre-install integrity check:
+  RECORD paths and non-directory ZIP members are now matched bidirectionally
+  and exactly, duplicate ZIP members and duplicate RECORD paths are reported
+  instead of being silently overwritten, and malformed CSV rows no longer
+  abort the whole validation
+- Restrict wheel RECORD hashes to `sha256`, `sha384` and `sha512` with
+  canonical, unpadded URL-safe Base64 digests of the correct length, and
+  require ASCII decimal non-negative size strings
+- Stream content validation in 64 KiB chunks without extracting to disk;
+  per-member read or CRC errors are collected with the member name and reason
+  while remaining members are still checked
+
 ## v1.1.0 (Oct 12, 2026)
 - Add early return when there are no optimization levels to compile bytecode for (#341)
 - Avoid building a `pathlib.Path` object for each record entry (#342)

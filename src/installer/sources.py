@@ -1,6 +1,12 @@
 """Source of information about a wheel file."""
 
+import base64
+import binascii
+import csv
+import hashlib
+import io
 import posixpath
+import re
 import stat
 import zipfile
 from collections.abc import Iterator
@@ -15,7 +21,7 @@ from typing import (
 )
 
 from installer.exceptions import InstallerError
-from installer.records import InvalidRecordEntry, RecordEntry, parse_record_file
+from installer.records import Hash, parse_record_file
 from installer.utils import canonicalize_name, parse_wheel_filename
 
 if TYPE_CHECKING:
@@ -25,6 +31,22 @@ WheelContentElement = tuple[tuple[str, str, str], BinaryIO, bool]
 
 
 __all__ = ["WheelFile", "WheelSource"]
+
+#: Maximum number of bytes read from a wheel member in one ``read()`` call.
+_VALIDATION_CHUNK_SIZE = 64 * 1024
+
+#: Hash algorithms accepted in a wheel's ``RECORD`` (PEP 427 / installers'
+#: current practice). The generic ``Hash`` API intentionally accepts more.
+_ACCEPTED_RECORD_HASHES: frozenset[str] = frozenset({"sha256", "sha384", "sha512"})
+
+#: Canonical, unpadded URL-safe Base64 (RFC 4648 section 5).
+_UNPADDED_URLSAFE_B64_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+#: ASCII decimal non-negative integer, no sign, no whitespace, no Unicode digits.
+_ASCII_DECIMAL_RE = re.compile(r"^[0-9]+$")
+
+#: Names of the optional digital signature files (PEP 427).
+_SIGNATURE_FILE_NAMES = frozenset({"RECORD.jws", "RECORD.p7s"})
 
 
 class WheelSource:
@@ -146,6 +168,132 @@ class _WheelFileBadDistInfo(ValueError, InstallerError):
         )
 
 
+def _parse_wheel_record(
+    record_text: str,
+) -> tuple[dict[str, tuple[str, str, str]], list[str]]:
+    """Parse a wheel's ``RECORD`` text.
+
+    Unlike :func:`installer.records.parse_record_file`, this keeps paths
+    exactly as written in the CSV (no backslash rewriting or other
+    normalization), so they can be matched precisely against the raw member
+    names stored in the ZIP. Malformed rows and duplicate paths are collected
+    as issues instead of aborting the parse or silently overwriting values.
+
+    :param record_text: full decoded contents of ``RECORD``.
+    :return: mapping of path to the first ``(path, hash, size)`` row seen, and
+        the structural issues found while parsing.
+    """
+    issues: list[str] = []
+    entries: dict[str, tuple[str, str, str]] = {}
+
+    reader = csv.reader(
+        io.StringIO(record_text, newline=""),
+        delimiter=",",
+        quotechar='"',
+        lineterminator="\n",
+    )
+    for row_index, elements in enumerate(reader):
+        if len(elements) != 3:
+            issues.append(
+                f"Row Index {row_index}: expected 3 elements, got {len(elements)}"
+            )
+            continue
+
+        row = (elements[0], elements[1], elements[2])
+        path = row[0]
+        if path in entries:
+            issues.append(f"Duplicate path {path!r} in RECORD")
+            continue
+        entries[path] = row
+
+    return entries, issues
+
+
+def _parse_record_hash(hash_text: str) -> tuple[Hash | None, list[str]]:
+    """Validate a ``RECORD`` hash column under the wheel-specific rules.
+
+    Only :data:`_ACCEPTED_RECORD_HASHES` are accepted and the digest must be
+    canonical, unpadded URL-safe Base64 whose decoded length matches the
+    algorithm's digest size.
+
+    :param hash_text: raw second column of a ``RECORD`` row.
+    :return: the parsed :class:`Hash` (or ``None`` when invalid) and the list
+        of issues found.
+    """
+    issues: list[str] = []
+
+    algorithm, separator, digest_text = hash_text.partition("=")
+    if not separator or not algorithm or not digest_text:
+        return None, ["`hash` does not follow the required format"]
+
+    if algorithm not in _ACCEPTED_RECORD_HASHES:
+        issues.append(f"invalid hash algorithm {algorithm!r}")
+
+    if not _UNPADDED_URLSAFE_B64_RE.fullmatch(digest_text):
+        issues.append("hash digest is not unpadded URL-safe Base64")
+    else:
+        try:
+            # Re-add the padding that canonical RECORD digests strip.
+            padding = "=" * (-len(digest_text) % 4)
+            digest = base64.b64decode(
+                digest_text + padding, altchars=b"-_", validate=True
+            )
+        except (binascii.Error, ValueError):
+            issues.append("hash digest is not valid URL-safe Base64")
+        else:
+            if algorithm in _ACCEPTED_RECORD_HASHES:
+                expected_digest_size = hashlib.new(algorithm).digest_size
+                if len(digest) != expected_digest_size:
+                    issues.append(
+                        f"hash digest decodes to {len(digest)} bytes, expected "
+                        f"{expected_digest_size} bytes for {algorithm!r}"
+                    )
+
+    if issues:
+        return None, issues
+    return Hash(algorithm, digest_text), []
+
+
+def _parse_record_size(size_text: str) -> tuple[int | None, str | None]:
+    """Validate a ``RECORD`` size column.
+
+    Only ASCII decimal non-negative integer strings are accepted (leading
+    zeros are fine; signs, whitespace and Unicode digits are not).
+
+    :param size_text: raw third column of a ``RECORD`` row.
+    :return: the parsed size (or ``None`` when invalid) and the issue found,
+        if any.
+    """
+    if not _ASCII_DECIMAL_RE.fullmatch(size_text):
+        return None, "`size` is not an ASCII decimal non-negative integer"
+    return int(size_text), None
+
+
+def _hash_and_size_stream(
+    stream: BinaryIO, algorithm: str
+) -> tuple[str, int]:
+    """Hash and measure a wheel member while streaming it in 64 KiB chunks.
+
+    The member is never fully buffered in memory and nothing is extracted to
+    the filesystem.
+
+    :param stream: open member stream from :meth:`zipfile.ZipFile.open`.
+    :param algorithm: name of the hash algorithm to use.
+    :return: the unpadded URL-safe Base64 digest and the number of bytes read.
+    """
+    hasher = hashlib.new(algorithm)
+    size = 0
+    while True:
+        chunk = stream.read(_VALIDATION_CHUNK_SIZE)
+        if not chunk:
+            break
+        hasher.update(chunk)
+        size += len(chunk)
+
+    digest = base64.urlsafe_b64encode(hasher.digest()).decode("ascii").rstrip("=")
+    return digest, size
+
+
 class WheelFile(WheelSource):
     """Implements `WheelSource`, for an existing file from the filesystem.
 
@@ -234,77 +382,139 @@ class WheelFile(WheelSource):
         This method should be called before :py:func:`install <installer.install>`
         if validation is required.
 
-        File names will always be validated against ``RECORD``.
+        Non-directory members of the ZIP and paths listed in ``RECORD`` are
+        checked bidirectionally: duplicate ZIP member names, duplicate
+        ``RECORD`` paths, rows that do not have exactly three columns, files
+        listed in ``RECORD`` but absent from the ZIP, and ZIP members missing
+        from ``RECORD`` are all reported. The optional ``RECORD.jws`` and
+        ``RECORD.p7s`` files directly inside this wheel's ``.dist-info``
+        directory are the only members allowed to be absent from ``RECORD``;
+        listing either one there is still an error, and same-named files
+        elsewhere in the wheel are not exempt.
 
-        If ``validate_contents`` is true, sizes and hashes of files
-        will also be validated against ``RECORD``.
+        Every regular file must declare both a hash (``sha256``, ``sha384``
+        or ``sha512`` with a canonical, unpadded URL-safe Base64 digest of
+        the algorithm's digest length) and an ASCII decimal non-negative
+        size. The ``RECORD`` file itself must be present and leave both
+        columns empty.
 
-        :param validate_contents: Whether to validate content integrity.
+        :param validate_contents: Whether to stream each regular member and
+            verify its actual size and hash against ``RECORD``. When false,
+            only the structural and value-format checks above are performed.
         """
+        wheel_filename = self._zipfile.filename
+        dist_info_dir = self.dist_info_dir
+        record_path = f"{dist_info_dir}/RECORD"
+
         try:
-            record_lines = self.read_dist_info("RECORD").splitlines()
-            record_mapping = {
-                record[0]: record for record in parse_record_file(record_lines)
-            }
+            record_text = self.read_dist_info("RECORD")
         except Exception as exc:
             raise _WheelFileValidationError(
-                [f"Unable to retrieve `RECORD` from {self._zipfile.filename}: {exc!r}"]
+                [f"Unable to retrieve `RECORD` from {wheel_filename}: {exc!r}"]
             ) from exc
 
-        issues: list[str] = []
+        record_entries, issues = _parse_wheel_record(record_text)
 
+        # Record every non-directory ZIP member, detecting duplicates without
+        # letting a later entry shadow an earlier one.
+        seen_members: set[str] = set()
+        members: list[zipfile.ZipInfo] = []
         for item in self._zipfile.infolist():
             if item.filename[-1:] == "/":  # looks like a directory
                 continue
+            if item.filename in seen_members:
+                issues.append(
+                    f"In {wheel_filename}, {item.filename} is duplicated in the ZIP"
+                )
+                continue
+            seen_members.add(item.filename)
+            members.append(item)
 
-            record_args = record_mapping.pop(item.filename, None)
+        for item in members:
+            # Exact match against the raw name stored in the ZIP.
+            record_args = record_entries.pop(item.filename, None)
 
-            if self.dist_info_dir == posixpath.commonpath(
-                [self.dist_info_dir, item.filename]
-            ) and item.filename.split("/")[-1] in ("RECORD.p7s", "RECORD.jws"):
-                # both are for digital signatures, and not mentioned in RECORD
+            is_dist_info_signature = (
+                posixpath.dirname(item.filename) == dist_info_dir
+                and posixpath.basename(item.filename) in _SIGNATURE_FILE_NAMES
+            )
+            if is_dist_info_signature:
+                # Both files are for digital signatures, and not mentioned in
+                # RECORD; same-named files outside this directory are not exempt.
                 if record_args is not None:
-                    # Incorrectly contained
                     issues.append(
-                        f"In {self._zipfile.filename}, digital signature file {item.filename} is incorrectly contained in RECORD."
+                        f"In {wheel_filename}, digital signature file "
+                        f"{item.filename} is incorrectly contained in RECORD."
                     )
                 continue
 
             if record_args is None:
                 issues.append(
-                    f"In {self._zipfile.filename}, {item.filename} is not mentioned in RECORD"
+                    f"In {wheel_filename}, {item.filename} is not mentioned in RECORD"
                 )
                 continue
 
-            try:
-                record = RecordEntry.from_elements(*record_args)
-            except InvalidRecordEntry as e:
-                for issue in e.issues:
+            if item.filename == record_path:
+                # RECORD itself must exist and declare neither hash nor size.
+                if record_args[1] or record_args[2]:
                     issues.append(
-                        f"In {self._zipfile.filename}, entry in RECORD file for "
-                        f"{item.filename} is invalid: {issue}"
+                        f"In {wheel_filename}, RECORD file incorrectly contains "
+                        "hash / size."
                     )
                 continue
 
-            if item.filename == f"{self.dist_info_dir}/RECORD":
-                # Assert that RECORD doesn't have size and hash.
-                if record.hash_ is not None or record.size is not None:
-                    # Incorrectly contained hash / size
-                    issues.append(
-                        f"In {self._zipfile.filename}, RECORD file incorrectly contains hash / size."
-                    )
-                continue
-            if record.hash_ is None or record.size is None:
-                # Report empty hash / size
+            hash_text, size_text = record_args[1], record_args[2]
+            if not hash_text or not size_text:
                 issues.append(
-                    f"In {self._zipfile.filename}, hash / size of {item.filename} is not included in RECORD"
+                    f"In {wheel_filename}, hash / size of {item.filename} is not "
+                    "included in RECORD"
                 )
+                continue
+
+            record_hash, hash_issues = _parse_record_hash(hash_text)
+            for issue in hash_issues:
+                issues.append(
+                    f"In {wheel_filename}, entry in RECORD file for "
+                    f"{item.filename} is invalid: {issue}"
+                )
+
+            record_size, size_issue = _parse_record_size(size_text)
+            if size_issue is not None:
+                issues.append(
+                    f"In {wheel_filename}, entry in RECORD file for "
+                    f"{item.filename} is invalid: {size_issue}"
+                )
+
+            if record_hash is None or record_size is None:
+                # Cannot meaningfully check bytes against malformed metadata.
+                continue
+
             if validate_contents:
-                with self._zipfile.open(item, "r") as stream:
-                    if not record.validate_stream(cast("BinaryIO", stream)):
-                        issues.append(
-                            f"In {self._zipfile.filename}, hash / size of {item.filename} didn't match RECORD"
+                try:
+                    with self._zipfile.open(item, "r") as stream:
+                        actual_digest, actual_size = _hash_and_size_stream(
+                            cast("BinaryIO", stream), record_hash.name
                         )
+                except Exception as exc:  # noqa: BLE001 - keep checking other members
+                    issues.append(
+                        f"In {wheel_filename}, unable to read {item.filename} for "
+                        f"validation: {exc!r}"
+                    )
+                    continue
+
+                if actual_size != record_size or actual_digest != record_hash.value:
+                    issues.append(
+                        f"In {wheel_filename}, hash / size of {item.filename} "
+                        "didn't match RECORD"
+                    )
+
+        # Anything still listed in RECORD has no corresponding non-directory
+        # ZIP member (signature files were popped above if present).
+        for leftover_path in record_entries:
+            issues.append(
+                f"In {wheel_filename}, {leftover_path} is mentioned in RECORD but "
+                "not present in the ZIP"
+            )
 
         if issues:
             raise _WheelFileValidationError(issues)
