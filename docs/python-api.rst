@@ -593,6 +593,55 @@ This method also accepts ``offset=`` and ``limit=`` arguments, for specifying an
 .. note::
     In the CLI: :ref:`sqlite-utils rows <cli_rows>`
 
+.. _python_api_rows_keyset:
+
+Paginating rows with keyset cursors
+===================================
+
+When exporting a table in multiple batches - especially across process restarts - ``OFFSET`` pagination is fragile: inserting or deleting rows shifts the offsets, and duplicate or ``NULL`` sort values break a naive "column greater than the last value" query.
+
+``table.rows_keyset(order_by, ...)`` implements keyset (seek) pagination instead. It returns a page of rows plus an opaque ``next_cursor`` string that encodes the position of the last row::
+
+    >>> db = sqlite_utils.Database(memory=True)
+    >>> db["dogs"].insert_all([
+    ...     {"id": 1, "name": "Cleo", "age": 4},
+    ...     {"id": 2, "name": "Pancakes", "age": 3},
+    ...     {"id": 3, "name": "Rex", "age": 4},
+    ... ], pk="id")
+    >>> table = db.table("dogs")
+    >>> page = table.rows_keyset(["age", "id"], limit=2)
+    >>> page["rows"]
+    [{'id': 2, 'name': 'Pancakes', 'age': 3}, {'id': 1, 'name': 'Cleo', 'age': 4}]
+    >>> page["next_cursor"]  # doctest: +SKIP
+    'su-ks1:eyJ2IjogMSwgInRhYmxlIjogImRvZ3MiLCAuLi4'
+    >>> next_page = table.rows_keyset(["age", "id"], limit=2, after=page["next_cursor"])
+    >>> next_page["rows"]
+    [{'id': 3, 'name': 'Rex', 'age': 4}]
+    >>> next_page["next_cursor"] is None
+    True
+
+``order_by`` is a non-empty sequence of **real column names** - SQL fragments are not accepted, and unknown or duplicated columns raise ``ValueError``. Column names containing spaces, commas, double quotes or SQL keywords are supported.
+
+To produce a total order even when the chosen columns contain duplicates or ``NULL``, a unique suffix is appended automatically:
+
+* On an ordinary rowid table, an unshadowed ``rowid`` alias (``rowid`` / ``_rowid_`` / ``oid``) is used.
+* On a ``WITHOUT ROWID`` table, the declared composite primary key is used.
+* If all three rowid aliases are shadowed by real columns and the table has no non-NULL unique primary key, ``ValueError`` is raised rather than assuming some column is unique.
+
+All sorting and seek comparisons are executed by SQLite against the columns themselves, so declared collations such as ``NOCASE`` and ``RTRIM`` and SQLite's native ``NULL`` ordering are honored. Values are never re-sorted or stringified in Python: integers, floats, text, ``NULL`` and BLOBs cross page boundaries in their original types.
+
+Pass ``reverse=True`` to traverse the whole ordering backwards, and use ``where`` / ``where_args`` in the same style as ``rows_where()``, with either positional or named parameters::
+
+    page = table.rows_keyset(
+        ["id"], where="age > :age", where_args={"age": 3}, limit=10
+    )
+
+Cursors survive the connection being closed and the database file being reopened. Each cursor is bound to the table, its schema, ``order_by``, ``reverse``, ``where`` and ``where_args``; reusing one against a different table, different filter arguments, or after a schema change raises ``ValueError``. Cursor contents are untrusted input: they are validated on decode and only ever reach SQL through bound parameters. The encoding is not cryptographically signed, so it is not a defense against an attacker who knows the format.
+
+Rows inserted or deleted before the cursor position do not cause already-returned rows to repeat, as long as the values of the sorting key columns are not modified while paging. This method does **not** provide a cross-transaction consistency snapshot: a page reflects the database state at the moment that page is queried. For a fully consistent export, hold one transaction open for the whole run or snapshot the database file first.
+
+Paging uses key-range conditions with ``LIMIT`` (fetching at most ``limit + 1`` rows to detect the next page) and never uses ``OFFSET`` or reads the whole table into Python. No auxiliary tables are created and the database is not modified.
+
 .. _python_api_rows_count_where:
 
 Counting rows

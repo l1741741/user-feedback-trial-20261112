@@ -1,7 +1,9 @@
 import binascii
+import base64
 import contextlib
 import datetime
 import decimal
+import hashlib
 import importlib
 import inspect
 import itertools
@@ -165,6 +167,118 @@ def resolve_casing(name: str, candidates: Iterable[str]) -> str:
         if fold_identifier_case(candidate) == folded:
             return candidate
     return name
+
+
+# Keyset pagination (Table.rows_keyset) cursor machinery.
+#
+# A cursor is an opaque, self-describing string. Its payload is JSON encoded
+# with type tags (so BLOBs stay BLOBs and integers stay integers rather than
+# being coerced to text), then base64url-encoded. Cursor contents are treated
+# as untrusted input: nothing decoded from a cursor is ever interpolated into
+# SQL, all values go through parameter binding, and every field is validated.
+# The encoding is not a security boundary - see Table.rows_keyset docs.
+_KEYSET_CURSOR_VERSION = 1
+_KEYSET_CURSOR_PREFIX = "su-ks1:"
+_WITHOUT_ROWID_RE = re.compile(r"without\s+rowid", re.IGNORECASE)
+
+
+def _keyset_encode_value(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {"t": "null"}
+    # bool must be checked before int - bool is a subclass of int
+    if isinstance(value, bool):
+        return {"t": "bool", "v": value}
+    if isinstance(value, int):
+        return {"t": "int", "v": value}
+    if isinstance(value, float):
+        return {"t": "float", "v": value}
+    if isinstance(value, str):
+        return {"t": "text", "v": value}
+    if isinstance(value, bytes):
+        return {
+            "t": "blob",
+            "v": base64.b64encode(value).decode("ascii"),
+        }
+    if isinstance(value, Mapping):
+        return {
+            "t": "dict",
+            "v": {key: _keyset_encode_value(item) for key, item in value.items()},
+        }
+    if isinstance(value, Sequence):
+        return {"t": "list", "v": [_keyset_encode_value(item) for item in value]}
+    raise ValueError(
+        "Keyset cursor can only carry SQLite-native values (NULL, integers, "
+        f"floats, text and BLOBs), got {type(value).__name__}"
+    )
+
+
+def _keyset_decode_value(node: Any) -> Any:
+    if not isinstance(node, dict) or not {"t"}.issubset(node) or not set(
+        node
+    ).issubset({"t", "v"}):
+        raise ValueError("Invalid keyset cursor: malformed value entry")
+    tag = node["t"]
+    encoded = node.get("v")
+    if tag == "null":
+        if "v" in node and encoded is not None:
+            raise ValueError("Invalid keyset cursor: malformed NULL value")
+        return None
+    if tag == "bool":
+        if not isinstance(encoded, bool):
+            raise ValueError("Invalid keyset cursor: malformed boolean value")
+        return encoded
+    if tag == "int":
+        # bool is a subclass of int - reject it so the round trip is exact
+        if not isinstance(encoded, int) or isinstance(encoded, bool):
+            raise ValueError("Invalid keyset cursor: malformed integer value")
+        return encoded
+    if tag == "float":
+        if not isinstance(encoded, (int, float)) or isinstance(encoded, bool):
+            raise ValueError("Invalid keyset cursor: malformed float value")
+        return float(encoded)
+    if tag == "text":
+        if not isinstance(encoded, str):
+            raise ValueError("Invalid keyset cursor: malformed text value")
+        return encoded
+    if tag == "blob":
+        if not isinstance(encoded, str):
+            raise ValueError("Invalid keyset cursor: malformed BLOB value")
+        try:
+            return base64.b64decode(encoded.encode("ascii"), validate=True)
+        except (ValueError, binascii.Error) as ex:
+            raise ValueError("Invalid keyset cursor: malformed BLOB value") from ex
+    if tag == "list":
+        if not isinstance(encoded, list):
+            raise ValueError("Invalid keyset cursor: malformed list value")
+        return [_keyset_decode_value(item) for item in encoded]
+    if tag == "dict":
+        if not isinstance(encoded, dict) or not all(
+            isinstance(key, str) for key in encoded
+        ):
+            raise ValueError("Invalid keyset cursor: malformed dict value")
+        return {key: _keyset_decode_value(item) for key, item in encoded.items()}
+    raise ValueError(f"Invalid keyset cursor: unknown value type {tag!r}")
+
+
+def _keyset_encode_cursor(payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
+    return _KEYSET_CURSOR_PREFIX + base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _keyset_decode_cursor(cursor: str) -> dict[str, Any]:
+    if not isinstance(cursor, str) or not cursor.startswith(_KEYSET_CURSOR_PREFIX):
+        raise ValueError("Invalid keyset cursor: unrecognized format")
+    encoded = cursor[len(_KEYSET_CURSOR_PREFIX) :]
+    try:
+        raw = base64.urlsafe_b64decode(encoded.encode("ascii"))
+        payload = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as ex:
+        raise ValueError("Invalid keyset cursor: payload could not be decoded") from ex
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid keyset cursor: payload has the wrong shape")
+    return payload
 
 
 pd: Any = None
@@ -2365,6 +2479,462 @@ class Table(Queryable):
     def use_rowid(self) -> bool:
         "Does this table use ``rowid`` for its primary key (no other primary keys are specified)?"
         return not any(column for column in self.columns if column.is_pk)
+
+    def _keyset_table_signature(self) -> str:
+        # The CREATE statement covers columns, types, collations, constraints
+        # and WITHOUT ROWID - anything that could change ordering or the key.
+        schema_sql = self.schema
+        return hashlib.sha256(schema_sql.encode("utf-8")).hexdigest()
+
+    def _keyset_resolve(self, order_by: Sequence[str]) -> list[tuple[str, str, bool]]:
+        """
+        Validate ``order_by`` and build the full ordered list of key columns
+        needed for a total order. Each entry is
+        ``(name, sql_expression, is_rowid_alias)``.
+        """
+        if isinstance(order_by, str) or not isinstance(order_by, Sequence):
+            raise ValueError(
+                "order_by must be a non-empty sequence of real column names"
+            )
+        if len(order_by) == 0:
+            raise ValueError(
+                "order_by must be a non-empty sequence of real column names"
+            )
+        columns = self.columns
+        real_names = [column.name for column in columns]
+        real_folded = {fold_identifier_case(name) for name in real_names}
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for name in order_by:
+            if not isinstance(name, str):
+                raise ValueError(
+                    "order_by entries must be real column names (strings), "
+                    f"not {type(name).__name__}"
+                )
+            if fold_identifier_case(name) not in real_folded:
+                raise ValueError(
+                    f"Unknown column {name!r} in order_by - order_by only "
+                    "accepts real column names, not SQL fragments"
+                )
+            actual = resolve_casing(name, real_names)
+            folded = fold_identifier_case(actual)
+            if folded in seen:
+                raise ValueError(f"Column {actual!r} appears more than once in order_by")
+            seen.add(folded)
+            resolved.append(actual)
+
+        key_columns: list[tuple[str, str, bool]] = [
+            (name, quote_identifier(name), False) for name in resolved
+        ]
+        existing = {fold_identifier_case(name) for name, _, _ in key_columns}
+
+        if self._keyset_is_without_rowid():
+            # The declared PRIMARY KEY of a WITHOUT ROWID table is unique and
+            # implicitly NOT NULL, so it completes the total order.
+            for pk_name in self.pks:
+                if fold_identifier_case(pk_name) not in existing:
+                    key_columns.append((pk_name, quote_identifier(pk_name), False))
+                    existing.add(fold_identifier_case(pk_name))
+            return key_columns
+
+        # Ordinary rowid table: use an unshadowed rowid alias as the tiebreaker.
+        shadowed = {
+            fold_identifier_case(name)
+            for name in real_names
+            if fold_identifier_case(name) in {
+                fold_identifier_case(alias) for alias in ROWID_ALIASES
+            }
+        }
+        alias = next(
+            (
+                name
+                for name in ROWID_ALIASES
+                if fold_identifier_case(name) not in shadowed
+            ),
+            None,
+        )
+        if alias is not None:
+            # Left unquoted on purpose: it is not a real column, and SQLite
+            # turns an unresolvable double-quoted identifier into a string.
+            key_columns.append((alias, alias, True))
+            return key_columns
+
+        # Every rowid alias is shadowed by a real column. Fall back to a
+        # primary key only when it is genuinely unique and non-NULL.
+        not_null_pks = [
+            column.name for column in columns if column.is_pk and column.notnull
+        ]
+        for pk_name in not_null_pks:
+            if fold_identifier_case(pk_name) not in existing:
+                key_columns.append((pk_name, quote_identifier(pk_name), False))
+                existing.add(fold_identifier_case(pk_name))
+        pk_fully_covered = bool(not_null_pks) and all(
+            fold_identifier_case(pk_name) in existing for pk_name in not_null_pks
+        )
+        if pk_fully_covered:
+            # A single non-NULL PK column, or the full composite PK present in
+            # the key, makes the order unique.
+            return key_columns
+
+        raise ValueError(
+            "Cannot paginate this table with a stable keyset: rowid, _rowid_ "
+            "and oid are all shadowed by real columns, and the table has no "
+            "non-NULL unique primary key to use as a tiebreaker. Add a UNIQUE "
+            "NOT NULL column (or recreate the table WITHOUT ROWID with a "
+            "primary key) and include it in order_by."
+        )
+
+    def _keyset_is_without_rowid(self) -> bool:
+        return bool(_WITHOUT_ROWID_RE.search(self.schema or ""))
+
+    def _keyset_predicate(
+        self,
+        key_columns: list[tuple[str, str, bool]],
+        after_values: Sequence[Any],
+        reverse: bool,
+        start_index: int = 1,
+        numbered: bool = False,
+    ) -> tuple[str, list[Any], int]:
+        """
+        Build the strict "comes after the cursor row" predicate over the full
+        key. All comparisons reference the columns themselves, so SQLite's
+        declared collations (BINARY/NOCASE/RTRIM/...) and NULL ordering apply.
+        Values are exclusively passed as bound parameters.
+
+        With ``numbered=False`` parameters are named ``:ks_N`` and returned in
+        a dictionary; with ``numbered=True`` they are numbered ``?N`` (N
+        starting at ``start_index``) and returned as an ordered list, so they
+        can coexist with positional ``?`` placeholders in the user's where.
+        Repeated references to the same cursor value each get their own slot.
+        """
+        slot = start_index - 1
+
+        def next_slot(value: Any) -> tuple[str, Any]:
+            nonlocal slot
+            slot += 1
+            token = f"?{slot}" if numbered else f":ks_{slot}"
+            return token, value
+
+        or_terms: list[str] = []
+        sequence_params: list[Any] = []
+        named_params: dict[str, Any] = {}
+
+        def emit(value: Any) -> str:
+            token, value = next_slot(value)
+            if numbered:
+                sequence_params.append(value)
+            else:
+                # sqlite3 binds the :ks_N token from a dict keyed by "ks_N"
+                named_params[f"ks_{slot}"] = value
+            return token
+
+        for i in range(len(key_columns)):
+            and_parts: list[str] = []
+            for j in range(i):
+                pname = emit(after_values[j])
+                and_parts.append(f"{key_columns[j][1]} IS {pname}")
+            _, expr, is_rowid = key_columns[i]
+            cursor_value = after_values[i]
+            if is_rowid:
+                # The implicit rowid is never NULL, so plain comparison is safe.
+                pname = emit(cursor_value)
+                operator = "<" if reverse else ">"
+                and_parts.append(f"{expr} {operator} {pname}")
+            elif reverse:
+                # DESC puts NULLs last. Rows before the cursor on this column
+                # are: non-NULL values strictly smaller, or NULL (which sorts
+                # after everything). When the cursor value itself is NULL,
+                # nothing can come before it at this position.
+                p1 = emit(cursor_value)
+                p2 = emit(cursor_value)
+                p3 = emit(cursor_value)
+                and_parts.append(
+                    "("
+                    f"({p1} IS NOT NULL AND ({expr} IS NULL OR {expr} < {p2})) "
+                    f"OR ({p3} IS NULL AND 0)"
+                    ")"
+                )
+            else:
+                # ASC puts NULLs first. Rows after the cursor on this column
+                # are: non-NULL values strictly greater, or any non-NULL value
+                # when the cursor value is NULL.
+                p1 = emit(cursor_value)
+                p2 = emit(cursor_value)
+                p3 = emit(cursor_value)
+                and_parts.append(
+                    "("
+                    f"({p1} IS NOT NULL AND {expr} > {p2}) "
+                    f"OR ({p3} IS NULL AND {expr} IS NOT NULL)"
+                    ")"
+                )
+            or_terms.append("(" + " AND ".join(and_parts) + ")")
+        params: Any = sequence_params if numbered else named_params
+        return " OR ".join(or_terms), params, slot
+
+    def rows_keyset(
+        self,
+        order_by: Sequence[str],
+        *,
+        limit: int = 100,
+        after: str | None = None,
+        reverse: bool = False,
+        where: str | None = None,
+        where_args: Sequence[Any] | dict[str, Any] = (),
+    ) -> dict[str, Any]:
+        """
+        Return one page of rows using keyset (seek) pagination, along with an
+        opaque cursor for fetching the next page.
+
+        ``order_by`` is a non-empty sequence of **real column names** - SQL
+        fragments are not accepted. The named columns, plus a unique suffix
+        when needed, define a total order over the table:
+
+        - On an ordinary rowid table, an unshadowed ``rowid`` alias
+          (``rowid`` / ``_rowid_`` / ``oid``) is appended as the tiebreaker.
+        - On a ``WITHOUT ROWID`` table, the declared (non-NULL, unique)
+          composite primary key is appended.
+        - If all three rowid aliases are shadowed by real columns and no
+          non-NULL unique primary key is available, ``ValueError`` is raised
+          rather than guessing that some column is unique.
+
+        All ordering, equality and seek comparisons are executed by SQLite
+        against the columns themselves, so declared collations such as
+        ``NOCASE`` and ``RTRIM`` and SQLite's native NULL ordering are honored;
+        values are never re-sorted or stringified in Python. BLOBs, numbers,
+        Unicode text and NULLs cross page boundaries in their original types.
+
+        ``reverse=True`` reverses the entire ordering, including the
+        tiebreaker. The returned row dictionaries contain only the table's
+        real columns - the internal continuation key is never exposed.
+
+        :param order_by: Non-empty sequence of real column names to sort by
+        :param limit: Page size, an integer between 1 and 10000 (booleans rejected)
+        :param after: Cursor returned as ``next_cursor`` by a previous call,
+          or ``None`` to start at the first row
+        :param reverse: Reverse the whole ordering when ``True``
+        :param where: SQL condition fragment, in the same style as
+          :meth:`rows_where`
+        :param where_args: Positional parameters (a sequence, for ``?``
+          placeholders) or named parameters (a dictionary, for ``:name``
+          placeholders); values are always passed via parameter binding
+
+        The returned dictionary is ``{"rows": [...], "next_cursor": ...}``,
+        where ``next_cursor`` is a string while more rows exist and ``None``
+        on the final page. A cursor survives the connection being closed and
+        the database file being reopened. It is bound to the table, its
+        schema, ``order_by``, ``reverse``, ``where`` and ``where_args``; using
+        it against a different table, different filter arguments, or after the
+        schema has changed raises ``ValueError``. Cursors are untrusted input:
+        decoded contents are validated and only ever reach SQL through bound
+        parameters. The encoding is not cryptographically signed, so it is not
+        intended to defend against an attacker who knows the format.
+
+        Rows inserted or deleted before the cursor do not cause rows already
+        returned to be repeated, as long as the key values used for sorting
+        are not modified while paging. This method does not provide a
+        cross-transaction consistency snapshot: rows changed *after* a cursor
+        was issued may move within the order, and each page sees the database
+        as it is when that page is queried. For a stable export, hold a single
+        transaction open or snapshot the database file first.
+
+        Only ``LIMIT`` is used for paging - there is no ``OFFSET`` - and no
+        auxiliary tables are created or database contents modified.
+        """
+        if not self.exists():
+            raise NoTable(f"Table {self.name} does not exist")
+        if not isinstance(reverse, bool):
+            raise ValueError("reverse must be a boolean")
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("limit must be an integer between 1 and 10000")
+        if not 1 <= limit <= 10000:
+            raise ValueError("limit must be an integer between 1 and 10000")
+        if where is not None and not isinstance(where, str):
+            raise ValueError("where must be a SQL condition string")
+        if isinstance(where_args, (str, bytes)) or not isinstance(
+            where_args, (Sequence, Mapping)
+        ):
+            raise ValueError(
+                "where_args must be a sequence of positional parameters or a "
+                "dictionary of named parameters"
+            )
+        named_args = isinstance(where_args, Mapping)
+        normalized_args: Sequence[Any] | Mapping[str, Any] = (
+            dict(where_args) if named_args else list(where_args)
+        )
+        if named_args and any(
+            str(name).startswith("ks_") for name in normalized_args
+        ):
+            raise ValueError(
+                "where_args parameter names starting with 'ks_' are reserved "
+                "for keyset pagination internals"
+            )
+
+        key_columns = self._keyset_resolve(order_by)
+        resolved_order = [name for name, _, is_rowid in key_columns if not is_rowid]
+        signature = self._keyset_table_signature()
+        if where is not None and re.search(r"[ :@$]ks_\d+\b", where):
+            raise ValueError(
+                "where contains a reserved 'ks_N' parameter name used by "
+                "keyset pagination internals"
+            )
+
+        after_values: list[Any] | None = None
+        if after is not None:
+            payload = _keyset_decode_cursor(after)
+            required = {
+                "v",
+                "table",
+                "schema",
+                "order_by",
+                "reverse",
+                "where",
+                "where_args",
+                "keys",
+            }
+            if not required.issubset(payload):
+                raise ValueError(
+                    "Invalid keyset cursor: missing fields - pagination "
+                    "cannot resume from this cursor"
+                )
+            if payload["v"] != _KEYSET_CURSOR_VERSION:
+                raise ValueError(
+                    "Invalid keyset cursor: unsupported cursor version"
+                )
+            if not isinstance(payload["table"], str) or payload["table"] != self.name:
+                raise ValueError(
+                    "Invalid keyset cursor: it was created for a different table"
+                )
+            if (
+                not isinstance(payload["schema"], str)
+                or payload["schema"] != signature
+            ):
+                raise ValueError(
+                    "Invalid keyset cursor: the table schema has changed since "
+                    "the cursor was created"
+                )
+            if (
+                not isinstance(payload["order_by"], list)
+                or not all(isinstance(item, str) for item in payload["order_by"])
+                or payload["order_by"] != resolved_order
+            ):
+                raise ValueError(
+                    "Invalid keyset cursor: order_by does not match the cursor"
+                )
+            if not isinstance(payload["reverse"], bool) or payload["reverse"] != reverse:
+                raise ValueError(
+                    "Invalid keyset cursor: reverse does not match the cursor"
+                )
+            if payload["where"] != where:
+                raise ValueError(
+                    "Invalid keyset cursor: where does not match the cursor"
+                )
+            if not isinstance(payload["keys"], list) or len(payload["keys"]) != len(
+                key_columns
+            ):
+                raise ValueError(
+                    "Invalid keyset cursor: continuation key has the wrong shape"
+                )
+            after_values = [_keyset_decode_value(node) for node in payload["keys"]]
+            decoded_args = _keyset_decode_value(payload["where_args"])
+            if named_args:
+                if not isinstance(decoded_args, dict) or decoded_args != dict(
+                    normalized_args
+                ):
+                    raise ValueError(
+                        "Invalid keyset cursor: where_args do not match the cursor"
+                    )
+            else:
+                if isinstance(decoded_args, dict) or list(decoded_args) != list(
+                    normalized_args
+                ):
+                    raise ValueError(
+                        "Invalid keyset cursor: where_args do not match the cursor"
+                    )
+
+        real_columns = [column.name for column in self.columns]
+        select_parts = [quote_identifier(name) for name in real_columns]
+        key_index: dict[str, int] = {}
+        for name, expr, is_rowid in key_columns:
+            if is_rowid:
+                # Aliased so the result set always has a fixed, non-colliding
+                # trailing slot; it is stripped from the returned row dicts.
+                select_parts.append(f"{expr} AS _sqlite_utils_keyset_rowid")
+                key_index[name] = len(real_columns)
+            else:
+                key_index[name] = real_columns.index(name)
+
+        clauses: list[str] = []
+        key_params: Any = None
+        if where is not None:
+            clauses.append("(" + where + ")")
+        if after_values is not None:
+            if named_args:
+                predicate, key_params, _ = self._keyset_predicate(
+                    key_columns, after_values, reverse, numbered=False
+                )
+            else:
+                # Numbered ?N slots follow the user's positional ? slots, so
+                # both parameter styles can be bound from one sequence.
+                predicate, key_params, _ = self._keyset_predicate(
+                    key_columns,
+                    after_values,
+                    reverse,
+                    start_index=len(normalized_args) + 1,
+                    numbered=True,
+                )
+            clauses.append("(" + predicate + ")")
+
+        direction = " DESC" if reverse else ""
+        order_sql = ", ".join(expr + direction for _, expr, _ in key_columns)
+        sql = "SELECT " + ", ".join(select_parts)
+        sql += f" FROM {quote_identifier(self.name)}"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += f" ORDER BY {order_sql} LIMIT {int(limit) + 1}"
+
+        if named_args:
+            # User-provided names cannot collide with the generated ks_ names.
+            bind_params = dict(normalized_args)
+            if key_params is not None:
+                bind_params.update(key_params)
+            cursor_obj = self.db.execute(sql, bind_params)
+        elif key_params is not None:
+            cursor_obj = self.db.execute(
+                sql, list(normalized_args) + list(key_params)
+            )
+        else:
+            cursor_obj = self.db.execute(
+                sql, list(normalized_args) if normalized_args else None
+            )
+
+        fetched = cursor_obj.fetchmany(limit + 1)
+        has_next = len(fetched) > limit
+        page_rows = fetched[:limit]
+
+        rows: list[dict[str, Any]] = []
+        last_key_values: list[Any] | None = None
+        for raw in page_rows:
+            values = list(raw)
+            row = dict(zip(real_columns, values[: len(real_columns)]))
+            rows.append(row)
+            last_key_values = [values[key_index[name]] for name, _, _ in key_columns]
+
+        next_cursor: str | None = None
+        if has_next:
+            assert last_key_values is not None
+            next_cursor = _keyset_encode_cursor(
+                {
+                    "v": _KEYSET_CURSOR_VERSION,
+                    "table": self.name,
+                    "schema": signature,
+                    "order_by": resolved_order,
+                    "reverse": reverse,
+                    "where": where,
+                    "where_args": _keyset_encode_value(normalized_args),
+                    "keys": [_keyset_encode_value(value) for value in last_key_values],
+                }
+            )
+        return {"rows": rows, "next_cursor": next_cursor}
 
     @property
     def checks(self) -> list[Check]:

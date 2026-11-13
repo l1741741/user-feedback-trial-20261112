@@ -4,6 +4,11 @@
  Changelog
 ===========
 
+Unreleased
+----------
+
+- New ``table.rows_keyset(order_by, ...)`` method for keyset (seek) pagination. It returns ``{"rows": [...], "next_cursor": ...}`` pages using key-range conditions and ``LIMIT`` (never ``OFFSET``), with an opaque cursor that survives connection restarts and is validated against the table, its schema, ordering and filter arguments. Total ordering is completed by an unshadowed ``rowid`` alias or a ``WITHOUT ROWID`` primary key, and SQLite collations (including ``NOCASE`` and ``RTRIM``) and native ``NULL`` ordering are applied by the database rather than Python. See :ref:`python_api_rows_keyset`.
+
 .. _v4_2_1:
 
 4.2.1 (2026-08-13)
