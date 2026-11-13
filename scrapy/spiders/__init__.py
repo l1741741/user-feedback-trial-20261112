@@ -100,6 +100,16 @@ class Spider(object_ref):
     requests scheduled after it.
     """
 
+    allowed_hosts: Collection[str]
+    """The hosts that this spider is allowed to crawl, as a strict allow
+    list that takes precedence over :attr:`allowed_domains` when not empty.
+    See
+    :class:`~scrapy.downloadermiddlewares.offsite.OffsiteMiddleware` for the
+    entry syntax.
+
+    .. versionadded:: VERSION
+    """
+
     start_urls: list[str]
     """Start URLs. See :meth:`start`."""
 

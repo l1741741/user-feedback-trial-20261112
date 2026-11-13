@@ -41,6 +41,8 @@ scrapy.Spider
 
     .. autoattribute:: allowed_domains
 
+    .. autoattribute:: allowed_hosts
+
     .. autoattribute:: start_urls
 
     .. autoattribute:: custom_settings
