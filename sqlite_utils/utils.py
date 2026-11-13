@@ -1,4 +1,5 @@
 import base64
+import codecs
 import contextlib
 import csv
 import enum
@@ -15,6 +16,7 @@ from typing import (
     Any,
     BinaryIO,
     Generic,
+    NoReturn,
     TypeVar,
     Union,
     cast,
@@ -260,6 +262,478 @@ class RowError(Exception):
     pass
 
 
+_JSON_WHITESPACE = " \t\r\n"
+_ASCII_WHITESPACE = " \t\r\n\v\f"
+_JSON_STREAM_END = object()
+
+
+class _JsonRowIterator(Iterator[Row]):
+    """
+    Lazy, forward-only JSON row iterator.
+
+    Reads bytes in chunks of at most ``chunk_size`` and parses one object
+    at a time, so an error in a later record does not discard earlier rows.
+    """
+
+    def __init__(
+        self,
+        fp: BinaryIO,
+        *,
+        newline_delimited: bool,
+        encoding: str,
+        chunk_size: int,
+        close_fp: bool,
+    ) -> None:
+        self._fp = fp
+        self._newline_delimited = bool(newline_delimited)
+        self._encoding = encoding
+        self._chunk_size = chunk_size
+        self._close_fp = bool(close_fp)
+        # Constructing the decoder does not read from fp.  An unknown
+        # encoding raises here, before any read or close.
+        self._decoder = codecs.getincrementaldecoder(encoding)()
+        self._pending_error: UnicodeError | None = None
+        self._text = ""
+        self._index = 0
+        self._eof = False
+        self._rows_parsed = 0
+        self._ndjson_record = 0
+        self._line_number = 1
+        self._mode: str | None = None
+        self._array_state = ""
+        self._closed = False
+        self._finished = False
+        self._input_closed = False
+
+    # Iterator / context manager protocol
+
+    def __iter__(self) -> "_JsonRowIterator":
+        return self
+
+    def __next__(self) -> Row:
+        if self._closed or self._finished:
+            raise StopIteration
+        try:
+            result = self._next_row()
+        except BaseException:
+            self._finished = True
+            try:
+                self._close_input()
+            except Exception:
+                pass
+            raise
+        if result is _JSON_STREAM_END:
+            self._finished = True
+            self._close_input()
+            raise StopIteration
+        return cast(Row, result)
+
+    def __enter__(self) -> "_JsonRowIterator":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._finished = True
+        self._close_input()
+
+    def _close_input(self) -> None:
+        # Exactly one close() call on the caller's file, ever.
+        if not self._close_fp or self._input_closed:
+            return
+        self._input_closed = True
+        self._fp.close()
+
+    # Low-level chunked reading
+
+    def _decode(self, data: bytes) -> str:
+        """
+        Incrementally decode ``data``.
+
+        If the bytes contain an invalid sequence, every character before it
+        is returned normally and the error is remembered in
+        ``self._pending_error`` so it is raised only once the parser has
+        consumed that valid text - an invalid byte in a later record must not
+        discard earlier records that shared the same chunk.
+        """
+        snapshot = self._decoder.getstate()
+        try:
+            text = self._decoder.decode(data)
+        except UnicodeError as ex:
+            text = self._recover_after_decode_error(data, snapshot, ex)
+        if not isinstance(text, str):
+            raise TypeError(f"encoding {self._encoding!r} does not produce text")
+        return text
+
+    def _recover_after_decode_error(
+        self, data: bytes, snapshot: Any, error: UnicodeError
+    ) -> str:
+        if not isinstance(error, UnicodeDecodeError):
+            # e.g. a codec that requires a BOM and did not find one - nothing
+            # in this chunk can be decoded.
+            self._pending_error = error
+            return ""
+        pending = snapshot[0]
+        # error.start is an offset into error.object, which includes any
+        # bytes the decoder was buffering before this call.
+        valid_length = max(0, error.start - len(pending))
+        self._decoder = self._fresh_decoder()
+        self._decoder.setstate(snapshot)
+        text = self._decoder.decode(data[:valid_length])
+        self._pending_error = error
+        return text
+
+    def _fresh_decoder(self) -> Any:
+        return codecs.getincrementaldecoder(self._encoding)()
+
+    def _raise_pending_error(self) -> None:
+        error = self._pending_error
+        self._pending_error = None
+        self._bad(f"invalid {self._encoding} encoded data: {error}", error)
+
+    def _read_chunk(self) -> bool:
+        """
+        Read and decode one chunk, returning True if text is available.
+
+        Every read is bounded by ``chunk_size``.  A short read or a chunk
+        that decodes to nothing (a split multi-byte character) never
+        terminates the stream: only ``b""`` does.
+        """
+        while True:
+            if self._pending_error is not None:
+                self._raise_pending_error()
+            if self._eof:
+                return False
+            data = self._fp.read(self._chunk_size)
+            if isinstance(data, str):
+                raise TypeError("iter_json_rows() requires a binary file-like object")
+            if data == b"":
+                self._eof = True
+                try:
+                    tail = self._decoder.decode(b"", final=True)
+                except UnicodeError as ex:
+                    self._bad(f"invalid {self._encoding} encoded data: {ex}", ex)
+                if isinstance(tail, str) and tail:
+                    self._text = tail
+                    self._index = 0
+                    return True
+                continue
+            text = self._decode(data)
+            if text:
+                self._text = text
+                self._index = 0
+                return True
+            # Partial multi-byte sequence - keep reading.
+
+    def _advance(self) -> bool:
+        """Make sure a character is available, reading chunks as needed."""
+        while self._index >= len(self._text):
+            if self._eof:
+                return False
+            if not self._read_chunk():
+                return False
+        return True
+
+    def _peek_char(self) -> str | None:
+        if not self._advance():
+            return None
+        return self._text[self._index]
+
+    def _take_char(self) -> str:
+        char = self._text[self._index]
+        self._index += 1
+        return char
+
+    def _skip_whitespace(self) -> bool:
+        """Skip JSON whitespace; return False if EOF is reached."""
+        while True:
+            if not self._advance():
+                return False
+            text = self._text
+            index = self._index
+            length = len(text)
+            while index < length and text[index] in _JSON_WHITESPACE:
+                index += 1
+            self._index = index
+            if index < length:
+                return True
+
+    # Error reporting
+
+    def _error_context(self, record: int | None = None, line: int | None = None) -> str:
+        if self._newline_delimited:
+            record_number = record if record is not None else self._ndjson_record + 1
+            line_number = line if line is not None else self._line_number
+            return f"record {record_number} (line {line_number})"
+        record_number = record if record is not None else self._rows_parsed + 1
+        return f"record {record_number}"
+
+    def _bad(
+        self,
+        message: str,
+        cause: BaseException | None = None,
+        *,
+        record: int | None = None,
+        line: int | None = None,
+    ) -> NoReturn:
+        context = self._error_context(record, line)
+        if cause is not None:
+            raise RowsFromFileBadJSON(f"{context}: {message}") from cause
+        raise RowsFromFileBadJSON(f"{context}: {message}")
+
+    # Normal JSON mode
+
+    def _next_row(self) -> Any:
+        if self._newline_delimited:
+            return self._next_ndjson_row()
+        return self._next_json_row()
+
+    def _next_json_row(self) -> Any:
+        if self._mode is None:
+            if not self._skip_whitespace():
+                self._bad("expected a JSON object but the input was empty")
+            char = self._peek_char()
+            if char == "{":
+                self._mode = "single"
+            elif char == "[":
+                self._mode = "array"
+                self._array_state = "first"
+                self._take_char()
+            else:
+                self._bad(f"expected a JSON object or array, found {char!r}")
+
+        if self._mode == "single":
+            self._mode = "single_done"
+            return self._parse_object()
+
+        if self._mode == "single_done":
+            self._require_end_of_input()
+            return _JSON_STREAM_END
+
+        # Array mode
+        while True:
+            if self._array_state == "first":
+                if not self._skip_whitespace():
+                    self._bad("unexpected end of input, expected ']' or an object")
+                char = self._peek_char()
+                if char == "]":
+                    self._take_char()
+                    self._array_state = "done"
+                    continue
+                if char != "{":
+                    self._bad(f"expected a JSON object, found {char!r}")
+                self._array_state = "after_value"
+                return self._parse_object()
+
+            if self._array_state == "value":
+                if not self._skip_whitespace():
+                    self._bad("unexpected end of input, expected a JSON object")
+                char = self._peek_char()
+                if char == "]":
+                    self._bad("trailing comma before ']'")
+                if char != "{":
+                    self._bad(f"expected a JSON object, found {char!r}")
+                self._array_state = "after_value"
+                return self._parse_object()
+
+            if self._array_state == "after_value":
+                if not self._skip_whitespace():
+                    self._bad("unexpected end of input, expected ',' or ']'")
+                char = self._peek_char()
+                if char == ",":
+                    self._take_char()
+                    self._array_state = "value"
+                    continue
+                if char == "]":
+                    self._take_char()
+                    self._array_state = "done"
+                    continue
+                self._bad(f"expected ',' or ']', found {char!r}")
+
+            # self._array_state == "done"
+            self._require_end_of_input()
+            return _JSON_STREAM_END
+
+    def _require_end_of_input(self) -> None:
+        if not self._skip_whitespace():
+            return
+        char = self._peek_char()
+        self._bad(f"unexpected trailing data after JSON value, found {char!r}")
+
+    def _parse_object(self) -> Row:
+        char = self._peek_char()
+        if char != "{":
+            self._bad(f"expected a JSON object, found {char!r}")
+        self._take_char()
+        parts = ["{"]
+        depth = 1
+        in_string = False
+        escaped = False
+        while depth:
+            if not self._advance():
+                if in_string:
+                    self._bad("unexpected end of input inside a JSON string")
+                self._bad("unexpected end of input while parsing a JSON object")
+            text = self._text
+            start = self._index
+            index = start
+            length = len(text)
+            while index < length and depth:
+                current = text[index]
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif current == "\\":
+                        escaped = True
+                    elif current == '"':
+                        in_string = False
+                else:
+                    if current == '"':
+                        in_string = True
+                    elif current in "{[":
+                        depth += 1
+                    elif current in "}]":
+                        depth -= 1
+                index += 1
+            parts.append(text[start:index])
+            self._index = index
+        record_text = "".join(parts)
+        try:
+            value = json.loads(record_text)
+        except ValueError as ex:
+            self._bad(f"invalid JSON: {ex}", ex)
+        if not isinstance(value, dict):
+            self._bad("expected a JSON object")
+        self._rows_parsed += 1
+        return cast(Row, value)
+
+    # Newline-delimited mode
+
+    def _read_line(self) -> tuple[int, str] | None:
+        """Read one physical line, tracking 1-based line numbers."""
+        parts: list[str] = []
+        while True:
+            if not self._advance():
+                if parts:
+                    return self._line_number, "".join(parts)
+                return None
+            text = self._text
+            start = self._index
+            newline = text.find("\n", start)
+            if newline == -1:
+                parts.append(text[start:])
+                self._index = len(text)
+                continue
+            parts.append(text[start:newline])
+            self._index = newline + 1
+            line_number = self._line_number
+            self._line_number += 1
+            return line_number, "".join(parts)
+
+    def _next_ndjson_row(self) -> Any:
+        while True:
+            line_info = self._read_line()
+            if line_info is None:
+                return _JSON_STREAM_END
+            line_number, line = line_info
+            stripped = line.strip(_JSON_WHITESPACE)
+            if not stripped:
+                # Blank lines are ignored and don't increment the record number.
+                continue
+            record_number = self._ndjson_record + 1
+            try:
+                value = json.loads(stripped)
+            except ValueError as ex:
+                self._bad(
+                    f"invalid JSON: {ex}",
+                    ex,
+                    record=record_number,
+                    line=line_number,
+                )
+            if not isinstance(value, dict):
+                self._bad(
+                    "expected a JSON object",
+                    record=record_number,
+                    line=line_number,
+                )
+            self._ndjson_record += 1
+            return cast(Row, value)
+
+
+def _validate_chunk_size(chunk_size: Any) -> int:
+    if isinstance(chunk_size, bool) or not isinstance(chunk_size, int):
+        raise ValueError("chunk_size must be an integer between 1 and 1048576")
+    if not 1 <= chunk_size <= 1048576:
+        raise ValueError("chunk_size must be an integer between 1 and 1048576")
+    return chunk_size
+
+
+def iter_json_rows(
+    fp: BinaryIO,
+    *,
+    newline_delimited: bool = False,
+    encoding: str = "utf-8-sig",
+    chunk_size: int = 65536,
+    close_fp: bool = False,
+) -> Iterator[Row]:
+    """
+    Lazily parse JSON objects from a binary file-like object.
+
+    Only ``fp.read()`` and ``fp.close()`` are used: the input does not
+    need to support ``seek()``, ``peek()``, ``readinto()``, ``fileno()`` or
+    report its length.  At most one incomplete record, the incremental
+    decoder state and one chunk are held in memory, and the first row is
+    returned as soon as its closing ``}`` has been read.
+
+    In the default mode the document must be either a single JSON object
+    or an array of JSON objects.  With ``newline_delimited=True`` each
+    non-blank physical line must contain exactly one JSON object.
+
+    Invalid JSON raises :class:`RowsFromFileBadJSON`, whose message
+    includes the 1-based record number (and, for newline-delimited input,
+    the physical line number).  Rows parsed before the bad record are
+    still returned by earlier ``next()`` calls.  Invalid encoded bytes are
+    reported the same way, with the original ``UnicodeDecodeError``
+    chained.  An ``OSError`` raised by ``fp.read()`` is propagated
+    unchanged.
+
+    The iterator can be used as a context manager and has an explicit
+    ``close()`` method.  With ``close_fp=True`` the caller's file is
+    closed exactly once, whether iteration finishes, fails, is closed
+    early or the ``with`` block exits with an exception.  With the
+    default ``close_fp=False`` the caller remains responsible for
+    closing it.
+
+    .. code-block:: python
+
+        from sqlite_utils.utils import iter_json_rows
+
+        with iter_json_rows(fp, chunk_size=4096) as rows:
+            for row in rows:
+                print(row)
+
+    :param fp: binary file-like object
+    :param newline_delimited: parse one JSON object per physical line
+    :param encoding: encoding for incremental decoding (default allows a
+      leading UTF-8 BOM)
+    :param chunk_size: maximum bytes requested per ``read()`` call,
+      between 1 and 1048576
+    :param close_fp: close ``fp`` when iteration ends, is closed or fails
+    """
+    _validate_chunk_size(chunk_size)
+    return _JsonRowIterator(
+        fp,
+        newline_delimited=newline_delimited,
+        encoding=encoding,
+        chunk_size=chunk_size,
+        close_fp=close_fp,
+    )
+
+
 def _extra_key_strategy(
     reader: Iterable[dict[str | None, object]],
     ignore_extras: bool | None = False,
@@ -285,6 +759,52 @@ def _extra_key_strategy(
             yield row_out
 
 
+class _PrefixedStream(io.RawIOBase):
+    """
+    Wrap a forward-only binary stream with a prefix of bytes already read.
+
+    Used by ``rows_from_file()`` when it has to sniff the format before
+    streaming JSON rows, so no data has to be copied or re-read.
+    """
+
+    def __init__(self, fp: BinaryIO, prefix: bytes) -> None:
+        self._fp = fp
+        self._prefix = prefix
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            # Not used by the streaming reader, but behave like read-all.
+            data = self._prefix + self._fp.read()
+            self._prefix = b""
+            return data
+        if self._prefix:
+            data = self._prefix[:size]
+            self._prefix = self._prefix[size:]
+            return data
+        return self._fp.read(size)
+
+    def readinto(self, buffer: Any) -> int:
+        if self._prefix:
+            length = min(len(self._prefix), len(buffer))
+            buffer[:length] = self._prefix[:length]
+            self._prefix = self._prefix[length:]
+            return length
+        data = self._fp.read(len(buffer))
+        buffer[: len(data)] = data
+        return len(data)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            self._fp.close()
+        finally:
+            super().close()
+
+
 def rows_from_file(
     fp: BinaryIO,
     format: Format | None = None,
@@ -292,6 +812,8 @@ def rows_from_file(
     encoding: str | None = None,
     ignore_extras: bool | None = False,
     extras_key: str | None = None,
+    stream_json: bool = False,
+    stream_json_chunk_size: int = 65536,
 ) -> tuple[Iterable[Row], Format]:
     """
     Load a sequence of dictionaries from a file-like object containing one of four different formats.
@@ -332,10 +854,104 @@ def rows_from_file(
     :param encoding: the character encoding to use when reading CSV/TSV data
     :param ignore_extras: ignore any extra fields on rows
     :param extras_key: put any extra fields in a list with this key
+    :param stream_json: lazily stream JSON and newline-delimited JSON rows
+    :param stream_json_chunk_size: maximum bytes to read at a time when
+      streaming JSON
     """
     if ignore_extras and extras_key:
         raise ValueError("Cannot use ignore_extras= and extras_key= together")
+    if stream_json and format in (None, Format.JSON, Format.NL):
+        _validate_chunk_size(stream_json_chunk_size)
+
+    def _stream_rows(
+        format: Format,
+        source: BinaryIO,
+        close_fp: bool,
+        encoding: str | None = None,
+    ) -> Iterator[Row]:
+        return iter_json_rows(
+            source,
+            newline_delimited=format == Format.NL,
+            encoding=encoding or "utf-8-sig",
+            chunk_size=stream_json_chunk_size,
+            close_fp=close_fp,
+        )
+
+    use_encoding: str = encoding or "utf-8-sig"
+
+    if format is None and stream_json:
+        # Mirror the non-streaming detector: look at up to the first 2048
+        # bytes, strip ASCII whitespace and inspect the first byte.  The
+        # window always starts at byte 0 and is contiguous, so a BOM or a
+        # multi-byte character split across reads survives replay.
+        window = bytearray()
+        decoder = codecs.getincrementaldecoder(use_encoding)()
+        first_nonspace: str | None = None
+        decode_failed = False
+        while not decode_failed and first_nonspace is None and len(window) < 2048:
+            data = fp.read(min(stream_json_chunk_size, 2048 - len(window)))
+            if isinstance(data, str):
+                raise TypeError(
+                    "rows_from_file() requires a file-like object opened in binary mode"
+                )
+            if data == b"":
+                break
+            window.extend(data)
+            try:
+                text = decoder.decode(data)
+            except UnicodeDecodeError:
+                # Not a decision point: fall through to the JSON reader,
+                # which reports undecodable bytes with a record number.
+                decode_failed = True
+                break
+            for char in text:
+                if char not in _ASCII_WHITESPACE:
+                    first_nonspace = char
+                    break
+        if first_nonspace is None and not decode_failed:
+            # Matches the existing auto-detection: empty or whitespace-only
+            # input is an empty CSV file.  Nothing will iterate it, so close.
+            fp.close()
+            return (), Format.CSV
+        if decode_failed or first_nonspace == "[" or first_nonspace == "{":
+            source = _PrefixedStream(fp, bytes(window))
+            return (
+                _stream_rows(Format.JSON, cast(BinaryIO, source), True, encoding),
+                Format.JSON,
+            )
+        # CSV/TSV detection needs a little more than the first character.
+        while len(window) < 2048:
+            data = fp.read(min(stream_json_chunk_size, 2048 - len(window)))
+            if isinstance(data, str):
+                raise TypeError(
+                    "rows_from_file() requires a file-like object opened in binary mode"
+                )
+            if data == b"":
+                break
+            window.extend(data)
+        source = _PrefixedStream(fp, bytes(window))
+        sniff_window = bytes(window).strip()
+        try:
+            sample = sniff_window.decode(use_encoding)
+        except UnicodeDecodeError:
+            sample = sniff_window.decode(use_encoding, "ignore")
+        dialect = csv.Sniffer().sniff(sample)
+        rows, _ = rows_from_file(
+            cast(BinaryIO, source),
+            format=Format.CSV,
+            dialect=dialect,
+            encoding=encoding,
+            ignore_extras=ignore_extras,
+            extras_key=extras_key,
+            stream_json=stream_json,
+            stream_json_chunk_size=stream_json_chunk_size,
+        )
+        detected_format = Format.TSV if dialect.delimiter == "\t" else Format.CSV
+        return rows, detected_format
+
     if format == Format.JSON:
+        if stream_json:
+            return _stream_rows(Format.JSON, fp, True, encoding), Format.JSON
         decoded = json.load(fp)
         if isinstance(decoded, dict):
             decoded = [decoded]
@@ -343,9 +959,10 @@ def rows_from_file(
             raise RowsFromFileBadJSON("JSON must be a list or a dictionary")
         return decoded, Format.JSON
     elif format == Format.NL:
+        if stream_json:
+            return _stream_rows(Format.NL, fp, True, encoding), Format.NL
         return (json.loads(line) for line in fp if line.strip()), Format.NL
     elif format == Format.CSV:
-        use_encoding: str = encoding or "utf-8-sig"
         decoded_fp = io.TextIOWrapper(fp, encoding=use_encoding)
         if dialect is not None:
             reader = csv.DictReader(decoded_fp, dialect=dialect)

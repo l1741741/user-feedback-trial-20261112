@@ -4,6 +4,14 @@
  Changelog
 ===========
 
+.. _v4_3:
+
+4.3 (unreleased)
+----------------
+
+- New ``sqlite_utils.utils.iter_json_rows()`` function that lazily parses JSON objects from a binary file-like object that only needs to support ``read()`` and ``close()`` - it never seeks, peeks, calls ``readinto()`` or reads the whole document before returning the first row. It supports root arrays, single root objects and newline-delimited JSON, reports the 1-based record number (and physical line number for NDJSON) on bad data, and can close the input with ``close_fp=True``. See :ref:`python_api_iter_json_rows`.
+- ``rows_from_file()`` accepts ``stream_json=True`` and ``stream_json_chunk_size`` to use that iterator for JSON and newline-delimited JSON, including when the format is auto-detected, so an error in one record no longer discards the rows before it. CSV/TSV and the default behaviour are unchanged.
+
 .. _v4_2_1:
 
 4.2.1 (2026-08-13)

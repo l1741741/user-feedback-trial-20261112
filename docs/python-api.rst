@@ -3389,6 +3389,45 @@ The ``sqlite_utils.utils.rows_from_file()`` helper function can read rows (a seq
 .. autofunction:: sqlite_utils.utils.rows_from_file
    :noindex:
 
+.. _python_api_iter_json_rows:
+
+Streaming JSON rows from a forward-only stream
+==============================================
+
+By default ``rows_from_file()`` reads JSON documents in full using ``json.load()``, so a single malformed record discards every row in the file and the whole document has to fit in memory. Pass ``stream_json=True`` to parse JSON and newline-delimited JSON incrementally instead:
+
+.. code-block:: python
+
+    from sqlite_utils.utils import rows_from_file
+
+    with open("large.json", "rb") as fp:
+        rows, format = rows_from_file(fp, stream_json=True)
+        for row in rows:
+            print(row)
+
+This works with file-like objects that only offer ``read()`` and ``close()``: it never calls ``seek()``, ``peek()``, ``readinto()`` or ``fileno()``, so data piped in on stdin or received over a network socket can be parsed as it arrives. At most one incomplete record, the incremental decoder state and one chunk are held in memory.
+
+``stream_json_chunk_size`` controls the maximum number of bytes requested from each ``read()`` call and defaults to ``65536``. When ``format=None`` the format is still auto-detected from the first non-whitespace bytes - only JSON, CSV and TSV are detected; newline-delimited JSON needs an explicit ``format=Format.NL``.
+
+When streaming JSON or newline-delimited JSON, the returned iterator closes the input file on completion, on ``close()`` and on failure. If you want to stream JSON yourself, use ``iter_json_rows()`` instead:
+
+.. autofunction:: sqlite_utils.utils.iter_json_rows
+   :noindex:
+
+Rows are yielded as soon as their closing ``}`` has been read, so earlier records survive a later syntax error. The ``RowsFromFileBadJSON`` message includes a 1-based record number, plus the physical line number for newline-delimited input:
+
+.. code-block:: python
+
+    from sqlite_utils.utils import iter_json_rows, RowsFromFileBadJSON
+
+    try:
+        for row in iter_json_rows(fp, newline_delimited=True):
+            ...
+    except RowsFromFileBadJSON as ex:
+        print(ex)  # e.g. record 3 (line 4): invalid JSON: ...
+
+``close_fp=True`` makes the iterator close the underlying file exactly once, whether iteration completes, is closed early, raises a parsing error or exits a ``with`` block with an exception. The default ``close_fp=False`` leaves the file open for the caller.
+
 .. _python_api_maximize_csv_field_size_limit:
 
 Setting the maximum CSV field size limit

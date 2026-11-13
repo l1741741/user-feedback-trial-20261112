@@ -94,6 +94,13 @@ sqlite_utils.utils.rows_from_file
 
 .. autofunction:: sqlite_utils.utils.rows_from_file
 
+.. _reference_utils_iter_json_rows:
+
+sqlite_utils.utils.iter_json_rows
+---------------------------------
+
+.. autofunction:: sqlite_utils.utils.iter_json_rows
+
 .. _reference_utils_typetracker:
 
 sqlite_utils.utils.TypeTracker
