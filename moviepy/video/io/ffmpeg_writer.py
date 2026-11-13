@@ -3,16 +3,18 @@ On the long term this will implement several methods to make videos
 out of VideoClips
 """
 
+import os
 import subprocess as sp
 
 import numpy as np
 from proglog import proglog
 
+from moviepy._ffmpeg_writer import _FFmpegWriterBase
 from moviepy.config import FFMPEG_BINARY
-from moviepy.tools import cross_platform_popen_params, ffmpeg_escape_filename
+from moviepy.tools import ffmpeg_escape_filename
 
 
-class FFMPEG_VideoWriter:
+class FFMPEG_VideoWriter(_FFmpegWriterBase):
     """A class for FFMPEG-based video writing.
 
     Parameters
@@ -80,6 +82,16 @@ class FFMPEG_VideoWriter:
       If set to ``True``, the ffmpeg command used to write the video will be
       printed to the console. This can be useful for debugging purposes.
       Default is ``False``.
+
+    close_timeout : float, optional
+      Maximum number of seconds to wait for ffmpeg to exit after its input is
+      closed, and again after it is terminated or killed. Must be a positive
+      finite number.
+
+    stderr_tail_bytes : int, optional
+      Maximum number of stderr bytes kept in memory for diagnostics. Must be a
+      positive integer. Only the last bytes are retained, and invalid UTF-8 is
+      decoded using replacement characters.
     """
 
     def __init__(
@@ -98,23 +110,35 @@ class FFMPEG_VideoWriter:
         ffmpeg_params=None,
         pixel_format=None,
         print_cmd=False,
+        close_timeout=5.0,
+        stderr_tail_bytes=65536,
     ):
-        if logfile is None:
-            logfile = sp.PIPE
-        self.logfile = logfile
-        self.filename = filename
+        super().__init__(
+            filename,
+            logfile=logfile,
+            close_timeout=close_timeout,
+            stderr_tail_bytes=stderr_tail_bytes,
+        )
         self.codec = codec
         self.audio_codec = audio_codec
         self.ext = self.filename.split(".")[-1]
 
         input_pixel_format = "rgba" if with_mask else "rgb24"
 
+        # ``FFMPEG_BINARY`` is normally a string, but accepting a token
+        # sequence keeps construction replaceable in tests and wrappers.
+        binary = (
+            list(FFMPEG_BINARY)
+            if isinstance(FFMPEG_BINARY, (list, tuple))
+            else [FFMPEG_BINARY]
+        )
+
         # order is important
         cmd = [
-            FFMPEG_BINARY,
+            *binary,
             "-y",
             "-loglevel",
-            "error" if logfile == sp.PIPE else "info",
+            "error" if self._capture_stderr else "info",
             "-f",
             "rawvideo",
             "-vcodec",
@@ -167,96 +191,66 @@ class FFMPEG_VideoWriter:
                 pixel_format = "rgba" if with_mask else "rgb24"
             cmd.extend(["-pix_fmt", pixel_format])
 
-        cmd.extend([ffmpeg_escape_filename(filename)])
+        cmd.extend([ffmpeg_escape_filename(self.filename)])
 
         if print_cmd:
             print("FFMPEG command:", " ".join(cmd))
 
-        popen_params = cross_platform_popen_params(
-            {"stdout": sp.DEVNULL, "stderr": logfile, "stdin": sp.PIPE}
-        )
-
-        self.proc = sp.Popen(cmd, **popen_params)
+        self._start_process(cmd)
 
     def write_frame(self, img_array):
         """Writes one frame in the file."""
-        try:
-            # ffmpeg expects the data to be in C order, so we ensure that
-            # the input array is contiguous in memory.
-            if not img_array.flags["C_CONTIGUOUS"]:
-                img_array = img_array.copy(order="C")
+        # ffmpeg expects the data to be in C order, so we ensure that
+        # the input array is contiguous in memory.
+        if not img_array.flags["C_CONTIGUOUS"]:
+            img_array = img_array.copy(order="C")
 
-            self.proc.stdin.write(img_array)
-        except IOError as err:
-            _, ffmpeg_error = self.proc.communicate()
-            if ffmpeg_error is not None:
-                ffmpeg_error = ffmpeg_error.decode()
-            else:
-                # The error was redirected to a logfile with `write_logfile=True`,
-                # so read the error from that file instead
-                self.logfile.seek(0)
-                ffmpeg_error = self.logfile.read()
+        self._write_bytes(img_array, "frame")
 
-            error = (
-                f"{err}\n\nMoviePy error: FFMPEG encountered the following error while "
-                f"writing file {self.filename}: \n\n {ffmpeg_error}"
-            )
+    def _diagnostic_hints(self, stderr_tail):
+        return _video_error_hints(stderr_tail, self.codec, self.ext)
 
-            if "Unknown encoder" in ffmpeg_error or "Unknown decoder" in ffmpeg_error:
-                error += (
-                    "\n\nThe video export failed because FFMPEG didn't find the "
-                    "specified codec for video or audio. "
-                    "Please install this codec or change the codec when calling "
-                    "write_videofile.\nFor instance:\n"
-                    "  >>> clip.write_videofile('myvid.webm', audio='myaudio.mp3', "
-                    "codec='libvpx', audio_codec='aac')"
-                )
 
-            elif "incorrect codec parameters ?" in ffmpeg_error:
-                error += (
-                    "\n\nThe video export failed, possibly because the codec "
-                    f"specified for the video {self.codec} is not compatible with "
-                    f"the given extension {self.ext}.\n"
-                    "Please specify a valid 'codec' argument in write_videofile.\n"
-                    "This would be 'libx264' or 'mpeg4' for mp4, "
-                    "'libtheora' for ogv, 'libvpx for webm.\n"
-                    "Another possible reason is that the audio codec was not "
-                    "compatible with the video codec. For instance, the video "
-                    "extensions 'ogv' and 'webm' only allow 'libvorbis' (default) as a"
-                    "video codec."
-                )
+def _video_error_hints(stderr_tail, codec, ext):
+    """Return writer-specific hints based on captured diagnostics."""
+    hints = []
+    if "Unknown encoder" in stderr_tail or "Unknown decoder" in stderr_tail:
+        hints.append(
+            "The video export failed because FFMPEG didn't find the "
+            "specified codec for video or audio. "
+            "Please install this codec or change the codec when calling "
+            "write_videofile.\nFor instance:\n"
+            "  >>> clip.write_videofile('myvid.webm', audio='myaudio.mp3', "
+            "codec='libvpx', audio_codec='aac')"
+        )
 
-            elif "bitrate not specified" in ffmpeg_error:
-                error += (
-                    "\n\nThe video export failed, possibly because the bitrate "
-                    "specified was too high or too low for the video codec."
-                )
+    elif "incorrect codec parameters ?" in stderr_tail:
+        hints.append(
+            "The video export failed, possibly because the codec "
+            f"specified for the video {codec} is not compatible with "
+            f"the given extension {ext}.\n"
+            "Please specify a valid 'codec' argument in write_videofile.\n"
+            "This would be 'libx264' or 'mpeg4' for mp4, "
+            "'libtheora' for ogv, 'libvpx for webm.\n"
+            "Another possible reason is that the audio codec was not "
+            "compatible with the video codec. For instance, the video "
+            "extensions 'ogv' and 'webm' only allow 'libvorbis' (default) as a"
+            "video codec."
+        )
 
-            elif "Invalid encoder type" in ffmpeg_error:
-                error += (
-                    "\n\nThe video export failed because the codec "
-                    "or file extension you provided is not suitable for video"
-                )
+    elif "bitrate not specified" in stderr_tail:
+        hints.append(
+            "The video export failed, possibly because the bitrate "
+            "specified was too high or too low for the video codec."
+        )
 
-            raise IOError(error)
+    elif "Invalid encoder type" in stderr_tail:
+        hints.append(
+            "The video export failed because the codec "
+            "or file extension you provided is not suitable for video"
+        )
 
-    def close(self):
-        """Closes the writer, terminating the subprocess if is still alive."""
-        if self.proc:
-            self.proc.stdin.close()
-            if self.proc.stderr is not None:
-                self.proc.stderr.close()
-            self.proc.wait()
-
-            self.proc = None
-
-    # Support the Context Manager protocol, to ensure that resources are cleaned up.
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
+    return hints
 
 
 def ffmpeg_write_video(
@@ -278,6 +272,7 @@ def ffmpeg_write_video(
     on the parameters.
     """
     logger = proglog.default_bar_logger(logger)
+    filename = os.fspath(filename)
 
     if write_logfile:
         logfile = open(filename + ".log", "w+")
@@ -288,35 +283,66 @@ def ffmpeg_write_video(
 
     has_mask = clip.mask is not None
 
-    with FFMPEG_VideoWriter(
-        filename,
-        clip.size,
-        fps,
-        codec=codec,
-        preset=preset,
-        bitrate=bitrate,
-        with_mask=has_mask,
-        logfile=logfile,
-        audiofile=audiofile,
-        audio_codec=audio_codec,
-        threads=threads,
-        ffmpeg_params=ffmpeg_params,
-        pixel_format=pixel_format,
-    ) as writer:
-        for t, frame in clip.iter_frames(
-            logger=logger, with_times=True, fps=fps, dtype="uint8"
-        ):
-            if clip.mask is not None:
-                mask = 255 * clip.mask.get_frame(t)
-                if mask.dtype != "uint8":
-                    mask = mask.astype("uint8")
-                frame = np.dstack([frame, mask])
+    try:
+        with FFMPEG_VideoWriter(
+            filename,
+            clip.size,
+            fps,
+            codec=codec,
+            preset=preset,
+            bitrate=bitrate,
+            with_mask=has_mask,
+            logfile=logfile,
+            audiofile=audiofile,
+            audio_codec=audio_codec,
+            threads=threads,
+            ffmpeg_params=ffmpeg_params,
+            pixel_format=pixel_format,
+        ) as writer:
+            for t, frame in clip.iter_frames(
+                logger=logger, with_times=True, fps=fps, dtype="uint8"
+            ):
+                if clip.mask is not None:
+                    mask = 255 * clip.mask.get_frame(t)
+                    if mask.dtype != "uint8":
+                        mask = mask.astype("uint8")
+                    frame = np.dstack([frame, mask])
 
-            writer.write_frame(frame)
+                writer.write_frame(frame)
+    except BaseException as error:
+        # ``logfile`` belongs to this function, so it is safe to read it to
+        # enrich the diagnostic.  The writer never reads caller-owned files.
+        if write_logfile:
+            _append_logfile_hints(error, logfile, codec, filename.split(".")[-1])
+        raise
+    finally:
+        if write_logfile:
+            logfile.close()
 
-    if write_logfile:
-        logfile.close()
     logger(message="MoviePy - Done !")
+
+
+def _append_logfile_hints(error, logfile, codec, ext):
+    """Add codec hints found in moviepy's own logfile to ``error``."""
+    try:
+        logfile.flush()
+        logfile.seek(0)
+        content = logfile.read()
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", errors="replace")
+        hints = _video_error_hints(content, codec, ext)
+        if hints:
+            _extend_error_message(error, "\n".join(hints))
+    except Exception:
+        # Diagnostics must never replace the real export error.
+        pass
+
+
+def _extend_error_message(error, extra):
+    """Append text to an exception message when it supports that."""
+    if not error.args or not isinstance(error.args[0], str):
+        return
+    error.args = (error.args[0] + "\n\n" + extra,) + error.args[1:]
 
 
 def ffmpeg_write_image(filename, image, logfile=False, pixel_format=None):

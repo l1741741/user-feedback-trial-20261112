@@ -1,15 +1,17 @@
 """MoviePy audio writing with ffmpeg."""
 
-import subprocess as sp
+import os
 
+import numpy as np
 import proglog
 
+from moviepy._ffmpeg_writer import _FFmpegWriterBase
 from moviepy.config import FFMPEG_BINARY
 from moviepy.decorators import requires_duration
-from moviepy.tools import cross_platform_popen_params, ffmpeg_escape_filename
+from moviepy.tools import ffmpeg_escape_filename
 
 
-class FFMPEG_AudioWriter:
+class FFMPEG_AudioWriter(_FFmpegWriterBase):
     """
     A class to write an AudioClip into an audio file.
 
@@ -48,6 +50,16 @@ class FFMPEG_AudioWriter:
 
     ffmpeg_params : list of str, optional
       Additional FFMPEG command-line parameters to customize the output.
+
+    close_timeout : float, optional
+      Maximum number of seconds to wait for ffmpeg to exit after its input is
+      closed, and again after it is terminated or killed. Must be a positive
+      finite number.
+
+    stderr_tail_bytes : int, optional
+      Maximum number of stderr bytes kept in memory for diagnostics. Must be a
+      positive integer. Only the last bytes are retained, and invalid UTF-8 is
+      decoded using replacement characters.
     """
 
     def __init__(
@@ -61,20 +73,32 @@ class FFMPEG_AudioWriter:
         input_video=None,
         logfile=None,
         ffmpeg_params=None,
+        close_timeout=5.0,
+        stderr_tail_bytes=65536,
     ):
-        if logfile is None:
-            logfile = sp.PIPE
-        self.logfile = logfile
-        self.filename = filename
+        super().__init__(
+            filename,
+            logfile=logfile,
+            close_timeout=close_timeout,
+            stderr_tail_bytes=stderr_tail_bytes,
+        )
         self.codec = codec
         self.ext = self.filename.split(".")[-1]
 
+        # ``FFMPEG_BINARY`` is normally a string, but accepting a token
+        # sequence keeps construction replaceable in tests and wrappers.
+        binary = (
+            list(FFMPEG_BINARY)
+            if isinstance(FFMPEG_BINARY, (list, tuple))
+            else [FFMPEG_BINARY]
+        )
+
         # order is important
         cmd = [
-            FFMPEG_BINARY,
+            *binary,
             "-y",
             "-loglevel",
-            "error" if logfile == sp.PIPE else "info",
+            "error" if self._capture_stderr else "info",
             "-f",
             "s%dle" % (8 * nbytes),
             "-acodec",
@@ -97,90 +121,57 @@ class FFMPEG_AudioWriter:
             cmd.extend(["-ab", bitrate])
         if ffmpeg_params is not None:
             cmd.extend(ffmpeg_params)
-        cmd.extend([ffmpeg_escape_filename(filename)])
+        cmd.extend([ffmpeg_escape_filename(self.filename)])
 
-        popen_params = cross_platform_popen_params(
-            {"stdout": sp.DEVNULL, "stderr": logfile, "stdin": sp.PIPE}
-        )
-
-        self.proc = sp.Popen(cmd, **popen_params)
+        self._start_process(cmd)
 
     def write_frames(self, frames_array):
         """Send the audio frame (a chunck of ``AudioClip``) to ffmpeg for writting"""
-        try:
-            self.proc.stdin.write(frames_array.tobytes())
-        except IOError as err:
-            _, ffmpeg_error = self.proc.communicate()
-            if ffmpeg_error is not None:
-                ffmpeg_error = ffmpeg_error.decode()
-            else:
-                # The error was redirected to a logfile with `write_logfile=True`,
-                # so read the error from that file instead
-                self.logfile.seek(0)
-                ffmpeg_error = self.logfile.read()
+        if not frames_array.flags["C_CONTIGUOUS"]:
+            frames_array = np.ascontiguousarray(frames_array)
 
-            error = (
-                f"{err}\n\nMoviePy error: FFMPEG encountered the following error while "
-                f"writing file {self.filename}:\n\n {ffmpeg_error}"
-            )
+        self._write_bytes(frames_array.tobytes(), "audio chunk")
 
-            if "Unknown encoder" in ffmpeg_error:
-                error += (
-                    "\n\nThe audio export failed because FFMPEG didn't find the "
-                    f"specified codec for audio encoding {self.codec}. "
-                    "Please install this codec or change the codec when calling "
-                    "write_videofile or write_audiofile.\nFor instance for mp3:\n"
-                    "   >>> write_videofile('myvid.mp4', audio_codec='libmp3lame')"
-                )
+    def _diagnostic_hints(self, stderr_tail):
+        return _audio_error_hints(stderr_tail, self.codec, self.ext)
 
-            elif "incorrect codec parameters ?" in ffmpeg_error:
-                error += (
-                    "\n\nThe audio export failed, possibly because the "
-                    f"codec specified for the video {self.codec} is not compatible"
-                    f" with the given extension {self.ext}. Please specify a "
-                    "valid 'codec' argument in write_audiofile or 'audio_codoc'"
-                    "argument in write_videofile. This would be "
-                    "'libmp3lame' for mp3, 'libvorbis' for ogg..."
-                )
 
-            elif "bitrate not specified" in ffmpeg_error:
-                error += (
-                    "\n\nThe audio export failed, possibly because the "
-                    "bitrate you specified was too high or too low for "
-                    "the audio codec."
-                )
+def _audio_error_hints(stderr_tail, codec, ext):
+    """Return writer-specific hints based on captured diagnostics."""
+    hints = []
+    if "Unknown encoder" in stderr_tail:
+        hints.append(
+            "The audio export failed because FFMPEG didn't find the "
+            f"specified codec for audio encoding {codec}. "
+            "Please install this codec or change the codec when calling "
+            "write_videofile or write_audiofile.\nFor instance for mp3:\n"
+            "   >>> write_videofile('myvid.mp4', audio_codec='libmp3lame')"
+        )
 
-            elif "Invalid encoder type" in ffmpeg_error:
-                error += (
-                    "\n\nThe audio export failed because the codec "
-                    "or file extension you provided is not suitable for audio"
-                )
+    elif "incorrect codec parameters ?" in stderr_tail:
+        hints.append(
+            "The audio export failed, possibly because the "
+            f"codec specified for the video {codec} is not compatible"
+            f" with the given extension {ext}. Please specify a "
+            "valid 'codec' argument in write_audiofile or 'audio_codoc'"
+            "argument in write_videofile. This would be "
+            "'libmp3lame' for mp3, 'libvorbis' for ogg..."
+        )
 
-            raise IOError(error)
+    elif "bitrate not specified" in stderr_tail:
+        hints.append(
+            "The audio export failed, possibly because the "
+            "bitrate you specified was too high or too low for "
+            "the audio codec."
+        )
 
-    def close(self):
-        """Closes the writer, terminating the subprocess if is still alive."""
-        if hasattr(self, "proc") and self.proc:
-            self.proc.stdin.close()
-            self.proc.stdin = None
-            if self.proc.stderr is not None:
-                self.proc.stderr.close()
-                self.proc.stderr = None
-            # If this causes deadlocks, consider terminating instead.
-            self.proc.wait()
-            self.proc = None
+    elif "Invalid encoder type" in stderr_tail:
+        hints.append(
+            "The audio export failed because the codec "
+            "or file extension you provided is not suitable for audio"
+        )
 
-    def __del__(self):
-        # If the garbage collector comes, make sure the subprocess is terminated.
-        self.close()
-
-    # Support the Context Manager protocol, to ensure that resources are cleaned up.
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
+    return hints
 
 
 @requires_duration
@@ -200,30 +191,78 @@ def ffmpeg_audiowrite(
     A function that wraps the FFMPEG_AudioWriter to write an AudioClip
     to a file.
     """
+    filename = os.fspath(filename)
     if write_logfile:
         logfile = open(filename + ".log", "w+")
     else:
         logfile = None
     logger = proglog.default_bar_logger(logger)
     logger(message="MoviePy - Writing audio in %s" % filename)
-    writer = FFMPEG_AudioWriter(
-        filename,
-        fps,
-        nbytes,
-        clip.nchannels,
-        codec=codec,
-        bitrate=bitrate,
-        logfile=logfile,
-        ffmpeg_params=ffmpeg_params,
-    )
 
-    for chunk in clip.iter_chunks(
-        chunksize=buffersize, quantize=True, nbytes=nbytes, fps=fps, logger=logger
-    ):
-        writer.write_frames(chunk)
+    try:
+        writer = FFMPEG_AudioWriter(
+            filename,
+            fps,
+            nbytes,
+            clip.nchannels,
+            codec=codec,
+            bitrate=bitrate,
+            logfile=logfile,
+            ffmpeg_params=ffmpeg_params,
+        )
 
-    writer.close()
+        try:
+            for chunk in clip.iter_chunks(
+                chunksize=buffersize,
+                quantize=True,
+                nbytes=nbytes,
+                fps=fps,
+                logger=logger,
+            ):
+                writer.write_frames(chunk)
 
-    if write_logfile:
-        logfile.close()
+            writer.close()
+        except BaseException as error:
+            try:
+                writer.close()
+            except BaseException as close_error:
+                if hasattr(error, "add_note"):
+                    error.add_note(
+                        "Additionally, cleaning up the FFmpeg writer failed: "
+                        f"{close_error}"
+                    )
+            raise
+    except BaseException as error:
+        # ``logfile`` belongs to this function, so reading it for hints is
+        # safe.  The writer itself never reads caller-owned logfiles.
+        if write_logfile:
+            _append_logfile_hints(error, logfile, codec, filename.split(".")[-1])
+        raise
+    finally:
+        if write_logfile:
+            logfile.close()
+
     logger(message="MoviePy - Done.")
+
+
+def _append_logfile_hints(error, logfile, codec, ext):
+    """Add codec hints found in moviepy's own logfile to ``error``."""
+    try:
+        logfile.flush()
+        logfile.seek(0)
+        content = logfile.read()
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", errors="replace")
+        hints = _audio_error_hints(content, codec, ext)
+        if hints:
+            _extend_error_message(error, "\n".join(hints))
+    except Exception:
+        # Diagnostics must never replace the real export error.
+        pass
+
+
+def _extend_error_message(error, extra):
+    """Append text to an exception message when it supports that."""
+    if not error.args or not isinstance(error.args[0], str):
+        return
+    error.args = (error.args[0] + "\n\n" + extra,) + error.args[1:]
