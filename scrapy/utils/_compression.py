@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import struct
 import sys
 import zlib
@@ -43,12 +44,51 @@ class _DecompressionMaxSizeExceeded(ValueError):
         )
 
 
+class _DecompressionMaxRatioExceeded(ValueError):
+    def __init__(
+        self,
+        compressed_size: int,
+        decompressed_size: int,
+        max_ratio: float,
+    ) -> None:
+        self.compressed_size = compressed_size
+        self.decompressed_size = decompressed_size
+        self.max_ratio = max_ratio
+        # The coding that produced this output, filled in by the middleware
+        # that knows which Content-Encoding layer it was decoding.
+        self.encoding = ""
+
+    def __str__(self) -> str:
+        return (
+            f"The number of bytes decompressed so far "
+            f"({self.decompressed_size} B) exceeded the maximum expansion "
+            f"ratio ({self.max_ratio}) applied to the input "
+            f"({self.compressed_size} B)."
+        )
+
+
 def _check_max_size(decompressed_size: int, max_size: int) -> None:
     if max_size and decompressed_size > max_size:
         raise _DecompressionMaxSizeExceeded(decompressed_size, max_size)
 
 
-def gunzip(data: bytes, *, max_size: int = 0) -> bytes:
+def _check_max_ratio(
+    compressed_size: int,
+    decompressed_size: int,
+    max_ratio: float,
+) -> None:
+    # An empty input cannot have a meaningful expansion ratio, and codecs
+    # decode it to an empty output without errors. The bound is rounded up so
+    # an output whose ratio merely rounds to the configured one is accepted.
+    if max_ratio and compressed_size:
+        allowed = math.ceil(compressed_size * max_ratio)
+        if decompressed_size > allowed:
+            raise _DecompressionMaxRatioExceeded(
+                compressed_size, decompressed_size, max_ratio
+            )
+
+
+def gunzip(data: bytes, *, max_size: int = 0, max_ratio: float = 0) -> bytes:
     """Gunzip the given data and return as much data as possible.
 
     This is resilient to CRC checksum errors.
@@ -69,6 +109,7 @@ def gunzip(data: bytes, *, max_size: int = 0) -> bytes:
             raise
         decompressed_size += len(chunk)
         _check_max_size(decompressed_size, max_size)
+        _check_max_ratio(len(data), decompressed_size, max_ratio)
         output_stream.write(chunk)
     return output_stream.getvalue()
 
@@ -77,7 +118,7 @@ def gzip_magic_number(response: Response) -> bool:
     return response.body[:3] == b"\x1f\x8b\x08"
 
 
-def _inflate(data: bytes, *, max_size: int = 0) -> bytes:
+def _inflate(data: bytes, *, max_size: int = 0, max_ratio: float = 0) -> bytes:
     decompressor = zlib.decompressobj()
     try:
         first_chunk = decompressor.decompress(data, max_length=_CHUNK_SIZE)
@@ -87,6 +128,7 @@ def _inflate(data: bytes, *, max_size: int = 0) -> bytes:
         first_chunk = decompressor.decompress(data, max_length=_CHUNK_SIZE)
     decompressed_size = len(first_chunk)
     _check_max_size(decompressed_size, max_size)
+    _check_max_ratio(len(data), decompressed_size, max_ratio)
     output_stream = BytesIO()
     output_stream.write(first_chunk)
     # Anything left in unconsumed_tail once the stream has ended is not part of
@@ -97,15 +139,17 @@ def _inflate(data: bytes, *, max_size: int = 0) -> bytes:
         )
         decompressed_size += len(output_chunk)
         _check_max_size(decompressed_size, max_size)
+        _check_max_ratio(len(data), decompressed_size, max_ratio)
         output_stream.write(output_chunk)
     return output_stream.getvalue()
 
 
-def _unbrotli(data: bytes, *, max_size: int = 0) -> bytes:
+def _unbrotli(data: bytes, *, max_size: int = 0, max_ratio: float = 0) -> bytes:
     decompressor = brotli.Decompressor()
     first_chunk = decompressor.process(data, output_buffer_limit=_CHUNK_SIZE)
     decompressed_size = len(first_chunk)
     _check_max_size(decompressed_size, max_size)
+    _check_max_ratio(len(data), decompressed_size, max_ratio)
     output_stream = BytesIO()
     output_stream.write(first_chunk)
     while not decompressor.is_finished():
@@ -114,11 +158,12 @@ def _unbrotli(data: bytes, *, max_size: int = 0) -> bytes:
             break
         decompressed_size += len(output_chunk)
         _check_max_size(decompressed_size, max_size)
+        _check_max_ratio(len(data), decompressed_size, max_ratio)
         output_stream.write(output_chunk)
     return output_stream.getvalue()
 
 
-def _unzstd(data: bytes, *, max_size: int = 0) -> bytes:
+def _unzstd(data: bytes, *, max_size: int = 0, max_ratio: float = 0) -> bytes:
     stream_reader = zstd.ZstdFile(BytesIO(data))
     output_stream = BytesIO()
     output_chunk = b"."
@@ -131,5 +176,6 @@ def _unzstd(data: bytes, *, max_size: int = 0) -> bytes:
             break
         decompressed_size += len(output_chunk)
         _check_max_size(decompressed_size, max_size)
+        _check_max_ratio(len(data), decompressed_size, max_ratio)
         output_stream.write(output_chunk)
     return output_stream.getvalue()

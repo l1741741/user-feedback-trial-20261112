@@ -1,16 +1,74 @@
 from __future__ import annotations
 
-from gzip import BadGzipFile
+import zlib
+from gzip import BadGzipFile, GzipFile
+from io import BytesIO
 from pathlib import Path
 
+import brotli
 import pytest
+from backports import zstd
 from w3lib.encoding import html_to_unicode
 
 from scrapy.http import Response
-from scrapy.utils._compression import gunzip, gzip_magic_number
+from scrapy.utils._compression import (
+    _DecompressionMaxRatioExceeded,
+    _DecompressionMaxSizeExceeded,
+    _inflate,
+    _unbrotli,
+    _unzstd,
+    gunzip,
+    gzip_magic_number,
+)
 from tests import tests_datadir
 
 SAMPLEDIR = Path(tests_datadir, "compressed")
+
+_PLAIN = b"a" * 200_000
+
+
+def _gzip_bytes(data: bytes) -> bytes:
+    buf = BytesIO()
+    with GzipFile(fileobj=buf, mode="wb") as f:
+        f.write(data)
+    return buf.getvalue()
+
+
+_RATIO_CASES = [
+    pytest.param(gunzip, _gzip_bytes(_PLAIN), "gzip", id="gzip"),
+    pytest.param(_inflate, zlib.compress(_PLAIN), "deflate", id="deflate"),
+    pytest.param(_unbrotli, brotli.compress(_PLAIN), "br", id="br"),
+    pytest.param(_unzstd, zstd.compress(_PLAIN), "zstd", id="zstd"),
+]
+
+
+@pytest.mark.parametrize(("decode", "compressed", "encoding"), _RATIO_CASES)
+class TestMaxRatio:
+    def test_disabled_by_default(self, decode, compressed, encoding) -> None:
+        assert decode(compressed) == _PLAIN
+
+    def test_zero_byte_input(self, decode, compressed, encoding) -> None:
+        assert decode(b"", max_ratio=1.0) == b""
+
+    def test_boundary_ratio_accepted(self, decode, compressed, encoding) -> None:
+        ratio = len(_PLAIN) / len(compressed)
+        assert decode(compressed, max_ratio=ratio) == _PLAIN
+
+    def test_ratio_exceeded(self, decode, compressed, encoding) -> None:
+        with pytest.raises(_DecompressionMaxRatioExceeded) as exc_info:
+            decode(compressed, max_ratio=1.0)
+        error = exc_info.value
+        assert error.compressed_size == len(compressed)
+        assert error.decompressed_size < len(_PLAIN)
+        assert error.max_ratio == 1.0
+        assert error.encoding == ""
+
+    def test_max_size_still_enforced(self, decode, compressed, encoding) -> None:
+        with pytest.raises(_DecompressionMaxSizeExceeded):
+            decode(compressed, max_size=1000, max_ratio=1e9)
+
+    def test_both_limits_disabled(self, decode, compressed, encoding) -> None:
+        assert decode(compressed, max_size=0, max_ratio=0) == _PLAIN
 
 
 def test_gunzip_basic():

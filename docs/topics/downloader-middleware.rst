@@ -828,6 +828,28 @@ response, keeping in mind that a high value lets a malicious server force many
 decompression passes.
 
 
+.. setting:: COMPRESSION_MAX_RATIO
+
+COMPRESSION_MAX_RATIO
+^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: VERSION
+
+Default: ``0``
+
+Maximum expansion ratio that the body of one content coding may have in
+the :ref:`http-compression` middleware. The ratio is the number of
+decompressed bytes divided by the compressed size of the input of that
+coding, so the limit is checked separately on every coding of a chained
+``Content-Encoding``. A response whose decompressed body grows beyond the
+ratio is dropped with :exc:`~scrapy.exceptions.IgnoreRequest`, while the
+decompression is still in progress, without keeping the partially
+decompressed body.
+
+Set it to ``0``, the default, to leave the expansion ratio unrestricted;
+:setting:`DOWNLOAD_MAXSIZE` still applies to the decompressed body size.
+
+
 HttpProxyMiddleware
 -------------------
 

@@ -16,6 +16,7 @@ from scrapy.http import BodyFileResponse, Response, TextResponse
 from scrapy.responsetypes import responsetypes
 from scrapy.utils._compression import (
     _DECOMPRESSION_ERRORS,
+    _DecompressionMaxRatioExceeded,
     _DecompressionMaxSizeExceeded,
     _inflate,
     _unbrotli,
@@ -71,11 +72,13 @@ class HttpCompressionMiddleware:
             self._max_size = 1073741824
             self._warn_size = 33554432
             self._max_encodings = 1
+            self._max_ratio = 0
             return
         self.stats = crawler.stats
         self._max_size = crawler.settings.getint("DOWNLOAD_MAXSIZE")
         self._warn_size = crawler.settings.getint("DOWNLOAD_WARNSIZE")
         self._max_encodings = crawler.settings.getint("COMPRESSION_MAX_ENCODINGS")
+        self._max_ratio = crawler.settings.getfloat("COMPRESSION_MAX_RATIO")
         crawler.signals.connect(self.open_spider, signals.spider_opened)
 
     @classmethod
@@ -116,7 +119,7 @@ class HttpCompressionMiddleware:
             warn_size = get_warnsize(request.meta, self._warn_size)
             try:
                 decoded_body, content_encoding = await self._handle_encoding(
-                    response.body, content_encoding, max_size
+                    response.body, content_encoding, max_size, self._max_ratio
                 )
             except _DecompressionMaxSizeExceeded as e:
                 msg = (
@@ -124,6 +127,16 @@ class HttpCompressionMiddleware:
                     f"({len(response.body)} B compressed, "
                     f"{e.decompressed_size} B decompressed so far) exceeded "
                     f"DOWNLOAD_MAXSIZE ({max_size} B) during decompression."
+                )
+                logger.warning(msg)
+                raise IgnoreRequest(msg) from e
+            except _DecompressionMaxRatioExceeded as e:
+                msg = (
+                    f"Ignored response {response} because its body "
+                    f"({e.compressed_size} B {e.encoding} input, "
+                    f"{e.decompressed_size} B decompressed so far) exceeded "
+                    f"COMPRESSION_MAX_RATIO ({e.max_ratio}) during "
+                    f"decompression."
                 )
                 logger.warning(msg)
                 raise IgnoreRequest(msg) from e
@@ -169,16 +182,22 @@ class HttpCompressionMiddleware:
         return response
 
     async def _handle_encoding(
-        self, body: bytes, content_encoding: list[bytes], max_size: int
+        self,
+        body: bytes,
+        content_encoding: list[bytes],
+        max_size: int,
+        max_ratio: float,
     ) -> tuple[bytes, list[bytes]]:
         to_decode, to_keep = self._split_encodings(content_encoding)
         if len(to_decode) > self._max_encodings:
             raise _MaxEncodingCountExceeded(len(to_decode), self._max_encodings)
         for encoding in to_decode:
             if len(body) >= _THREAD_DECODE_MIN_SIZE:
-                body = await run_in_thread(self._decode, body, encoding, max_size)
+                body = await run_in_thread(
+                    self._decode, body, encoding, max_size, max_ratio
+                )
             else:
-                body = self._decode(body, encoding, max_size)
+                body = self._decode(body, encoding, max_size, max_ratio)
         return body, to_keep
 
     @staticmethod
@@ -202,15 +221,25 @@ class HttpCompressionMiddleware:
         return to_decode, to_keep
 
     @staticmethod
-    def _decode(body: bytes, encoding: bytes, max_size: int) -> bytes:
-        if encoding in {b"gzip", b"x-gzip"}:
-            return gunzip(body, max_size=max_size)
-        if encoding == b"deflate":
-            return _inflate(body, max_size=max_size)
-        if encoding == b"br":
-            return _unbrotli(body, max_size=max_size)
-        if encoding == b"zstd":
-            return _unzstd(body, max_size=max_size)
+    def _decode(
+        body: bytes,
+        encoding: bytes,
+        max_size: int,
+        max_ratio: float,
+    ) -> bytes:
+        try:
+            if encoding in {b"gzip", b"x-gzip"}:
+                return gunzip(body, max_size=max_size, max_ratio=max_ratio)
+            if encoding == b"deflate":
+                return _inflate(body, max_size=max_size, max_ratio=max_ratio)
+            if encoding == b"br":
+                return _unbrotli(body, max_size=max_size, max_ratio=max_ratio)
+            if encoding == b"zstd":
+                return _unzstd(body, max_size=max_size, max_ratio=max_ratio)
+        except _DecompressionMaxRatioExceeded as e:
+            # Remember which coding failed, since the message reports it.
+            e.encoding = encoding.decode()
+            raise
         # shouldn't be reached
         return body  # pragma: no cover
 
