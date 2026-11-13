@@ -705,6 +705,17 @@ one per actual value of the placeholder.
     custom *stats_base_key*, in which case ``retry`` is replaced with that key
     in the 3 stats above.
 
+.. stat:: retry_after/delayed
+
+``retry_after/delayed``
+    Number of requests that were retried after waiting for the delay requested
+    by a ``Retry-After`` response header, see
+    :setting:`RETRY_AFTER_ENABLED`. Only waits that end with a retry request
+    being sent are counted.
+
+    Set by
+    :class:`~scrapy.downloadermiddlewares.retry.RetryMiddleware`.
+
 .. stat:: robotstxt/exception_count/{exception_type}
 
 ``robotstxt/exception_count/{exception_type}``

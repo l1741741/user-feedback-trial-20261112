@@ -43,6 +43,7 @@ from .http_resources import (
     Raw,
     RedirectTo,
     ResponseHeadersResource,
+    RetryAfter,
     SetCookie,
     Status,
     UriResource,
@@ -57,6 +58,7 @@ class Root(BaseResource):
     def __init__(self) -> None:
         super().__init__()
         put_child(self, b"status", Status())
+        put_child(self, b"retry-after", RetryAfter())
         put_child(self, b"follow", Follow())
         put_child(self, b"books", Books())
         put_child(self, b"delay", Delay())

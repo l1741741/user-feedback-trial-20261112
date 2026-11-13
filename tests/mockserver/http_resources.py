@@ -218,6 +218,23 @@ class Status(LeafResource):
         return b""
 
 
+class RetryAfter(LeafResource):
+    """Respond to each URI with 503 and a Retry-After header the first time,
+    and with 200 afterwards."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._seen: set[bytes] = set()
+
+    def render_GET(self, request: Request) -> bytes:
+        if request.uri in self._seen:
+            return b"OK"
+        self._seen.add(request.uri)
+        request.setResponseCode(503)
+        request.setHeader(b"Retry-After", b"1")
+        return b""
+
+
 class Raw(LeafResource):
     def render_GET(self, request: Request) -> int:
         request.startedWriting = 1

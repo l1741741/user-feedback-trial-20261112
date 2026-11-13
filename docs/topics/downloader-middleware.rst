@@ -1218,6 +1218,47 @@ If you also cache responses (see :setting:`HTTPCACHE_ENABLED`), see
 :setting:`HTTPCACHE_IGNORE_HTTP_CODES` to keep retried responses out of the
 cache.
 
+.. setting:: RETRY_AFTER_ENABLED
+
+RETRY_AFTER_ENABLED
+^^^^^^^^^^^^^^^^^^^
+
+Default: ``False``
+
+Whether to wait for the delay requested by the ``Retry-After`` response header
+before sending the retry request.
+
+The header value can be a non-negative number of seconds or an HTTP date. The
+wait is asynchronous: it does not block the event loop, so the rest of the
+crawl keeps running. If an invalid or ambiguous ``Retry-After`` header is
+received, the response is retried as before. Only responses that would be
+retried anyway (see :setting:`RETRY_HTTP_CODES`, :setting:`RETRY_TIMES` and
+:reqmeta:`dont_retry`) wait.
+
+The wait is shared per origin, i.e. scheme, host and port. When a response
+registers a delay for its origin, other responses from that origin also wait
+for it, even if they have no ``Retry-After`` header. A new header can extend
+a shared delay but not shorten it. Waiting responses pick up extensions made
+while they wait.
+
+See :setting:`RETRY_AFTER_MAX_DELAY` for the cap.
+
+.. versionadded:: VERSION
+
+.. setting:: RETRY_AFTER_MAX_DELAY
+
+RETRY_AFTER_MAX_DELAY
+^^^^^^^^^^^^^^^^^^^^^
+
+Default: ``120``
+
+The longest wait, in seconds, that :setting:`RETRY_AFTER_ENABLED` allows.
+Fractional values are accepted.
+
+Must be a positive finite number.
+
+.. versionadded:: VERSION
+
 .. setting:: RETRY_EXCEPTIONS
 
 RETRY_EXCEPTIONS
