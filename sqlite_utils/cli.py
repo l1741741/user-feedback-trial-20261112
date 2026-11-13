@@ -785,7 +785,7 @@ def enable_fts(
             create_triggers=create_triggers,
             replace=replace,
         )
-    except (NoTable, OperationalError) as ex:
+    except (NoTable, InvalidColumns, OperationalError) as ex:
         raise click.ClickException(str(ex))
 
 

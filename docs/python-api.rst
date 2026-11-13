@@ -2843,13 +2843,23 @@ You can replace the existing table with a new configuration using ``replace=True
 
     db.table("articles").enable_fts(["headline"], tokenize="porter", replace=True)
 
-This will have no effect if the FTS table already exists, otherwise it will drop and recreate the table with the new settings. This takes into consideration the columns, the tokenizer, the FTS version used and whether or not the table has triggers.
+If the new configuration - columns, tokenizer, FTS version and whether the table has triggers - matches the existing one this is a no-op and the index is not populated again. Otherwise the old index, its contents and the triggers belonging to it are replaced with the new configuration.
+
+Creating the index, populating it for the first time and installing the triggers all happen inside a single transaction. If any step fails the virtual table, its contents and the triggers are restored to how they were before the call, and SQLite's original exception is raised. ``enable_fts()``, ``populate_fts()`` and ``disable_fts()`` work whether or not a transaction is already open: an existing transaction (or an enclosing ``db.atomic()`` block) is never committed or rolled back by these methods, so a rollback by the caller undoes the indexing changes along with their own.
+
+Column names are validated before any SQL runs: ``columns`` must be a non-empty sequence of distinct columns that all exist on the table, and ``fts_version`` must be either ``"FTS4"`` or ``"FTS5"``.
+
+Triggers created by ``create_triggers=True`` are named ``{table}_ai``, ``{table}_ad`` and ``{table}_au``. If a trigger with one of those names already exists but does not belong to this table's FTS index, ``enable_fts()`` fails with SQLite's ``trigger ... already exists`` error and rolls back completely - the existing trigger is never overwritten. Other triggers on the table are left untouched.
+
+``populate_fts(columns)`` rebuilds the index from the current contents of the table, so it brings the index back in sync after rows have been updated or deleted since it was last populated.
 
 To remove the FTS tables and triggers you created, use the ``disable_fts()`` table method:
 
 .. code-block:: python
 
     db.table("dogs").disable_fts()
+
+This removes the FTS table and the triggers that can be confirmed to belong to that index, without touching similarly named triggers or FTS indexes for other tables. Calling it when no index exists does nothing.
 
 .. note::
     In the CLI: :ref:`sqlite-utils enable-fts <cli_fts>`

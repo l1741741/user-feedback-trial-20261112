@@ -21,12 +21,18 @@ def test_tracer():
         ('CREATE TABLE "dogs" (\n   "name" TEXT\n);\n        ', None),
         ("select name from sqlite_master where type = 'view'", None),
         ('INSERT INTO "dogs" ("name") VALUES (?)', ["Cleopaws"]),
+        ("select name from pragma_table_info(?)", ("dogs",)),
+        (
+            "select name, sql from sqlite_master where type = 'table' "
+            "and sql like '%VIRTUAL TABLE%USING FTS%'",
+            None,
+        ),
         (
             'CREATE VIRTUAL TABLE "dogs_fts" USING FTS5 (\n    "name",\n    content="dogs"\n)',
             None,
         ),
         (
-            'INSERT INTO "dogs_fts" (rowid, "name")\n    SELECT rowid, "name" FROM "dogs";',
+            'INSERT INTO "dogs_fts"("dogs_fts") VALUES(\'rebuild\');',
             None,
         ),
     ]
@@ -54,22 +60,10 @@ def test_with_tracer():
     assert collected == [
         (
             (
-                "SELECT name FROM sqlite_master\n"
-                "    WHERE rootpage = 0\n"
-                "    AND (\n"
-                "        sql LIKE :like\n"
-                "        OR sql LIKE :like2\n"
-                "        OR (\n"
-                "            tbl_name = :table\n"
-                "            AND sql LIKE '%VIRTUAL TABLE%USING FTS%'\n"
-                "        )\n"
-                "    )"
+                "select name, sql from sqlite_master where type = 'table' "
+                "and sql like '%VIRTUAL TABLE%USING FTS%'"
             ),
-            {
-                "like": "%VIRTUAL TABLE%USING FTS%content=[dogs]%",
-                "like2": '%VIRTUAL TABLE%USING FTS%content="dogs"%',
-                "table": "dogs",
-            },
+            None,
         ),
         ("select name from sqlite_master where type = 'view'", None),
         ("select sql from sqlite_master where name = ?", ("dogs_fts",)),

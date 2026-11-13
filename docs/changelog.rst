@@ -11,6 +11,19 @@
 
 - Fix for ``No module named 'typing_extensions'`` crashing bug accidentally shipped in version 4.2. (:issue:`842`)
 
+.. _v4_3:
+
+4.3 (unreleased)
+----------------
+
+- ``table.enable_fts()``, ``table.populate_fts()`` and ``table.disable_fts()`` are now atomic. Creating the index, populating it and installing the triggers happen in a single transaction, and a failure at any point restores the previous virtual table, index contents and triggers and raises the original SQLite error. These methods no longer call ``executescript()`` or commit/roll back an open caller transaction, so they work when called inside a ``db.begin()`` block or an enclosing ``db.atomic()``.
+- ``table.enable_fts(..., replace=True)`` now replaces the previous index, its data and its triggers as one operation, and is a no-op when the columns, tokenizer, FTS version and trigger setting are unchanged. Previously a failure part-way through could leave a new index in place with the old one already dropped.
+- ``table.enable_fts()`` triggers now keep the index in sync when rows are updated or deleted, for both FTS4 and FTS5. FTS4 uses ``BEFORE UPDATE`` / ``BEFORE DELETE`` triggers with ``DELETE FROM``, since FTS4 has no ``'delete'`` command.
+- ``table.populate_fts()`` now rebuilds the index from the current table contents, so it also removes entries for rows that have been updated or deleted. Previously it only inserted rows, leaving stale terms in the index.
+- ``table.disable_fts()`` and ``replace=True`` only drop triggers that can be confirmed to belong to the table's own external content FTS index. Unrelated triggers, triggers for similarly named tables and FTS indexes for other tables are left alone. A trigger that occupies one of the sync trigger names but does not belong to the index causes an error and a full rollback rather than being overwritten.
+- ``table.enable_fts()`` validates its arguments before running any SQL: ``columns`` must be a non-empty sequence of distinct existing columns, and ``fts_version`` must be ``"FTS4"`` or ``"FTS5"``.
+- ``table.detect_fts()`` now parses the ``content=`` option from the virtual table schema instead of matching it with ``LIKE``, so table names containing ``%``, ``_``, quotes or brackets are no longer confused with each other.
+
 .. _v4_2:
 
 4.2 (2026-08-13)

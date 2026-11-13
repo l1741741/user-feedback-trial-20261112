@@ -777,3 +777,568 @@ def test_enable_fts_cli_on_view_errors(tmpdir):
     result = CliRunner().invoke(cli_module.cli, ["enable-fts", db_path, "v", "text"])
     assert result.exit_code == 1
     assert result.output.strip() == "Error: Table v is actually a view"
+
+
+# ---------------------------------------------------------------------------
+# Index lifecycle: atomicity, replacement, triggers and special names
+# ---------------------------------------------------------------------------
+
+
+def _snapshot(db):
+    "Schema, rows in every (shadow) table and triggers, for exact comparisons."
+    schema = db.execute(
+        "select type, name, tbl_name, sql from sqlite_master "
+        "where name not like 'sqlite_%' order by type, name"
+    ).fetchall()
+    rows = {}
+    for name in db.table_names():
+        rows[name] = db.execute(
+            "select * from {}".format(quote_sqlite_identifier(name))
+        ).fetchall()
+    return schema, rows
+
+
+def quote_sqlite_identifier(name):
+    from sqlite_utils.db import quote_identifier
+
+    return quote_identifier(name)
+
+
+@pytest.mark.parametrize("fts_version", ["FTS4", "FTS5"])
+def test_enable_fts_atomic_when_populate_fails(fresh_db, fts_version, monkeypatch):
+    import sqlite_utils.db as db_module
+
+    table = fresh_db.table("t")
+    table.insert_all([{"id": 1, "a": "hello"}, {"id": 2, "a": "world"}], pk="id")
+    before = _snapshot(fresh_db)
+
+    def fail(self, fts_table):
+        raise RuntimeError("injected failure while populating")
+
+    monkeypatch.setattr(db_module.Table, "_rebuild_fts_index", fail)
+    with pytest.raises(RuntimeError, match="injected failure"):
+        table.enable_fts(["a"], fts_version=fts_version, create_triggers=True)
+    monkeypatch.undo()
+
+    assert _snapshot(fresh_db) == before
+    # No half-built virtual table, shadow tables or triggers remain
+    assert fresh_db.table_names() == ["t"]
+    assert fresh_db.triggers == []
+    # And the caller can simply try again successfully
+    table.enable_fts(["a"], fts_version=fts_version, create_triggers=True)
+    assert list(table.search("hello"))[0]["id"] == 1
+
+
+@pytest.mark.parametrize("fts_version", ["FTS4", "FTS5"])
+def test_enable_fts_atomic_when_trigger_creation_fails(fresh_db, fts_version):
+    # A trigger that occupies one of the names but does not belong to this
+    # index: SQLite raises "trigger ... already exists" on the last trigger,
+    # after the index and the first two triggers have been created
+    table = fresh_db.table("t")
+    table.insert({"id": 1, "a": "hello"}, pk="id")
+    fresh_db.execute('CREATE TRIGGER "t_au" AFTER INSERT ON "t" BEGIN SELECT 1; END')
+    before = _snapshot(fresh_db)
+
+    with pytest.raises(sqlite3.OperationalError, match="trigger|already exists"):
+        table.enable_fts(["a"], fts_version=fts_version, create_triggers=True)
+
+    assert _snapshot(fresh_db) == before
+    assert fresh_db.table_names() == ["t"]
+    assert [t.name for t in fresh_db.triggers] == ["t_au"]
+
+
+@pytest.mark.parametrize("fts_version", ["FTS4", "FTS5"])
+def test_enable_fts_atomic_when_tokenizer_invalid(fresh_db, fts_version):
+    table = fresh_db.table("t")
+    table.insert({"id": 1, "a": "hello"}, pk="id")
+    with pytest.raises(sqlite3.OperationalError):
+        table.enable_fts(["a"], fts_version=fts_version, tokenize="no_such_tokenizer")
+    assert fresh_db.table_names() == ["t"]
+    assert fresh_db.triggers == []
+
+
+@pytest.mark.parametrize("fts_version", ["FTS4", "FTS5"])
+def test_enable_fts_atomic_when_table_has_no_rowid(fresh_db, fts_version):
+    # WITHOUT ROWID tables have no rowid to index: CREATE and trigger creation
+    # succeed, the first population step fails
+    fresh_db.execute("CREATE TABLE t (a TEXT PRIMARY KEY, b TEXT) WITHOUT ROWID")
+    fresh_db.execute("INSERT INTO t VALUES ('hello', 'x')")
+    fresh_db.execute("CREATE TRIGGER t_business AFTER INSERT ON t BEGIN SELECT 1; END")
+    before = _snapshot(fresh_db)
+
+    with pytest.raises(sqlite3.OperationalError):
+        fresh_db.table("t").enable_fts(
+            ["b"], fts_version=fts_version, create_triggers=True
+        )
+
+    assert _snapshot(fresh_db) == before
+    assert fresh_db.table_names() == ["t"]
+    assert [t.name for t in fresh_db.triggers] == ["t_business"]
+
+
+@pytest.mark.parametrize("fts_version", ["FTS4", "FTS5"])
+def test_enable_fts_replace_fails_restores_old_configuration(fresh_db, fts_version):
+    table = fresh_db.table("t")
+    table.insert_all(
+        [{"id": 1, "a": "hello", "b": "bee"}, {"id": 2, "a": "world", "b": "two"}],
+        pk="id",
+    )
+    table.enable_fts(["a"], fts_version=fts_version)
+    old_index_rows = fresh_db.execute(
+        "select rowid, a from t_fts order by rowid"
+    ).fetchall()
+    # Occupy a sync trigger name with an unrelated trigger so replacement fails
+    # after the old index has already been dropped and the new one populated
+    fresh_db.execute('CREATE TRIGGER "t_au" AFTER INSERT ON "t" BEGIN SELECT 1; END')
+    before = _snapshot(fresh_db)
+
+    with pytest.raises(sqlite3.OperationalError, match="already exists"):
+        table.enable_fts(
+            ["b"], fts_version=fts_version, create_triggers=True, replace=True
+        )
+
+    assert _snapshot(fresh_db) == before
+    # Old FTS configuration and its index contents are intact
+    assert table.detect_fts() == "t_fts"
+    assert fresh_db.table("t_fts").columns_dict.keys() == {"a"}
+    assert (
+        fresh_db.execute("select rowid, a from t_fts order by rowid").fetchall()
+        == old_index_rows
+    )
+    assert [
+        r[0]
+        for r in fresh_db.execute(
+            "select rowid from t_fts where t_fts match 'hello'"
+        ).fetchall()
+    ] == [1]
+
+
+def test_enable_fts_replace_is_idempotent(fresh_db):
+    table = fresh_db.table("books")
+    table.insert({"id": 1, "title": "Habitat", "author": "Author"}, pk="id")
+    table.enable_fts(["title", "author"], create_triggers=True, tokenize="porter")
+    schema = fresh_db.execute("select name, sql from sqlite_master order by name")
+    index_rows = fresh_db.execute("select * from books_fts")
+    # Running with the same configuration must not re-create anything or re-index
+    table.enable_fts(
+        ["title", "author"], create_triggers=True, tokenize="porter", replace=True
+    )
+    assert (
+        fresh_db.execute("select name, sql from sqlite_master order by name").fetchall()
+        == schema.fetchall()
+    )
+    assert (
+        fresh_db.execute("select * from books_fts").fetchall() == index_rows.fetchall()
+    )
+
+
+@pytest.mark.parametrize("fts_version", ["FTS4", "FTS5"])
+def test_enable_fts_replace_changes_columns_and_tokenizer(fresh_db, fts_version):
+    table = fresh_db.table("books")
+    table.insert(
+        {"id": 1, "title": "Habits of Australian Marsupials", "author": "Marlee"},
+        pk="id",
+    )
+    table.enable_fts(["title", "author"], fts_version=fts_version)
+    table.enable_fts(
+        ["title"], fts_version=fts_version, tokenize="porter", replace=True
+    )
+    assert fresh_db.table("books_fts").columns_dict.keys() == {"title"}
+    assert "porter" in fresh_db.table("books_fts").schema
+    # Search works against the replaced index, including stemming
+    assert [r["rowid"] for r in table.search("marsupial")] == [1]
+    # And rows not in the new column set were not indexed
+    table.insert({"id": 2, "title": "Second", "author": "Nobody"}, pk="id")
+    table.populate_fts(["title"])
+    assert list(table.search("nobody")) == []
+
+
+@pytest.mark.parametrize("fts_version", ["FTS4", "FTS5"])
+def test_enable_fts_replace_toggles_triggers(fresh_db, fts_version):
+    table = fresh_db.table("books")
+    table.insert({"id": 1, "title": "One"}, pk="id")
+    table.enable_fts(["title"], fts_version=fts_version)
+    assert table.triggers == []
+    table.enable_fts(
+        ["title"], fts_version=fts_version, create_triggers=True, replace=True
+    )
+    assert {t.name for t in table.triggers} == {"books_ai", "books_ad", "books_au"}
+    table.enable_fts(["title"], fts_version=fts_version, replace=True)
+    assert table.triggers == []
+    # Index still intact after trashing the triggers
+    assert [r["rowid"] for r in table.search("one")] == [1]
+
+
+@pytest.mark.parametrize("fts_version", ["FTS4", "FTS5"])
+def test_enable_fts_triggers_track_update_and_delete(fresh_db, fts_version):
+    table = fresh_db.table("t")
+    table.insert_all(
+        [{"id": 1, "text": "tanuki"}, {"id": 2, "text": "racoons"}], pk="id"
+    )
+    table.enable_fts(["text"], fts_version=fts_version, create_triggers=True)
+
+    def matches(query):
+        return [
+            r[0]
+            for r in fresh_db.execute(
+                "select rowid from t_fts where t_fts match ?", (query,)
+            ).fetchall()
+        ]
+
+    assert matches("tanuki") == [1]
+    table.update(1, {"text": "badger"})
+    assert matches("tanuki") == []
+    assert matches("badger") == [1]
+    table.delete(2)
+    assert matches("racoons") == []
+    table.insert({"id": 3, "text": "wolverine"}, pk="id")
+    assert matches("wolverine") == [3]
+    # The index itself is still structurally sound
+    fresh_db.execute("insert into t_fts(t_fts) values('integrity-check')")
+
+
+@pytest.mark.parametrize("fts_version", ["FTS4", "FTS5"])
+def test_populate_fts_is_consistent_after_update_and_delete(fresh_db, fts_version):
+    table = fresh_db.table("t")
+    table.insert_all(
+        [{"id": 1, "text": "tanuki"}, {"id": 2, "text": "racoons"}], pk="id"
+    )
+    table.enable_fts(["text"], fts_version=fts_version)
+    table.update(1, {"text": "badger"})
+    table.delete(2)
+    table.insert({"id": 3, "text": "wolverine"}, pk="id")
+    table.populate_fts(["text"])
+    assert [r["rowid"] for r in table.search("tanuki")] == []
+    assert [r["rowid"] for r in table.search("racoons")] == []
+    assert [r["rowid"] for r in table.search("badger")] == [1]
+    assert [r["rowid"] for r in table.search("wolverine")] == [3]
+
+
+def test_enable_fts_works_inside_caller_transaction(fresh_db):
+    table = fresh_db.table("t")
+    table.insert({"id": 1, "a": "hello"}, pk="id")
+    fresh_db.begin()
+    table.insert({"id": 2, "a": "world"}, pk="id")
+    table.enable_fts(["a"], create_triggers=True)
+    table.populate_fts(["a"])
+    assert fresh_db.conn.in_transaction
+    assert "t_fts" in fresh_db.table_names()
+    # Caller rolls back: business change and index change are both undone
+    fresh_db.rollback()
+    assert not fresh_db.conn.in_transaction
+    assert fresh_db.table_names() == ["t"]
+    assert fresh_db.triggers == []
+    assert fresh_db.execute("select id from t").fetchall() == [(1,)]
+
+
+def test_enable_fts_works_inside_outer_atomic(fresh_db):
+    table = fresh_db.table("t")
+    with pytest.raises(RuntimeError), fresh_db.atomic():
+        table.insert({"id": 1, "a": "hello"}, pk="id")
+        table.enable_fts(["a"], create_triggers=True)
+        raise RuntimeError("boom")
+    assert not fresh_db.conn.in_transaction
+    assert fresh_db.table_names() == []
+    assert fresh_db.triggers == []
+
+
+def test_enable_fts_works_inside_nested_atomic(fresh_db):
+    table = fresh_db.table("t")
+    table.insert({"id": 1, "a": "hello"}, pk="id")
+    with fresh_db.atomic():
+        table.insert({"id": 2, "a": "world"}, pk="id")
+        with fresh_db.atomic():
+            table.enable_fts(["a"], create_triggers=True)
+    assert fresh_db.conn.in_transaction is False
+    assert [r["rowid"] for r in table.search("world")] == [2]
+
+
+def test_enable_fts_failure_leaves_caller_transaction_usable(fresh_db):
+    table = fresh_db.table("t")
+    table.insert({"id": 1, "a": "hello"}, pk="id")
+    fresh_db.begin()
+    table.insert({"id": 2, "a": "world"}, pk="id")
+    with pytest.raises(sqlite3.OperationalError):
+        table.enable_fts(["a"], tokenize="no_such_tokenizer")
+    assert fresh_db.conn.in_transaction
+    assert fresh_db.table_names() == ["t"]
+    # Caller can carry on writing and commit their own changes
+    table.insert({"id": 3, "a": "third"}, pk="id")
+    fresh_db.commit()
+    assert fresh_db.execute("select id from t order by id").fetchall() == [
+        (1,),
+        (2,),
+        (3,),
+    ]
+
+
+def test_fts_operations_persist_independently(tmpdir):
+    path = str(tmpdir / "test.db")
+    db = Database(path)
+    table = db.table("t")
+    table.insert({"id": 1, "a": "hello"}, pk="id")
+    table.enable_fts(["a"], create_triggers=True)
+    table.populate_fts(["a"])
+    assert not db.conn.in_transaction
+    db.close()
+    db = Database(path)
+    assert "t_fts" in db.table_names()
+    assert [r["rowid"] for r in db.table("t").search("hello")] == [1]
+    db.table("t").disable_fts()
+    assert not db.conn.in_transaction
+    db.close()
+    db = Database(path)
+    assert db.table_names() == ["t"]
+    db.close()
+
+
+@pytest.mark.parametrize("fts_version", ["FTS4", "FTS5"])
+@pytest.mark.parametrize(
+    "table_name",
+    [
+        "weird table",
+        'we"ird',
+        "a,b",
+        "select",
+        "100%",
+        "a_b",
+        "o'brien",
+        "[brackets]",
+        "main.point",
+    ],
+)
+def test_enable_fts_special_table_names(fresh_db, fts_version, table_name):
+    table = fresh_db.table(table_name)
+    table.insert({"id": 1, "select": "hello world", 'a"b': "x"}, pk="id")
+    table.enable_fts(["select"], fts_version=fts_version, create_triggers=True)
+    assert table.detect_fts() == table_name + "_fts"
+    assert [r["rowid"] for r in table.search("hello")] == [1]
+    table.update(1, {"select": "goodbye"})
+    assert [r["rowid"] for r in table.search("goodbye")] == [1]
+    assert [r["rowid"] for r in table.search("hello")] == []
+    table.delete(1)
+    assert [r["rowid"] for r in table.search("goodbye")] == []
+    table.insert({"id": 2, "select": "third thing", 'a"b': "y"}, pk="id")
+    assert [r["rowid"] for r in table.search("third")] == [2]
+    table.disable_fts()
+    assert fresh_db.table_names() == [table_name]
+    assert fresh_db.triggers == []
+
+
+@pytest.mark.parametrize("fts_version", ["FTS4", "FTS5"])
+@pytest.mark.parametrize(
+    "column_name", ["column with spaces", 'col"umn', "col,umn", "order"]
+)
+def test_enable_fts_special_column_names(fresh_db, fts_version, column_name):
+    table = fresh_db.table("t")
+    table.insert({"id": 1, column_name: "hello world"}, pk="id")
+    table.enable_fts([column_name], fts_version=fts_version, create_triggers=True)
+    assert [r["rowid"] for r in table.search("hello")] == [1]
+    table.update(1, {column_name: "goodbye"})
+    assert [r["rowid"] for r in table.search("goodbye")] == [1]
+
+
+def test_disable_fts_does_not_touch_similar_tables(fresh_db):
+    for name in ("demo", "demo2", "demo_fts_extra"):
+        fresh_db.table(name).insert({"id": 1, "title": "Hello world"}, pk="id")
+        fresh_db.table(name).enable_fts(["title"], create_triggers=True)
+    fresh_db.table("demo").disable_fts()
+    assert fresh_db.table("demo").detect_fts() is None
+    for name in ("demo2", "demo_fts_extra"):
+        table = fresh_db.table(name)
+        assert table.detect_fts() == name + "_fts"
+        assert [r["rowid"] for r in table.search("hello")] == [1]
+        assert {t.name for t in table.triggers} == {
+            name + "_ai",
+            name + "_ad",
+            name + "_au",
+        }
+
+
+def test_disable_fts_keeps_unrelated_triggers(fresh_db):
+    table = fresh_db.table("t")
+    table.insert({"id": 1, "a": "hello"}, pk="id")
+    table.enable_fts(["a"], create_triggers=True)
+    fresh_db.execute("CREATE TRIGGER t_business AFTER INSERT ON t BEGIN SELECT 1; END")
+    # A trigger on another table writing into the FTS shadow table must survive
+    fresh_db.table("other").insert({"id": 1, "v": "x"}, pk="id")
+    fresh_db.execute(
+        'CREATE TRIGGER other_sync AFTER INSERT ON "other" '
+        'BEGIN INSERT INTO "t_fts" (rowid, "a") VALUES (new.rowid, new.v); END'
+    )
+    table.disable_fts()
+    assert sorted(t.name for t in fresh_db.triggers) == ["other_sync", "t_business"]
+    assert set(fresh_db.table_names()) == {"other", "t"}
+
+
+def test_disable_fts_is_idempotent_when_no_index(fresh_db):
+    fresh_db.table("t").insert({"id": 1, "a": "hello"}, pk="id")
+    fresh_db.execute("CREATE TRIGGER t_ai AFTER INSERT ON t BEGIN SELECT 1; END")
+    before = _snapshot(fresh_db)
+    fresh_db.table("t").disable_fts()
+    fresh_db.table("t").disable_fts()
+    assert _snapshot(fresh_db) == before
+
+
+def test_disable_fts_leaves_trigger_named_for_other_index(fresh_db):
+    # Table t has an FTS index and table demo2 has its own; the trigger names
+    # are per table so disabling t must not touch demo2's triggers
+    fresh_db.table("t").insert({"id": 1, "a": "hello"}, pk="id")
+    fresh_db.table("demo2").insert({"id": 1, "a": "hello"}, pk="id")
+    fresh_db.table("t").enable_fts(["a"], create_triggers=True)
+    fresh_db.table("demo2").enable_fts(["a"], create_triggers=True)
+    fresh_db.table("t").disable_fts()
+    assert {t.name for t in fresh_db.table("demo2").triggers} == {
+        "demo2_ai",
+        "demo2_ad",
+        "demo2_au",
+    }
+    assert fresh_db.table("demo2").detect_fts() == "demo2_fts"
+
+
+@pytest.mark.parametrize("fts_version", ["FTS4", "FTS5"])
+def test_enable_fts_trigger_name_conflict_keeps_existing_trigger(fresh_db, fts_version):
+    table = fresh_db.table("t")
+    table.insert({"id": 1, "a": "hello"}, pk="id")
+    fresh_db.execute('CREATE TRIGGER "t_ai" AFTER INSERT ON "t" BEGIN SELECT 1; END')
+    before = _snapshot(fresh_db)
+    with pytest.raises(sqlite3.OperationalError, match="already exists"):
+        table.enable_fts(["a"], fts_version=fts_version, create_triggers=True)
+    assert _snapshot(fresh_db) == before
+    # The occupying trigger was not overwritten
+    assert (
+        fresh_db.execute(
+            "select sql from sqlite_master where name = 't_ai'"
+        ).fetchone()[0]
+        == 'CREATE TRIGGER "t_ai" AFTER INSERT ON "t" BEGIN SELECT 1; END'
+    )
+
+
+def test_enable_fts_does_not_commit_caller_transaction(fresh_db):
+    # A Failed enable_fts must not silently commit earlier writes of the caller
+    table = fresh_db.table("t")
+    fresh_db.begin()
+    table.insert({"id": 1, "a": "hello"}, pk="id")
+    with pytest.raises(sqlite3.OperationalError):
+        table.enable_fts(["a"], tokenize="no_such_tokenizer")
+    fresh_db.rollback()
+    assert fresh_db.table_names() == []
+
+
+@pytest.mark.parametrize("fts_version", ["FTS4", "FTS5"])
+def test_populate_fts_atomic_when_rebuild_fails(fresh_db, fts_version, monkeypatch):
+    import sqlite_utils.db as db_module
+
+    table = fresh_db.table("t")
+    table.insert_all([{"id": 1, "a": "hello"}, {"id": 2, "a": "world"}], pk="id")
+    table.enable_fts(["a"], fts_version=fts_version)
+    before = _snapshot(fresh_db)
+
+    def fail(self, fts_table):
+        raise RuntimeError("injected failure while rebuilding")
+
+    monkeypatch.setattr(db_module.Table, "_rebuild_fts_index", fail)
+    with pytest.raises(RuntimeError, match="injected failure"):
+        table.populate_fts(["a"])
+    monkeypatch.undo()
+    assert _snapshot(fresh_db) == before
+
+
+def test_disable_fts_atomic_when_drop_fails(fresh_db):
+    table = fresh_db.table("t")
+    table.insert({"id": 1, "a": "hello"}, pk="id")
+    table.enable_fts(["a"], create_triggers=True)
+    # An unrelated object so the test would notice if too much was removed
+    fresh_db.execute("CREATE VIEW demo_v AS SELECT 1")
+    before = _snapshot(fresh_db)
+    original_triggers = list(fresh_db.triggers)
+
+    import sqlite_utils.db as db_module
+
+    real_execute = db_module.Database.execute
+
+    def execute(self, sql, parameters=None):
+        if sql.startswith("DROP TABLE") and "_fts" in sql:
+            raise sqlite3.OperationalError("injected drop failure")
+        return real_execute(self, sql, parameters)
+
+    db_module.Database.execute = execute  # type: ignore[method-assign]
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="injected drop failure"):
+            table.disable_fts()
+    finally:
+        db_module.Database.execute = real_execute  # type: ignore[method-assign]
+    after = _snapshot(fresh_db)
+    assert after == before
+    assert fresh_db.triggers == original_triggers
+
+
+@pytest.mark.parametrize(
+    "columns", [[], (), ["a", "a"], ["a", "A"], ["missing"], ["a", "missing"]]
+)
+def test_enable_fts_column_validation(fresh_db, columns):
+    from sqlite_utils.db import InvalidColumns
+
+    table = fresh_db.table("t")
+    table.insert({"a": "hello", "b": "world"})
+    with pytest.raises(InvalidColumns):
+        table.enable_fts(columns)
+    assert fresh_db.table_names() == ["t"]
+
+
+@pytest.mark.parametrize(
+    "fts_version", ["FTS3", "fts", "FTS5; DROP TABLE t", "", None, 5]
+)
+def test_enable_fts_version_validation(fresh_db, fts_version):
+    table = fresh_db.table("t")
+    table.insert({"a": "hello"})
+    with pytest.raises(ValueError, match="fts_version"):
+        table.enable_fts(["a"], fts_version=fts_version)
+    assert fresh_db.table_names() == ["t"]
+
+
+@pytest.mark.parametrize("fts_version", ["fts4", "FTS5"])
+def test_enable_fts_accepts_case_insensitive_version(fresh_db, fts_version):
+    table = fresh_db.table("t")
+    table.insert({"a": "hello"})
+    table.enable_fts(["a"], fts_version=fts_version)
+    assert fts_version.upper() in fresh_db.table("t_fts").schema
+
+
+@pytest.mark.parametrize("tokenize", ["porter", "unicode61 remove_diacritics 0"])
+def test_enable_fts_tokenize_formats(fresh_db, tokenize):
+    table = fresh_db.table("t")
+    table.insert({"a": "hello world"})
+    table.enable_fts(["a"], tokenize=tokenize)
+    assert tokenize in fresh_db.table("t_fts").schema
+
+
+def test_enable_fts_tokenize_error_is_atomic(fresh_db):
+    table = fresh_db.table("t")
+    table.insert({"a": "hello"})
+    with pytest.raises(sqlite3.OperationalError):
+        table.enable_fts(["a"], tokenize="porter bogus_tokenizer")
+    assert fresh_db.table_names() == ["t"]
+    assert fresh_db.triggers == []
+
+
+def test_enable_fts_only_deletes_triggers_of_its_own_index(fresh_db):
+    # Existing legacy-style triggers on this table that write into a different
+    # FTS table must not be treated as belonging to t_fts
+    fresh_db.table("t").insert({"id": 1, "a": "hello"}, pk="id")
+    fresh_db.table("other").insert({"id": 1, "a": "hello"}, pk="id")
+    fresh_db.table("other").enable_fts(["a"], create_triggers=True)
+    fresh_db.execute(
+        'CREATE TRIGGER "t_ai" AFTER INSERT ON "t" '
+        'BEGIN INSERT INTO "other_fts" (rowid, "a") VALUES (new.rowid, new."a"); END'
+    )
+    # Add the real index for t, without triggers
+    fresh_db.table("t").enable_fts(["a"])
+    # disable_fts for t must leave the other-index trigger alone
+    fresh_db.table("t").disable_fts()
+    assert sorted(t.name for t in fresh_db.triggers) == [
+        "other_ad",
+        "other_ai",
+        "other_au",
+        "t_ai",
+    ]

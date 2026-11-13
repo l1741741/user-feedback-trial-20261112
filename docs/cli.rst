@@ -2734,11 +2734,13 @@ This will use SQLite's FTS5 module by default. Use ``--fts4`` if you want to use
 
     sqlite-utils enable-fts mydb.db documents title summary --fts4
 
-The ``enable-fts`` command will populate the new index with all existing documents. If you later add more documents you will need to use ``populate-fts`` to cause them to be indexed as well:
+The ``enable-fts`` command will populate the new index with all existing documents. If you later add, update or delete documents you will need to use ``populate-fts`` to bring the index back in sync:
 
 .. code-block:: bash
 
     sqlite-utils populate-fts mydb.db documents title summary
+
+``enable-fts`` creates the index, populates it and installs any triggers in a single transaction, so a failure at any point leaves the database unchanged. ``--replace`` only replaces the existing configuration if the columns, tokenizer, FTS version or trigger setting have changed, and never overwrites an existing trigger that does not belong to this index.
 
 A better solution here is to use database triggers. You can set up database triggers to automatically update the full-text index using the ``--create-triggers`` option when you first run ``enable-fts``:
 

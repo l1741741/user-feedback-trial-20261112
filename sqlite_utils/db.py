@@ -99,6 +99,220 @@ def quote_identifier(identifier: str) -> str:
     return '"{}"'.format(identifier.replace('"', '""'))
 
 
+# Full-text search index lifecycle helpers. These deliberately parse the
+# sqlite_master SQL instead of matching it with LIKE, because table names are
+# legal SQL identifiers that may contain LIKE wildcards (% and _) as well as
+# spaces, commas, quotes and SQL keywords.
+
+
+def _dequote_sql_token(token: str) -> str:
+    """
+    Undo one level of SQLite quoting for a single identifier or option value.
+    """
+    if len(token) >= 2:
+        first, last = token[0], token[-1]
+        if first == last and first in ("'", '"', "`"):
+            return token[1:-1].replace(first * 2, first)
+        if first == "[" and last == "]":
+            return token[1:-1]
+    return token
+
+
+def _fts_module_args(sql: str) -> list[str]:
+    """
+    Return the comma-separated arguments of ``CREATE VIRTUAL TABLE ... USING``
+    for an FTS table, or an empty list if the SQL is not a virtual table.
+    """
+    match = _virtual_table_using_re.match(sql)
+    if match is None:
+        return []
+    i = match.end()
+    n = len(sql)
+    while i < n and sql[i] != "(":
+        if sql[i] == ";":
+            return []
+        i += 1
+    if i >= n:
+        return []
+    depth = 0
+    start = i + 1
+    parts = []
+    while i < n:
+        char = sql[i]
+        if char in ("'", '"', "`"):
+            quote = char
+            i += 1
+            while i < n:
+                if sql[i] == quote:
+                    if i + 1 < n and sql[i + 1] == quote:
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if char == "[":
+            end = sql.find("]", i + 1)
+            i = n if end == -1 else end + 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                parts.append(sql[start:i])
+                return parts
+        elif char == "," and depth == 1:
+            parts.append(sql[start:i])
+            start = i + 1
+        i += 1
+    parts.append(sql[start:])
+    return parts
+
+
+def _fts_option(sql: str, option: str) -> str | None:
+    """
+    Return the value of ``option=`` in an FTS ``CREATE VIRTUAL TABLE``
+    statement, with SQLite quoting removed. Returns ``None`` if absent.
+    """
+    folded_option = fold_identifier_case(option)
+    for part in _fts_module_args(sql):
+        key, equals, value = part.partition("=")
+        if not equals:
+            continue
+        if fold_identifier_case(key.strip()) != folded_option:
+            continue
+        return _dequote_sql_token(value.strip())
+    return None
+
+
+def _skip_sql_space_and_comments(sql: str, i: int) -> int:
+    n = len(sql)
+    while i < n:
+        if sql[i].isspace():
+            i += 1
+        elif sql.startswith("--", i):
+            newline = sql.find("\n", i)
+            i = n if newline == -1 else newline + 1
+        elif sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+        else:
+            break
+    return i
+
+
+def _read_sql_identifier(sql: str, i: int) -> tuple[str | None, int]:
+    """
+    Read one identifier starting at ``i``, skipping whitespace, comments and
+    an optional ``schema.`` prefix. Returns ``(name, index_after)``.
+    """
+    i = _skip_sql_space_and_comments(sql, i)
+    n = len(sql)
+    if i >= n:
+        return None, i
+    char = sql[i]
+    if char in ("'", '"', "`"):
+        quote = char
+        start = i + 1
+        i = start
+        while i < n:
+            if sql[i] == quote:
+                if i + 1 < n and sql[i + 1] == quote:
+                    i += 2
+                    continue
+                name = sql[start:i].replace(quote * 2, quote)
+                i += 1
+                break
+            i += 1
+        else:
+            return None, i
+    elif char == "[":
+        end = sql.find("]", i + 1)
+        if end == -1:
+            return None, n
+        name = sql[i + 1 : end]
+        i = end + 1
+    elif char.isalnum() or char in "_$" or ord(char) > 127:
+        start = i
+        while i < n and (sql[i].isalnum() or sql[i] in "_$" or ord(sql[i]) > 127):
+            i += 1
+        name = sql[start:i]
+    else:
+        return None, i
+    # Support schema-qualified targets such as main."t_fts"
+    after = _skip_sql_space_and_comments(sql, i)
+    if after < n and sql[after] == ".":
+        return _read_sql_identifier(sql, after + 1)
+    return name, i
+
+
+def _sql_write_targets(sql: str) -> list[str]:
+    """
+    Return the table names written to by ``INSERT INTO`` or ``DELETE FROM``
+    statements in ``sql``. String literals and comments are ignored, so text
+    that merely mentions a table name is never mistaken for a write target.
+    """
+    targets: list[str] = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        char = sql[i]
+        if char in ("'", '"', "`"):
+            # Skip quoted text - identifiers are read via _read_sql_identifier
+            # once an INSERT INTO / DELETE FROM keyword pair has been found
+            quote = char
+            i += 1
+            while i < n:
+                if sql[i] == quote:
+                    if i + 1 < n and sql[i + 1] == quote:
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if char == "[":
+            end = sql.find("]", i + 1)
+            i = n if end == -1 else end + 1
+            continue
+        if sql.startswith("--", i):
+            newline = sql.find("\n", i)
+            i = n if newline == -1 else newline + 1
+            continue
+        if sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        if char.isalnum() or char in "_$" or ord(char) > 127:
+            start = i
+            while i < n and (sql[i].isalnum() or sql[i] in "_$" or ord(sql[i]) > 127):
+                i += 1
+            word = sql[start:i].upper()
+            if word in ("INSERT", "DELETE"):
+                after = _skip_sql_space_and_comments(sql, i)
+                keyword, after_keyword = _read_sql_identifier(sql, after)
+                expected = "INTO" if word == "INSERT" else "FROM"
+                if keyword is not None and keyword.upper() == expected:
+                    target, after_target = _read_sql_identifier(sql, after_keyword)
+                    if target is not None:
+                        targets.append(target)
+                        i = after_target
+            continue
+        i += 1
+    return targets
+
+
+def _sql_writes_to(sql: str | None, table_name: str) -> bool:
+    "Does this stored trigger SQL write into the named table?"
+    if not sql:
+        return False
+    folded = fold_identifier_case(table_name)
+    return any(
+        fold_identifier_case(target) == folded for target in _sql_write_targets(sql)
+    )
+
+
 def _check_constraint_sql(check: Check) -> str:
     prefix = f"CONSTRAINT {quote_identifier(check.name)} " if check.name else ""
     newline = "\n" if sql_ends_in_line_comment(check.check) else ""
@@ -3751,6 +3965,184 @@ class Table(Queryable):
         }
         return trigger_names.issubset(self.triggers_dict.keys())
 
+    def _fts_trigger_names(self) -> set[str]:
+        return {self.name + suffix for suffix in ("_ai", "_ad", "_au")}
+
+    def _fts_trigger_belongs(self, trigger: Trigger, fts_table: str) -> bool:
+        """
+        Can this trigger be confirmed as one of the index-maintenance triggers
+        for the external content FTS index ``fts_table`` on this table?
+        """
+        # SQLite identifiers are case-insensitive
+        expected_names = {
+            fold_identifier_case(name) for name in self._fts_trigger_names()
+        }
+        if fold_identifier_case(trigger.name) not in expected_names:
+            return False
+        if fold_identifier_case(trigger.table) != fold_identifier_case(self.name):
+            return False
+        return _sql_writes_to(trigger.sql, fts_table)
+
+    def _validate_fts_columns(self, columns: Iterable[str]) -> list[str]:
+        if isinstance(columns, str):
+            columns = [columns]
+        existing = [
+            row[0]
+            for row in self.db.execute(
+                "select name from pragma_table_info(?)", (self.name,)
+            ).fetchall()
+        ]
+        if not existing and not self.exists():
+            raise NoTable(f"Table {self.name} does not exist")
+        existing_folded = {fold_identifier_case(name): name for name in existing}
+        resolved = []
+        for column in columns:
+            resolved.append(existing_folded.get(fold_identifier_case(column), column))
+        if not resolved:
+            raise InvalidColumns(
+                "At least one column is required to configure full-text search"
+            )
+        seen: set[str] = set()
+        duplicates = []
+        for column in resolved:
+            folded = fold_identifier_case(column)
+            if folded in seen:
+                duplicates.append(column)
+            seen.add(folded)
+        if duplicates:
+            raise InvalidColumns(
+                "Duplicate columns for full-text search: {}".format(duplicates)
+            )
+        missing = [column for column in resolved if column not in existing]
+        if missing:
+            raise InvalidColumns(
+                "Invalid columns {} for table with columns {}".format(missing, existing)
+            )
+        return resolved
+
+    @staticmethod
+    def _validate_fts_version(fts_version: str) -> str:
+        if not isinstance(fts_version, str) or fts_version.upper() not in (
+            "FTS4",
+            "FTS5",
+        ):
+            raise ValueError(
+                "fts_version must be one of 'FTS4' or 'FTS5', not {!r}".format(
+                    fts_version
+                )
+            )
+        return fts_version.upper()
+
+    def _create_fts_sql(
+        self, columns: Iterable[str], fts_version: str, tokenize: str | None
+    ) -> str:
+        return (
+            textwrap.dedent("""
+            CREATE VIRTUAL TABLE {table_fts} USING {fts_version} (
+                {columns},{tokenize}
+                content={table}
+            )
+        """)
+            .strip()
+            .format(
+                table=quote_identifier(self.name),
+                table_fts=quote_identifier(self.name + "_fts"),
+                columns=", ".join(quote_identifier(c) for c in columns),
+                fts_version=fts_version,
+                tokenize=(
+                    f"\n    tokenize={self.db.quote(tokenize)}," if tokenize else ""
+                ),
+            )
+        )
+
+    def _fts_trigger_sql(
+        self, columns: Iterable[str], fts_version: str
+    ) -> dict[str, str]:
+        """
+        ``{trigger_name: CREATE TRIGGER SQL}`` for the triggers that keep the
+        external content FTS index in sync with this table.
+
+        Deletions are issued from ``BEFORE`` triggers using ``DELETE FROM``
+        against the FTS table: FTS4 retrieves the old row from the content
+        table in order to remove its terms, which is only possible before the
+        content row itself is deleted. FTS4 has no ``'delete'`` command.
+        """
+        table = quote_identifier(self.name)
+        table_fts = quote_identifier(self.name + "_fts")
+        columns_quoted = ", ".join(quote_identifier(c) for c in columns)
+        new_cols = ", ".join(f"new.{quote_identifier(c)}" for c in columns)
+        # Inserts use rowid; FTS4 only exposes the docid alias for reads
+        insert_rowid = quote_identifier("rowid")
+        if fts_version == "FTS4":
+            # Deleting from an FTS4 index requires the docid column, which is
+            # an alias for rowid
+            delete_rowid = quote_identifier("docid")
+        else:
+            delete_rowid = quote_identifier("rowid")
+        return {
+            self.name
+            + "_ai": (
+                "CREATE TRIGGER {table_ai} AFTER INSERT ON {table} BEGIN\n"
+                "  INSERT INTO {table_fts} ({rowid}, {columns}) VALUES (new.rowid, {new_cols});\n"
+                "END"
+            ).format(
+                table=table,
+                table_fts=table_fts,
+                table_ai=quote_identifier(self.name + "_ai"),
+                rowid=insert_rowid,
+                columns=columns_quoted,
+                new_cols=new_cols,
+            ),
+            self.name
+            + "_ad": (
+                "CREATE TRIGGER {table_ad} BEFORE DELETE ON {table} BEGIN\n"
+                "  DELETE FROM {table_fts} WHERE {rowid} = old.rowid;\n"
+                "END"
+            ).format(
+                table=table,
+                table_fts=table_fts,
+                table_ad=quote_identifier(self.name + "_ad"),
+                rowid=delete_rowid,
+            ),
+            self.name
+            + "_au": (
+                "CREATE TRIGGER {table_au} BEFORE UPDATE ON {table} BEGIN\n"
+                "  DELETE FROM {table_fts} WHERE {delete_rowid} = old.rowid;\n"
+                "  INSERT INTO {table_fts} ({insert_rowid}, {columns}) VALUES (new.rowid, {new_cols});\n"
+                "END"
+            ).format(
+                table=table,
+                table_fts=table_fts,
+                table_au=quote_identifier(self.name + "_au"),
+                delete_rowid=delete_rowid,
+                insert_rowid=insert_rowid,
+                columns=columns_quoted,
+                new_cols=new_cols,
+            ),
+        }
+
+    def _existing_fts_triggers(self, fts_table: str) -> dict[str, Trigger]:
+        return {
+            trigger.name: trigger
+            for trigger in self.db.triggers
+            if self._fts_trigger_belongs(trigger, fts_table)
+        }
+
+    def _drop_fts_index(self, fts_table: str) -> None:
+        "Drop an FTS index and the maintenance triggers confirmed to belong to it."
+        for trigger in self.db.triggers:
+            if self._fts_trigger_belongs(trigger, fts_table):
+                self.db.execute(f"DROP TRIGGER {quote_identifier(trigger.name)}")
+        if self.db[fts_table].exists():
+            self.db.execute(f"DROP TABLE {quote_identifier(fts_table)}")
+
+    def _rebuild_fts_index(self, fts_table: str) -> None:
+        self.db.execute(
+            "INSERT INTO {table}({table}) VALUES('rebuild');".format(
+                table=quote_identifier(fts_table)
+            )
+        )
+
     def enable_fts(
         self,
         columns: Iterable[str],
@@ -3770,77 +4162,39 @@ class Table(Queryable):
         :param tokenize: Custom SQLite tokenizer to use, for example ``"porter"`` to enable Porter stemming.
         :param replace: Should any existing FTS index for this table be replaced by the new one?
         """
-        create_fts_sql = (
-            textwrap.dedent("""
-            CREATE VIRTUAL TABLE {table_fts} USING {fts_version} (
-                {columns},{tokenize}
-                content={table}
-            )
-        """)
-            .strip()
-            .format(
-                table=quote_identifier(self.name),
-                table_fts=quote_identifier(self.name + "_fts"),
-                columns=", ".join(quote_identifier(c) for c in columns),
-                fts_version=fts_version,
-                tokenize=(
-                    f"\n    tokenize={self.db.quote(tokenize)}," if tokenize else ""
-                ),
-            )
+        columns = self._validate_fts_columns(columns)
+        fts_version = self._validate_fts_version(fts_version)
+        create_fts_sql = self._create_fts_sql(columns, fts_version, tokenize)
+        trigger_sql = (
+            self._fts_trigger_sql(columns, fts_version) if create_triggers else {}
         )
-        should_recreate = False
-        if replace and self.db[f"{self.name}_fts"].exists():
-            # Does the table need to be recreated?
-            fts_schema = self.db[f"{self.name}_fts"].schema
-            if fts_schema != create_fts_sql:
-                should_recreate = True
-            expected_triggers = {self.name + suffix for suffix in ("_ai", "_ad", "_au")}
-            existing_triggers = {t.name for t in self.triggers}
-            has_triggers = existing_triggers.issuperset(expected_triggers)
-            if has_triggers != create_triggers:
-                should_recreate = True
-            if not should_recreate:
-                # Table with correct configuration already exists
-                return self
-
-        if should_recreate:
-            self.disable_fts()
-
-        self.db.executescript(create_fts_sql)
-        self.populate_fts(columns)
-
-        if create_triggers:
-            old_cols = ", ".join(f"old.{quote_identifier(c)}" for c in columns)
-            new_cols = ", ".join(f"new.{quote_identifier(c)}" for c in columns)
-            columns_quoted = ", ".join(quote_identifier(c) for c in columns)
-            table = quote_identifier(self.name)
-            table_fts = quote_identifier(self.name + "_fts")
-            triggers = (
-                textwrap.dedent("""
-                CREATE TRIGGER {table_ai} AFTER INSERT ON {table} BEGIN
-                  INSERT INTO {table_fts} (rowid, {columns}) VALUES (new.rowid, {new_cols});
-                END;
-                CREATE TRIGGER {table_ad} AFTER DELETE ON {table} BEGIN
-                  INSERT INTO {table_fts} ({table_fts}, rowid, {columns}) VALUES('delete', old.rowid, {old_cols});
-                END;
-                CREATE TRIGGER {table_au} AFTER UPDATE ON {table} BEGIN
-                  INSERT INTO {table_fts} ({table_fts}, rowid, {columns}) VALUES('delete', old.rowid, {old_cols});
-                  INSERT INTO {table_fts} (rowid, {columns}) VALUES (new.rowid, {new_cols});
-                END;
-            """)
-                .strip()
-                .format(
-                    table=table,
-                    table_fts=table_fts,
-                    table_ai=quote_identifier(self.name + "_ai"),
-                    table_ad=quote_identifier(self.name + "_ad"),
-                    table_au=quote_identifier(self.name + "_au"),
-                    columns=columns_quoted,
-                    old_cols=old_cols,
-                    new_cols=new_cols,
+        fts_table = self.name + "_fts"
+        with self.db.atomic():
+            detected = self.detect_fts()
+            if replace and detected is not None and detected != self.name:
+                existing_triggers = self._existing_fts_triggers(detected)
+                already_configured = (
+                    detected == fts_table
+                    and self.db[detected].schema == create_fts_sql
+                    and set(existing_triggers) == set(trigger_sql)
+                    and all(
+                        existing_triggers[name].sql == sql
+                        for name, sql in trigger_sql.items()
+                    )
                 )
-            )
-            self.db.executescript(triggers)
+                if already_configured:
+                    # Same configuration is already in place - do not re-index
+                    return self
+                # Replace the old configuration, index contents and triggers
+                self._drop_fts_index(detected)
+            self.db.execute(create_fts_sql)
+            self._rebuild_fts_index(fts_table)
+            for sql in trigger_sql.values():
+                # A trigger with one of these names that does not belong to
+                # this index is left alone: CREATE TRIGGER raises SQLite's own
+                # "trigger ... already exists" and the atomic block rolls back
+                # everything, including the new index
+                self.db.execute(sql)
         return self
 
     def populate_fts(self, columns: Iterable[str]) -> "Table":
@@ -3850,41 +4204,25 @@ class Table(Queryable):
 
         :param columns: Columns to populate the data for
         """
-        columns_quoted = ", ".join(quote_identifier(c) for c in columns)
-        sql = (
-            textwrap.dedent("""
-            INSERT INTO {table_fts} (rowid, {columns})
-                SELECT rowid, {columns} FROM {table};
-        """)
-            .strip()
-            .format(
-                table=quote_identifier(self.name),
-                table_fts=quote_identifier(self.name + "_fts"),
-                columns=columns_quoted,
+        columns = self._validate_fts_columns(columns)
+        fts_table = self.detect_fts()
+        if fts_table is None:
+            raise ValueError(
+                f"Full-text search is not configured for table '{self.name}'"
             )
-        )
-        self.db.executescript(sql)
+        with self.db.atomic():
+            # Rebuilding (rather than inserting) keeps the index consistent
+            # with rows that have been updated or deleted since it was built
+            self._rebuild_fts_index(fts_table)
         return self
 
     def disable_fts(self) -> "Table":
         "Remove any full-text search index and related triggers configured for this table."
-        fts_table = self.detect_fts()
-        if fts_table:
-            self.db[fts_table].drop()
-        # Now delete the triggers that related to that table
-        sql = textwrap.dedent("""
-            SELECT name FROM sqlite_master
-                WHERE type = 'trigger'
-                AND (sql LIKE '% INSERT INTO [{}]%' OR sql LIKE '% INSERT INTO "{}"%')
-        """).strip().format(fts_table, fts_table)
-        trigger_names = []
-        for row in self.db.execute(sql).fetchall():
-            trigger_names.append(row[0])
         with self.db.atomic():
-            for trigger_name in trigger_names:
-                self.db.execute(
-                    f"DROP TRIGGER IF EXISTS {quote_identifier(trigger_name)}"
-                )
+            fts_table = self.detect_fts()
+            if fts_table is None:
+                return self
+            self._drop_fts_index(fts_table)
         return self
 
     def rebuild_fts(self) -> "Table":
@@ -3903,28 +4241,29 @@ class Table(Queryable):
 
     def detect_fts(self) -> str | None:
         "Detect if table has a corresponding FTS virtual table and return it"
-        sql = textwrap.dedent("""
-            SELECT name FROM sqlite_master
-                WHERE rootpage = 0
-                AND (
-                    sql LIKE :like
-                    OR sql LIKE :like2
-                    OR (
-                        tbl_name = :table
-                        AND sql LIKE '%VIRTUAL TABLE%USING FTS%'
-                    )
-                )
-        """).strip()
-        args = {
-            "like": f"%VIRTUAL TABLE%USING FTS%content=[{self.name}]%",
-            "like2": f'%VIRTUAL TABLE%USING FTS%content="{self.name}"%',
-            "table": self.name,
-        }
-        rows = self.db.execute(sql, args).fetchall()
-        if len(rows) == 0:
-            return None
-        else:
-            return rows[0][0]
+        # Parse the stored schema rather than matching it with LIKE - table
+        # names may legally contain LIKE wildcards and quoting characters
+        rows = self.db.execute(
+            "select name, sql from sqlite_master where type = 'table' "
+            "and sql like '%VIRTUAL TABLE%USING FTS%'"
+        ).fetchall()
+        folded_table = fold_identifier_case(self.name)
+        content_match = None
+        tbl_name_match = None
+        for name, sql in rows:
+            if not sql:
+                continue
+            content = _fts_option(sql, "content")
+            if content is not None and fold_identifier_case(content) == folded_table:
+                if content_match is None:
+                    content_match = name
+            if (
+                fold_identifier_case(name) == folded_table
+                and _fts_module_args(sql)
+                and tbl_name_match is None
+            ):
+                tbl_name_match = name
+        return content_match or tbl_name_match
 
     def optimize(self) -> "Table":
         "Run the ``optimize`` operation against the associated full-text search index table."
