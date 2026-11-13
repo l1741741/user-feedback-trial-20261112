@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import email.utils
 import gc
+import hashlib
 import logging
 import pickle
 import shutil
@@ -948,6 +950,14 @@ class TestFilesystemStorageGzipWithDummyPolicy(TestFilesystemStorageWithDummyPol
         body_path.write_bytes(body_path.read_bytes()[:-5])
 
 
+class _HeaderAwareFingerprinter:
+    """Fingerprinter that distinguishes requests by their ``X-Key`` header."""
+
+    def fingerprint(self, request: Request) -> bytes:
+        key = request.headers.get(b"X-Key") or b""
+        return hashlib.sha1(request.url.encode() + key).digest()
+
+
 class _LateMiddleware:
     """Downloader middleware that runs after :class:`HttpCacheMiddleware`."""
 
@@ -1197,6 +1207,93 @@ class TestConcurrentDownloads(TestBase):
             assert download.urls == [self.url]
             assert not self._middleware_of(manager, HttpCacheMiddleware)._downloading
 
+    @coroutine_test
+    async def test_different_cache_keys(self):
+        # Requests with different fingerprints never wait for each other:
+        # both are downloaded concurrently and neither response is served from
+        # the cache.
+        other_url = "http://www.example.com/other"
+        with self._manager() as (manager, crawler):
+            download = _Downloads()
+            first: Deferred[Any] = deferred_from_coro(
+                manager.download_async(download, Request(self.url))
+            )
+            await self._wait_until(lambda: download.urls)
+            second: Deferred[Any] = deferred_from_coro(
+                manager.download_async(download, Request(other_url))
+            )
+            await self._wait_until(lambda: len(download.urls) == 2)
+            assert not crawler.stats.get_value("httpcache/wait")
+            download.release()
+
+            responses = [
+                await maybe_deferred_to_future(first),
+                await maybe_deferred_to_future(second),
+            ]
+            assert [response.url for response in responses] == [self.url, other_url]
+            assert all("cached" not in response.flags for response in responses)
+            assert download.urls == [self.url, other_url]
+
+    @coroutine_test
+    async def test_different_headers_with_a_header_aware_fingerprinter(self):
+        # A fingerprinter that takes a header into account gives requests with
+        # different header values different cache keys, so they are not merged
+        # into one download.
+        with self._manager(REQUEST_FINGERPRINTER_CLASS=_HeaderAwareFingerprinter) as (
+            manager,
+            crawler,
+        ):
+            download = _Downloads()
+            first: Deferred[Any] = deferred_from_coro(
+                manager.download_async(
+                    download, Request(self.url, headers={"X-Key": "one"})
+                )
+            )
+            await self._wait_until(lambda: download.urls)
+            second: Deferred[Any] = deferred_from_coro(
+                manager.download_async(
+                    download, Request(self.url, headers={"X-Key": "two"})
+                )
+            )
+            await self._wait_until(lambda: len(download.urls) == 2)
+            assert not crawler.stats.get_value("httpcache/wait")
+            download.release()
+
+            for result in (first, second):
+                response = await maybe_deferred_to_future(result)
+                assert isinstance(response, Response)
+                assert "cached" not in response.flags
+            assert download.urls == [self.url] * 2
+
+    @coroutine_test
+    async def test_same_headers_with_a_header_aware_fingerprinter(self):
+        # With the same header-aware fingerprinter, requests that differ in no
+        # fingerprint input still share a cache key and coalesce.
+        with self._manager(REQUEST_FINGERPRINTER_CLASS=_HeaderAwareFingerprinter) as (
+            manager,
+            crawler,
+        ):
+            download = _Downloads()
+            first: Deferred[Any] = deferred_from_coro(
+                manager.download_async(
+                    download, Request(self.url, headers={"X-Key": "one"})
+                )
+            )
+            await self._wait_until(lambda: download.urls)
+            second: Deferred[Any] = deferred_from_coro(
+                manager.download_async(
+                    download, Request(self.url, headers={"X-Key": "one"})
+                )
+            )
+            await self._wait_until(lambda: crawler.stats.get_value("httpcache/wait"))
+            download.release()
+
+            assert isinstance(await maybe_deferred_to_future(first), Response)
+            response = await maybe_deferred_to_future(second)
+            assert isinstance(response, Response)
+            assert "cached" in response.flags
+            assert download.urls == [self.url]
+
 
 class TestInFlightTracking(TestBase):
     """Bookkeeping of requests that are being downloaded."""
@@ -1246,6 +1343,64 @@ class TestInFlightTracking(TestBase):
             # in-flight download, with a fresh list of waiters.
             assert not waiters
             assert mw._downloading.get(fingerprint) is not waiters
+
+    @coroutine_test
+    async def test_waiter_cancellation_removes_it(self):
+        # Cancelling a waiting request removes its Deferred from the list of
+        # waiters, so waking the other waiters up never touches a cancelled one
+        # and the in-flight download keeps its state intact.
+        with self._middleware() as mw:
+            leader = Request(self.url)
+            assert await mw.process_request(leader) is None
+            waiting = deferred_from_coro(mw.process_request(Request(self.url)))
+            await self._wait_for_stat(mw)
+            other = deferred_from_coro(mw.process_request(Request(self.url)))
+            await self._wait_for_stat(mw, value=2)
+
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await maybe_deferred_to_future(waiting)
+
+            fingerprint = mw._fingerprinter.fingerprint(leader)
+            assert len(mw._downloading[fingerprint]) == 1
+
+            assert mw.crawler.spider
+            mw.spider_closed(mw.crawler.spider)
+            assert await maybe_deferred_to_future(other) is None
+
+    @coroutine_test
+    async def test_waiters_for_different_keys_are_independent(self):
+        # Finishing the download for one fingerprint does not wake waiters of
+        # another fingerprint.
+        with self._middleware() as mw:
+            leader = Request(self.url)
+            other_url = "http://www.example.com/other"
+            other_leader = Request(other_url)
+            assert await mw.process_request(leader) is None
+            assert await mw.process_request(other_leader) is None
+
+            waiter = deferred_from_coro(mw.process_request(Request(self.url)))
+            await self._wait_for_stat(mw)
+            other_waiter = deferred_from_coro(mw.process_request(Request(other_url)))
+            await self._wait_for_stat(mw, value=2)
+
+            fingerprint = mw._fingerprinter.fingerprint(leader)
+            assert len(mw._downloading[fingerprint]) == 1
+            mw._downloaded(other_leader)
+            assert await maybe_deferred_to_future(other_waiter) is None
+            # The waiter for the other fingerprint was neither woken nor
+            # removed from its own list of waiters.
+            assert not waiter.called
+            assert len(mw._downloading[fingerprint]) == 1
+
+    @staticmethod
+    async def _wait_for_stat(mw: HttpCacheMiddleware, value: int = 1) -> None:
+        assert mw.crawler.stats
+        for _ in range(100):
+            if mw.crawler.stats.get_value("httpcache/wait") == value:
+                return
+            await sleep(0)
+        raise AssertionError("The httpcache/wait stat never reached the expected value")
 
 
 class ScopeTestMixin(TestBase):
