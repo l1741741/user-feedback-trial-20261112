@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import functools
 import hashlib
 import logging
 import mimetypes
+import os
+import stat
 import time
 import warnings
 from collections import defaultdict
@@ -114,6 +117,140 @@ class FilesStoreProtocol(Protocol):
     ) -> StatInfo | Deferred[StatInfo]: ...
 
 
+_LINK_OR_MISSING_ERRORS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
+
+# O_DIRECTORY makes an open of a non-directory fail instead of returning a
+# descriptor, which would otherwise block on a FIFO. Not every platform with
+# directory descriptors has it.
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+# Directory descriptors and O_NOFOLLOW are what make the confinement race-free:
+# each component is opened relative to an already opened, verified parent, so a
+# directory swapped for a link cannot be followed. Both are POSIX-only, and are
+# checked at import time so that Windows, where neither exists, falls back to
+# checking each path before using it.
+_HAS_DIR_FD = (
+    hasattr(os, "O_NOFOLLOW")
+    and os.open in os.supports_dir_fd
+    and os.mkdir in os.supports_dir_fd
+    and os.stat in os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+)
+
+
+def _path_components(path: str | PathLike[str]) -> list[str]:
+    """Split *path* into the relative POSIX components that the store accepts.
+
+    The input is inspected component by component rather than normalized, so
+    that ``a/../b`` is rejected instead of being collapsed into a path that no
+    longer shows what the caller asked to reach.
+    """
+    path = _to_string(path)
+    if not path:
+        raise ValueError("The path must not be empty")
+    if "\0" in path:
+        raise ValueError(f"The path must not contain NUL characters: {path!r}")
+    if "\\" in path:
+        # Also covers UNC paths such as \\server\share, which Windows treats as
+        # absolute.
+        raise ValueError(f"The path must not contain backslashes: {path!r}")
+    components = path.split("/")
+    for component in components:
+        if not component:
+            raise ValueError(
+                f"The path must be a sequence of non-empty components, got "
+                f"{path!r}"
+            )
+        if component in (".", ".."):
+            raise ValueError(f"The path must not contain {component!r}: {path!r}")
+        if len(component) >= 2 and component[0].isalpha() and component[1] == ":":
+            raise ValueError(f"The path must not contain a drive letter: {path!r}")
+    return components
+
+
+def _not_a_directory_error(path: str) -> NotADirectoryError:
+    return NotADirectoryError(errno.ENOTDIR, f"Not a directory: {path!r}")
+
+
+def _link_error(name: str) -> ValueError:
+    return ValueError(
+        f"Refusing to follow the symbolic link {name!r}, which would leave the "
+        f"store directory"
+    )
+
+
+def _raise_if_link(parent_fd: int, name: str, error: OSError) -> None:
+    """Raise ValueError instead of *error* when *name* is a symbolic link.
+
+    O_NOFOLLOW reports a link as ELOOP on Linux and macOS, but other supported
+    systems report ENOTDIR, or ENOENT for a dangling link. Checking the link
+    only after the failed open avoids a separate race-free check, since the
+    failure already proves that no such file was opened.
+    """
+    if error.errno in _LINK_OR_MISSING_ERRORS:
+        try:
+            mode = os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode
+        except OSError:
+            return
+        if stat.S_ISLNK(mode):
+            raise _link_error(name) from error
+
+
+def _open_root(basedir: str) -> int:
+    try:
+        fd = os.open(basedir, os.O_RDONLY | os.O_NOFOLLOW | _O_DIRECTORY)
+    except OSError as e:
+        if e.errno in _LINK_OR_MISSING_ERRORS:
+            try:
+                is_link = stat.S_ISLNK(os.stat(basedir, follow_symlinks=False).st_mode)
+            except OSError:
+                is_link = False
+            if is_link:
+                raise ValueError(
+                    f"The store directory must not be a symbolic link: {basedir!r}"
+                ) from e
+        raise
+    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise _not_a_directory_error(basedir)
+    return fd
+
+
+def _open_directory_at(parent_fd: int, name: str) -> int:
+    try:
+        fd = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | _O_DIRECTORY, dir_fd=parent_fd
+        )
+    except OSError as e:
+        _raise_if_link(parent_fd, name, e)
+        raise
+    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise _not_a_directory_error(name)
+    return fd
+
+
+def _open_file_at(parent_fd: int, name: str) -> int:
+    try:
+        return os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except OSError as e:
+        _raise_if_link(parent_fd, name, e)
+        raise
+
+
+def _create_file_at(parent_fd: int, name: str) -> int:
+    try:
+        return os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+            mode=0o666,
+        )
+    except OSError as e:
+        _raise_if_link(parent_fd, name, e)
+        raise
+
+
 class FSFilesStore:
     checksum_algorithm: str = "md5"
 
@@ -125,7 +262,26 @@ class FSFilesStore:
         self.created_directories: defaultdict[MediaPipeline.SpiderInfo, set[str]] = (
             defaultdict(set)
         )
-        self._mkdir(Path(self.basedir))
+        # Operations descend through directory descriptors reopened from this
+        # path on every call, so a base directory that is replaced later is
+        # rejected rather than followed. Creating the directory here matches
+        # the historical behaviour of storing under a path that does not exist
+        # yet; the checks below reject an existing symlink with a clear error.
+        path = Path(self.basedir)
+        if path.is_symlink():
+            raise ValueError(
+                f"The store directory must not be a symbolic link: {self.basedir!r}"
+            )
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except FileExistsError:
+            # The name exists but is not a directory; the checks below decide
+            # what it is and whether it can be used.
+            pass
+        if _HAS_DIR_FD:
+            os.close(_open_root(self.basedir))
+        elif not path.is_dir():  # pragma: no cover
+            raise _not_a_directory_error(self.basedir)
 
     def persist_file(
         self,
@@ -135,36 +291,159 @@ class FSFilesStore:
         meta: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> None:
-        absolute_path = self._get_filesystem_path(path)
-        self._mkdir(absolute_path.parent, info)
-        absolute_path.write_bytes(buf.getvalue())
+        components = _path_components(path)
+        data = buf.getvalue()
+        if not _HAS_DIR_FD:  # pragma: no cover
+            self._persist_file_by_path(components, data, info)
+            return
+        parent_fd = self._open_parent(components[:-1], info)
+        try:
+            fd = _create_file_at(parent_fd, components[-1])
+            try:
+                file = os.fdopen(fd, "wb")
+            except BaseException:
+                os.close(fd)
+                raise
+            with file:
+                file.write(data)
+        finally:
+            os.close(parent_fd)
 
     def stat_file(
         self, path: str | PathLike[str], info: MediaPipeline.SpiderInfo
     ) -> StatInfo:
-        absolute_path = self._get_filesystem_path(path)
+        components = _path_components(path)
+        if not _HAS_DIR_FD:  # pragma: no cover
+            return self._stat_file_by_path(components)
         try:
-            last_modified = absolute_path.stat().st_mtime
+            parent_fd = self._open_directories(components[:-1])
         except OSError:
+            # A link raises ValueError from inside, which is not an OSError and
+            # so is not caught here.
             return {}
-
-        with absolute_path.open("rb") as f:
-            checksum = hashlib.file_digest(f, self.checksum_algorithm).hexdigest()
-
-        return {"last_modified": last_modified, "checksum": checksum}
+        try:
+            try:
+                fd = _open_file_at(parent_fd, components[-1])
+            except OSError:
+                # Any reason the leaf cannot be opened, such as missing,
+                # unreadable, or a directory, means no file information.
+                return {}
+            try:
+                try:
+                    last_modified = os.fstat(fd).st_mtime
+                    file = os.fdopen(fd, "rb")
+                except BaseException:
+                    # Opening a directory succeeds, but it cannot be wrapped;
+                    # fdopen() takes ownership only once it has succeeded, so
+                    # only a descriptor that it did not wrap is closed here.
+                    os.close(fd)
+                    raise
+            except IsADirectoryError:
+                return {}
+            with file:
+                checksum = hashlib.file_digest(file, self.checksum_algorithm)
+        finally:
+            os.close(parent_fd)
+        return {"last_modified": last_modified, "checksum": checksum.hexdigest()}
 
     def _get_filesystem_path(self, path: str | PathLike[str]) -> Path:
-        path_comps = _to_string(path).split("/")
-        return Path(self.basedir, *path_comps)
+        return Path(self.basedir, *_path_components(path))
 
-    def _mkdir(
-        self, dirname: Path, domain: MediaPipeline.SpiderInfo | None = None
-    ) -> None:
-        seen: set[str] = self.created_directories[domain] if domain else set()
-        if str(dirname) not in seen:
-            if not dirname.exists():
-                dirname.mkdir(parents=True)
-            seen.add(str(dirname))
+    def _open_directories(self, components: list[str]) -> int:
+        """Open the directory named by *components* without following links."""
+        fd = _open_root(self.basedir)
+        try:
+            for name in components:
+                child_fd = _open_directory_at(fd, name)
+                os.close(fd)
+                fd = child_fd
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def _open_parent(
+        self, components: list[str], info: MediaPipeline.SpiderInfo
+    ) -> int:
+        seen = self.created_directories[info]
+        key = "/".join(components)
+        if key in seen:
+            # The cache only saves repeated mkdir() calls, and the directory
+            # may have been removed since. Every access still opens and checks
+            # it afresh; if it is gone, the mkdir() path below recreates it.
+            try:
+                return self._open_directories(components)
+            except FileNotFoundError:
+                pass
+        fd = _open_root(self.basedir)
+        try:
+            for name in components:
+                try:
+                    os.mkdir(name, dir_fd=fd)
+                except FileExistsError:
+                    # An existing name, of any type. The open below decides
+                    # whether it is a directory that can be entered.
+                    pass
+                child_fd = _open_directory_at(fd, name)
+                os.close(fd)
+                fd = child_fd
+        except BaseException:
+            os.close(fd)
+            raise
+        seen.add(key)
+        return fd
+
+    def _directory_by_path(
+        self, components: list[str], *, create: bool
+    ) -> Path:  # pragma: no cover
+        """Return the directory named by *components*, refusing any link.
+
+        This is the fallback for platforms without directory descriptors. The
+        link checks and the file operations that follow them are separate
+        calls, so unlike the descriptor-based path this cannot rule out a
+        directory replaced in between.
+        """
+        path = Path(self.basedir)
+        for name in components:
+            path /= name
+            if path.is_symlink():
+                raise _link_error(str(path))
+            if create:
+                path.mkdir(exist_ok=True)
+                if path.is_symlink():
+                    raise _link_error(str(path))
+            elif not path.is_dir():
+                raise _not_a_directory_error(str(path))
+        return path
+
+    def _persist_file_by_path(
+        self, components: list[str], data: bytes, info: MediaPipeline.SpiderInfo
+    ) -> None:  # pragma: no cover
+        parent = self._directory_by_path(components[:-1], create=True)
+        self.created_directories[info].add("/".join(components[:-1]))
+        leaf = parent / components[-1]
+        if leaf.is_symlink():
+            raise _link_error(str(leaf))
+        with leaf.open("wb") as file:
+            file.write(data)
+
+    def _stat_file_by_path(self, components: list[str]) -> StatInfo:  # pragma: no cover
+        try:
+            parent = self._directory_by_path(components[:-1], create=False)
+        except OSError:
+            return {}
+        leaf = parent / components[-1]
+        try:
+            if leaf.is_symlink():
+                raise _link_error(str(leaf))
+            if not leaf.is_file():
+                return {}
+            last_modified = leaf.stat(follow_symlinks=False).st_mtime
+        except FileNotFoundError:
+            return {}
+        with leaf.open("rb") as file:
+            checksum = hashlib.file_digest(file, self.checksum_algorithm)
+        return {"last_modified": last_modified, "checksum": checksum.hexdigest()}
 
 
 class S3FilesStore:

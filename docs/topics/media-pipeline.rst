@@ -264,6 +264,14 @@ Where:
 
 * ``<FILE_NAME>`` is the file name assigned to the file.  For more info see :ref:`topics-file-naming`.
 
+Paths produced by
+:meth:`~scrapy.pipelines.files.FilesPipeline.file_path` must be relative
+POSIX paths made of non-empty components. The file system stores reject
+absolute paths, ``.`` and ``..`` components, backslashes, drive letters, and
+NUL bytes, and refuse to follow symbolic links in the store directory path.
+On POSIX platforms these checks are race-free, because each path component is
+opened relative to an already opened parent directory.
+
 
 .. _media-pipeline-ftp:
 

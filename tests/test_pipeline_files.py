@@ -4,8 +4,10 @@ import dataclasses
 import hashlib
 import logging
 import mimetypes
+import os
 import random
 import re
+import sys
 import time
 import warnings
 from abc import ABC, abstractmethod
@@ -52,6 +54,10 @@ from tests.utils.decorators import coroutine_test, inline_callbacks_test
 
 from .utils.cloud import mock_google_cloud_storage
 from .utils.media_pipelines import DUMMY_SPIDER_INFO, mocked_download_func
+
+
+def _open_descriptor_count() -> int:
+    return len(os.listdir("/dev/fd"))
 
 
 def get_ftp_content_and_delete(
@@ -456,6 +462,33 @@ class TestFilesPipeline:
         assert len(records) == 1
         assert records[0].levelname == "WARNING"
         assert "boom" in records[0].getMessage()
+
+    @coroutine_test
+    async def test_file_rejects_escaping_file_path(self, tmp_path: Path) -> None:
+        """A file_path() override cannot store a file outside FILES_STORE."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "sentinel").write_bytes(b"sentinel")
+        tempdir = tmp_path / "store"
+
+        class EscapingFilesPipeline(FilesPipeline):
+            def file_path(self, request, response=None, info=None, *, item=None):
+                return f"../outside/{request.url.rpartition('/')[2]}"
+
+        pipeline = self._create_pipeline(
+            EscapingFilesPipeline, {"FILES_STORE": str(tempdir)}
+        )
+        item_url = "http://example.com/escape.pdf"
+        item = _create_item_with_files(item_url)
+        with mock.patch.object(
+            FilesPipeline,
+            "get_media_requests",
+            return_value=[_prepare_request_object(item_url)],
+        ):
+            result = await pipeline.process_item(item)
+        assert result["files"] == []
+        assert sorted(p.name for p in outside.iterdir()) == ["sentinel"]
+        assert (outside / "sentinel").read_bytes() == b"sentinel"
 
     @coroutine_test
     async def test_file_downloaded_unknown_error(
@@ -1152,6 +1185,219 @@ class TestFSFilesStore:
     def test_stat_missing_file(self, tmp_path: Path) -> None:
         store = FSFilesStore(tmp_path)
         assert store.stat_file("full/filename", DUMMY_SPIDER_INFO) == {}
+
+    def test_stat_directory(self, tmp_path: Path) -> None:
+        store = FSFilesStore(tmp_path)
+        store.persist_file("full/filename", BytesIO(b"data"), DUMMY_SPIDER_INFO)
+        assert store.stat_file("full", DUMMY_SPIDER_INFO) == {}
+
+    def test_constructor_creates_missing_basedir(self, tmp_path: Path) -> None:
+        basedir = tmp_path / "a" / "b"
+        store = FSFilesStore(basedir)
+        assert store.basedir == str(basedir)
+        assert basedir.is_dir()
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "",
+            "/",
+            "//",
+            "/a",
+            "a//b",
+            "a/",
+            "a/./b",
+            "a/../b",
+            "../a",
+            "..",
+            ".",
+            "a/b/..",
+            "a\x00b",
+            "a\\b",
+            "\\server\\share",
+            "C:/a",
+            "C:a",
+            "c:\\a",
+        ],
+    )
+    def test_rejects_invalid_paths(self, tmp_path: Path, path: str) -> None:
+        store = FSFilesStore(tmp_path)
+        with pytest.raises(ValueError):
+            store.persist_file(path, BytesIO(b"data"), DUMMY_SPIDER_INFO)
+        with pytest.raises(ValueError):
+            store.stat_file(path, DUMMY_SPIDER_INFO)
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "path", ["full/name", "媒体 目录/a,b.c.jpg", "a.b/c..d/e."]
+    )
+    def test_accepts_relative_components(self, tmp_path: Path, path: str) -> None:
+        store = FSFilesStore(tmp_path)
+        store.persist_file(path, BytesIO(b"data"), DUMMY_SPIDER_INFO)
+        assert (tmp_path / path).read_bytes() == b"data"
+        assert store.stat_file(path, DUMMY_SPIDER_INFO)["checksum"] == (
+            hashlib.md5(b"data").hexdigest()
+        )
+
+    def test_stat_file_uses_the_opened_file(self, tmp_path: Path) -> None:
+        """The mtime and checksum describe the file that was opened."""
+        store = FSFilesStore(tmp_path)
+        store.persist_file("full/filename", BytesIO(b"old"), DUMMY_SPIDER_INFO)
+        opened = (tmp_path / "full" / "filename").stat().st_mtime
+        stat = store.stat_file("full/filename", DUMMY_SPIDER_INFO)
+        assert stat["last_modified"] == opened
+        assert stat["checksum"] == hashlib.md5(b"old").hexdigest()
+
+    def test_overwrites_existing_file(self, tmp_path: Path) -> None:
+        store = FSFilesStore(tmp_path)
+        store.persist_file("full/filename", BytesIO(b"old"), DUMMY_SPIDER_INFO)
+        store.persist_file("full/filename", BytesIO(b"new"), DUMMY_SPIDER_INFO)
+        assert (tmp_path / "full" / "filename").read_bytes() == b"new"
+        assert store.stat_file("full/filename", DUMMY_SPIDER_INFO)["checksum"] == (
+            hashlib.md5(b"new").hexdigest()
+        )
+
+    def test_does_not_modify_buffer(self, tmp_path: Path) -> None:
+        store = FSFilesStore(tmp_path)
+        buf = BytesIO(b"data")
+        store.persist_file("full/filename", buf, DUMMY_SPIDER_INFO)
+        assert buf.getvalue() == b"data"
+        assert buf.tell() == 0
+
+    def test_persist_and_stat_with_path_object(self, tmp_path: Path) -> None:
+        store = FSFilesStore(tmp_path)
+        store.persist_file(Path("full/filename"), BytesIO(b"data"), DUMMY_SPIDER_INFO)
+        assert store.stat_file(Path("full/filename"), DUMMY_SPIDER_INFO)[
+            "checksum"
+        ] == hashlib.md5(b"data").hexdigest()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="needs /dev/fd")
+    def test_io_error_closes_descriptors(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A failed checksum read leaves no descriptor behind."""
+        store = FSFilesStore(tmp_path)
+        store.persist_file("full/filename", BytesIO(b"data"), DUMMY_SPIDER_INFO)
+        before = _open_descriptor_count()
+
+        def failing_digest(fileobj, algorithm):
+            raise OSError("read error")
+
+        monkeypatch.setattr(files.hashlib, "file_digest", failing_digest)
+        with pytest.raises(OSError, match="read error"):
+            store.stat_file("full/filename", DUMMY_SPIDER_INFO)
+        assert _open_descriptor_count() == before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX symlinks")
+class TestFSFilesStoreSymlinks:
+    @pytest.fixture
+    def outside(self, tmp_path: Path) -> Path:
+        """A directory outside the store, plus a sentinel that must not change."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "sentinel").write_bytes(b"sentinel")
+        return outside
+
+    @pytest.fixture
+    def store(self, tmp_path: Path) -> FSFilesStore:
+        return FSFilesStore(tmp_path / "store")
+
+    def test_rejects_symlinked_basedir(self, tmp_path: Path, outside: Path) -> None:
+        link = tmp_path / "link"
+        link.symlink_to(outside, target_is_directory=True)
+        with pytest.raises(ValueError, match="symbolic link"):
+            FSFilesStore(link)
+        assert (outside / "sentinel").read_bytes() == b"sentinel"
+        assert sorted(p.name for p in outside.iterdir()) == ["sentinel"]
+
+    def test_rejects_final_symlink(
+        self, tmp_path: Path, store: FSFilesStore, outside: Path
+    ) -> None:
+        (tmp_path / "store" / "file").symlink_to(outside / "sentinel")
+        with pytest.raises(ValueError, match="symbolic link"):
+            store.persist_file("file", BytesIO(b"pwned"), DUMMY_SPIDER_INFO)
+        with pytest.raises(ValueError, match="symbolic link"):
+            store.stat_file("file", DUMMY_SPIDER_INFO)
+        assert (outside / "sentinel").read_bytes() == b"sentinel"
+        assert sorted(p.name for p in outside.iterdir()) == ["sentinel"]
+
+    def test_rejects_final_symlink_to_missing_file(
+        self, tmp_path: Path, store: FSFilesStore, outside: Path
+    ) -> None:
+        (tmp_path / "store" / "file").symlink_to(outside / "missing")
+        with pytest.raises(ValueError, match="symbolic link"):
+            store.persist_file("file", BytesIO(b"pwned"), DUMMY_SPIDER_INFO)
+        with pytest.raises(ValueError, match="symbolic link"):
+            store.stat_file("file", DUMMY_SPIDER_INFO)
+        assert not (outside / "missing").exists()
+
+    def test_rejects_intermediate_symlink(
+        self, tmp_path: Path, store: FSFilesStore, outside: Path
+    ) -> None:
+        (tmp_path / "store" / "dir").symlink_to(outside, target_is_directory=True)
+        with pytest.raises(ValueError, match="symbolic link"):
+            store.persist_file("dir/new", BytesIO(b"pwned"), DUMMY_SPIDER_INFO)
+        with pytest.raises(ValueError, match="symbolic link"):
+            store.stat_file("dir/sentinel", DUMMY_SPIDER_INFO)
+        assert not (outside / "new").exists()
+        assert (outside / "sentinel").read_bytes() == b"sentinel"
+
+    def test_rejects_directory_replaced_after_use(
+        self, tmp_path: Path, store: FSFilesStore, outside: Path
+    ) -> None:
+        store.persist_file("dir/first", BytesIO(b"first"), DUMMY_SPIDER_INFO)
+        assert store.stat_file("dir/first", DUMMY_SPIDER_INFO)["checksum"]
+        (tmp_path / "store" / "dir").rename(tmp_path / "moved")
+        (tmp_path / "store" / "dir").symlink_to(outside, target_is_directory=True)
+        with pytest.raises(ValueError, match="symbolic link"):
+            store.persist_file("dir/second", BytesIO(b"pwned"), DUMMY_SPIDER_INFO)
+        with pytest.raises(ValueError, match="symbolic link"):
+            store.stat_file("dir/sentinel", DUMMY_SPIDER_INFO)
+        assert not (outside / "second").exists()
+        assert (outside / "sentinel").read_bytes() == b"sentinel"
+        store.persist_file("elsewhere/ok", BytesIO(b"ok"), DUMMY_SPIDER_INFO)
+        assert (tmp_path / "store" / "elsewhere" / "ok").read_bytes() == b"ok"
+
+    def test_rejects_directory_replaced_right_after_mkdir(
+        self, tmp_path: Path, store: FSFilesStore, outside: Path, monkeypatch
+    ) -> None:
+        real_mkdir = os.mkdir
+        created = tmp_path / "store" / "new"
+
+        def racing_mkdir(path, *args, **kwargs):
+            real_mkdir(path, *args, **kwargs)
+            if path == "new":
+                created.rename(tmp_path / "moved")
+                created.symlink_to(outside, target_is_directory=True)
+
+        monkeypatch.setattr(files.os, "mkdir", racing_mkdir)
+        with pytest.raises(ValueError, match="symbolic link"):
+            store.persist_file("new/file", BytesIO(b"pwned"), DUMMY_SPIDER_INFO)
+        assert not (outside / "file").exists()
+        assert (outside / "sentinel").read_bytes() == b"sentinel"
+
+    def test_rejects_basedir_replaced_after_use(
+        self, tmp_path: Path, outside: Path
+    ) -> None:
+        store = FSFilesStore(tmp_path / "store")
+        store.persist_file("file", BytesIO(b"data"), DUMMY_SPIDER_INFO)
+        (tmp_path / "store").rename(tmp_path / "moved")
+        (tmp_path / "store").symlink_to(outside, target_is_directory=True)
+        with pytest.raises(ValueError, match="symbolic link"):
+            store.persist_file("second", BytesIO(b"pwned"), DUMMY_SPIDER_INFO)
+        with pytest.raises(ValueError, match="symbolic link"):
+            store.stat_file("sentinel", DUMMY_SPIDER_INFO)
+        assert not (outside / "second").exists()
+        assert (outside / "sentinel").read_bytes() == b"sentinel"
+
+    def test_recreates_directory_removed_after_use(
+        self, tmp_path: Path, store: FSFilesStore
+    ) -> None:
+        store.persist_file("dir/first", BytesIO(b"first"), DUMMY_SPIDER_INFO)
+        (tmp_path / "store" / "dir").rename(tmp_path / "moved")
+        store.persist_file("dir/second", BytesIO(b"second"), DUMMY_SPIDER_INFO)
+        assert (tmp_path / "store" / "dir" / "second").read_bytes() == b"second"
 
 
 @pytest.mark.requires_botocore
