@@ -218,6 +218,7 @@ __all__ = [
     "SCHEDULER_DEBUG",
     "SCHEDULER_DISK_QUEUE",
     "SCHEDULER_MEMORY_QUEUE",
+    "SCHEDULER_PRIORITY_FAIRNESS",
     "SCHEDULER_PRIORITY_QUEUE",
     "SCHEDULER_START_DISK_QUEUE",
     "SCHEDULER_START_MEMORY_QUEUE",
@@ -608,6 +609,7 @@ SCHEDULER_DEBUG = False
 SCHEDULER_DISK_QUEUE = "scrapy.squeues.PickleLifoDiskQueue"
 SCHEDULER_MEMORY_QUEUE = "scrapy.squeues.LifoMemoryQueue"
 SCHEDULER_PRIORITY_QUEUE = "scrapy.pqueues.DownloaderAwarePriorityQueue"
+SCHEDULER_PRIORITY_FAIRNESS = 0
 SCHEDULER_START_DISK_QUEUE = "scrapy.squeues.PickleFifoDiskQueue"
 SCHEDULER_START_MEMORY_QUEUE = "scrapy.squeues.FifoMemoryQueue"
 

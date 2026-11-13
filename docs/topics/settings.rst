@@ -2221,6 +2221,32 @@ Another available type is :class:`~scrapy.pqueues.ScrapyPriorityQueue`.
 domains in parallel.
 
 
+.. setting:: SCHEDULER_PRIORITY_FAIRNESS
+
+SCHEDULER_PRIORITY_FAIRNESS
+---------------------------
+
+.. versionadded:: VERSION
+
+Default: ``0``
+
+Maximum number of requests that the :ref:`scheduler <topics-scheduler>`
+returns in a row from the highest-priority queues while requests with a lower
+:attr:`~scrapy.http.Request.priority` are still waiting.
+
+When this number is reached, the scheduler instead returns one request from
+the lowest available priority, and then starts counting again. This keeps
+lower-priority requests from being postponed indefinitely by a steady stream
+of higher-priority requests, such as those generated while crawling. Requests
+of the same priority keep their usual :ref:`request order <request-order>`.
+
+Set to ``0`` to always handle the highest-priority requests first. The value
+must be a positive integer, or ``0`` to disable the feature. With an empty
+queue or a single priority, the setting has no effect. The feature requires a
+:setting:`SCHEDULER_PRIORITY_QUEUE` that supports it; the queue classes
+shipped with Scrapy do.
+
+
 .. setting:: SCHEDULER_START_DISK_QUEUE
 
 SCHEDULER_START_DISK_QUEUE

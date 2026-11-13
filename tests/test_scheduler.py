@@ -93,6 +93,25 @@ def _dequeue_urls(scheduler: Scheduler) -> list[str]:
     return urls
 
 
+def _enqueue_priorities(scheduler: Scheduler, requests_per_priority: dict[int, int]):
+    """Enqueue the given number of requests at each (request) priority."""
+    for priority, count in sorted(requests_per_priority.items()):
+        for index in range(count):
+            scheduler.enqueue_request(
+                Request(
+                    f"https://example.com/p{priority}-{index}",
+                    priority=priority,
+                )
+            )
+
+
+def _dequeue_priorities(scheduler: Scheduler) -> list[int]:
+    priorities = []
+    while request := scheduler.next_request():
+        priorities.append(request.priority)
+    return priorities
+
+
 class TestSchedulerBase(ABC):
     reopen = False
 
@@ -245,6 +264,306 @@ _URLS_WITH_SLOTS = [
     ("http://foo.com/e", "c"),
     ("http://foo.com/f", "c"),
 ]
+
+
+class FairnessTestMixin:
+    """Bounded fairness tests shared by the memory and disk test classes."""
+
+    @pytest.mark.parametrize("limit", [1, 2, 5])
+    @coroutine_test
+    async def test_fairness_interleaving(
+        self, jobdir: Path | None, limit: int
+    ) -> None:
+        async with self.create_scheduler(
+            jobdir, SCHEDULER_PRIORITY_FAIRNESS=limit
+        ) as scheduler:
+            _enqueue_priorities(scheduler, {10: 6, -10: 4})
+            priorities = _dequeue_priorities(scheduler)
+
+        assert len(priorities) == 10
+        # While lower-priority requests remain, no more than ``limit`` high
+        # priority requests come out in a row.
+        run = 0
+        lows_remaining = 4
+        for priority in priorities:
+            if priority == -10:
+                run = 0
+                lows_remaining -= 1
+            elif lows_remaining:
+                run += 1
+                assert run <= limit
+        # Every request is returned exactly once.
+        assert priorities.count(10) == 6
+        assert priorities.count(-10) == 4
+
+    @coroutine_test
+    async def test_fairness_limit_one_alternates(
+        self, jobdir: Path | None
+    ) -> None:
+        async with self.create_scheduler(
+            jobdir, SCHEDULER_PRIORITY_FAIRNESS=1
+        ) as scheduler:
+            _enqueue_priorities(scheduler, {10: 3, -10: 3})
+            assert _dequeue_priorities(scheduler) == [10, -10, 10, -10, 10, -10]
+
+    @coroutine_test
+    async def test_fairness_keeps_fifo_order(
+        self, jobdir: Path | None
+    ) -> None:
+        """Requests of the same priority keep the queue's FIFO/LIFO order."""
+        async with self.create_scheduler(
+            jobdir,
+            SCHEDULER_PRIORITY_FAIRNESS=1,
+            SCHEDULER_DISK_QUEUE="scrapy.squeues.PickleFifoDiskQueue",
+            SCHEDULER_MEMORY_QUEUE="scrapy.squeues.FifoMemoryQueue",
+        ) as scheduler:
+            _enqueue_priorities(scheduler, {10: 3, -10: 3})
+            urls = _dequeue_urls(scheduler)
+        assert urls == [
+            "https://example.com/p10-0",
+            "https://example.com/p-10-0",
+            "https://example.com/p10-1",
+            "https://example.com/p-10-1",
+            "https://example.com/p10-2",
+            "https://example.com/p-10-2",
+        ]
+
+    @coroutine_test
+    async def test_fairness_three_priorities(
+        self, jobdir: Path | None
+    ) -> None:
+        """The lowest available priority is the one that gets a turn."""
+        async with self.create_scheduler(
+            jobdir, SCHEDULER_PRIORITY_FAIRNESS=1
+        ) as scheduler:
+            _enqueue_priorities(scheduler, {20: 2, 0: 2, -20: 2})
+            priorities = _dequeue_priorities(scheduler)
+        # After every high request, the lowest available priority is picked:
+        # -20 first, then 0 once -20 is drained.
+        assert priorities == [20, -20, 20, -20, 0, 0]
+
+    @coroutine_test
+    async def test_fairness_single_priority_unchanged(
+        self, jobdir: Path | None
+    ) -> None:
+        async with self.create_scheduler(
+            jobdir, SCHEDULER_PRIORITY_FAIRNESS=1
+        ) as scheduler:
+            _enqueue_priorities(scheduler, {0: 4})
+            assert len(_dequeue_priorities(scheduler)) == 4
+
+    @coroutine_test
+    async def test_fairness_empty_queue(self, jobdir: Path | None) -> None:
+        async with self.create_scheduler(
+            jobdir, SCHEDULER_PRIORITY_FAIRNESS=1
+        ) as scheduler:
+            assert scheduler.next_request() is None
+            assert not scheduler.has_pending_requests()
+
+    @coroutine_test
+    async def test_fairness_disabled_by_default(
+        self, jobdir: Path | None
+    ) -> None:
+        async with self.create_scheduler(jobdir) as scheduler:
+            _enqueue_priorities(scheduler, {10: 4, -10: 2})
+            assert _dequeue_priorities(scheduler) == [10, 10, 10, 10, -10, -10]
+
+    @coroutine_test
+    async def test_fairness_limit_larger_than_queue(
+        self, jobdir: Path | None
+    ) -> None:
+        """A limit above the number of high-priority requests never triggers."""
+        async with self.create_scheduler(
+            jobdir, SCHEDULER_PRIORITY_FAIRNESS=100
+        ) as scheduler:
+            _enqueue_priorities(scheduler, {10: 3, -10: 2})
+            assert _dequeue_priorities(scheduler) == [10, 10, 10, -10, -10]
+
+    @pytest.mark.parametrize("value", [-1, -100])
+    @coroutine_test
+    async def test_fairness_rejects_non_positive(
+        self, jobdir: Path | None, value: int
+    ) -> None:
+        with pytest.raises(
+            ValueError, match="SCHEDULER_PRIORITY_FAIRNESS must be a positive"
+        ):
+            async with self.create_scheduler(
+                jobdir, SCHEDULER_PRIORITY_FAIRNESS=value
+            ):
+                pass
+
+
+class TestFairnessInMemory(FairnessTestMixin):
+    priority_queue_cls = "scrapy.pqueues.ScrapyPriorityQueue"
+
+    @pytest.fixture
+    def jobdir(self) -> Path | None:
+        return None
+
+    def create_scheduler(
+        self, jobdir: Path | None, **settings: Any
+    ) -> AbstractAsyncContextManager[Scheduler]:
+        return create_scheduler(self.priority_queue_cls, jobdir, **settings)
+
+
+class TestFairnessOnDisk(FairnessTestMixin):
+    priority_queue_cls = "scrapy.pqueues.ScrapyPriorityQueue"
+
+    @pytest.fixture
+    def jobdir(self, tmp_path: Path) -> Path | None:
+        return tmp_path
+
+    def create_scheduler(
+        self, jobdir: Path | None, **settings: Any
+    ) -> AbstractAsyncContextManager[Scheduler]:
+        return create_scheduler(self.priority_queue_cls, jobdir, **settings)
+
+    @coroutine_test
+    async def test_fairness_survives_restart(self, jobdir: Path) -> None:
+        async with self.create_scheduler(
+            jobdir, SCHEDULER_PRIORITY_FAIRNESS=2
+        ) as scheduler:
+            _enqueue_priorities(scheduler, {10: 5, -10: 3})
+            first = [scheduler.next_request().priority for _ in range(4)]
+            assert first == [10, 10, -10, 10]
+
+        # The counter restarts, but every request survives exactly once.
+        async with self.create_scheduler(
+            jobdir, SCHEDULER_PRIORITY_FAIRNESS=2
+        ) as scheduler:
+            assert len(scheduler) == 4
+            rest = _dequeue_priorities(scheduler)
+        combined = first + rest
+        assert combined.count(10) == 5
+        assert combined.count(-10) == 3
+
+    @coroutine_test
+    async def test_fairness_mixed_memory_and_disk(
+        self, jobdir: Path
+    ) -> None:
+        async with self.create_scheduler(
+            jobdir, SCHEDULER_PRIORITY_FAIRNESS=2
+        ) as scheduler:
+            for index in range(4):
+                request = Request(
+                    f"https://example.com/memory-{index}", priority=10
+                )
+                request.meta["unserializable"] = lambda: None
+                scheduler.enqueue_request(request)
+            for index in range(3):
+                scheduler.enqueue_request(
+                    Request(f"https://example.com/disk-{index}", priority=-10)
+                )
+            priorities = _dequeue_priorities(scheduler)
+        assert priorities.count(10) == 4
+        assert priorities.count(-10) == 3
+        run = 0
+        lows_remaining = 3
+        for priority in priorities:
+            if priority == -10:
+                run = 0
+                lows_remaining -= 1
+            elif lows_remaining:
+                run += 1
+                assert run <= 2
+
+
+class TestFairnessDownloaderAware:
+    priority_queue_cls = "scrapy.pqueues.DownloaderAwarePriorityQueue"
+
+    @pytest.fixture
+    def jobdir(self) -> Path | None:
+        return None
+
+    def create_scheduler(
+        self, jobdir: Path | None, **settings: Any
+    ) -> AbstractAsyncContextManager[Scheduler]:
+        return create_scheduler(self.priority_queue_cls, jobdir, **settings)
+
+    @coroutine_test
+    async def test_fairness_interleaving(self) -> None:
+        async with self.create_scheduler(
+            None, SCHEDULER_PRIORITY_FAIRNESS=2
+        ) as scheduler:
+            for index in range(5):
+                request = Request(
+                    f"https://example.com/high-{index}", priority=10
+                )
+                request.meta[Downloader.DOWNLOAD_SLOT] = "a"
+                scheduler.enqueue_request(request)
+            for index in range(3):
+                request = Request(
+                    f"https://example.com/low-{index}", priority=-10
+                )
+                request.meta[Downloader.DOWNLOAD_SLOT] = "b"
+                scheduler.enqueue_request(request)
+            priorities = _dequeue_priorities(scheduler)
+        assert priorities.count(10) == 5
+        assert priorities.count(-10) == 3
+        run = 0
+        lows_remaining = 3
+        for priority in priorities:
+            if priority == -10:
+                run = 0
+                lows_remaining -= 1
+            elif lows_remaining:
+                run += 1
+                assert run <= 2
+
+
+class TestFairnessDownloaderAwareOnDisk(TestFairnessDownloaderAware):
+    @pytest.fixture
+    def jobdir(self, tmp_path: Path) -> Path:
+        return tmp_path
+
+    @coroutine_test
+    async def test_fairness_disk_restart(self, jobdir: Path) -> None:
+        def populate(scheduler: Scheduler) -> None:
+            for index in range(3):
+                request = Request(
+                    f"https://example.com/high-{index}", priority=10
+                )
+                request.meta[Downloader.DOWNLOAD_SLOT] = "a"
+                scheduler.enqueue_request(request)
+            for index in range(2):
+                request = Request(
+                    f"https://example.com/low-{index}", priority=-10
+                )
+                request.meta[Downloader.DOWNLOAD_SLOT] = "b"
+                scheduler.enqueue_request(request)
+
+        async with self.create_scheduler(
+            jobdir, SCHEDULER_PRIORITY_FAIRNESS=1
+        ) as scheduler:
+            populate(scheduler)
+            first = scheduler.next_request().priority
+
+        async with self.create_scheduler(
+            jobdir, SCHEDULER_PRIORITY_FAIRNESS=1
+        ) as scheduler:
+            assert len(scheduler) == 4
+            rest = _dequeue_priorities(scheduler)
+        combined = [first, *rest]
+        assert combined.count(10) == 3
+        assert combined.count(-10) == 2
+
+
+@coroutine_test
+async def test_fairness_unsupported_priority_queue(tmp_path: Path) -> None:
+    """A custom priority queue without the fairness API fails clearly once
+    the fairness limit is reached."""
+    async with create_scheduler(
+        f"{__name__}._PriorityQueueWithoutNextPriority",
+        tmp_path,
+        SCHEDULER_PRIORITY_FAIRNESS=1,
+    ) as scheduler:
+        scheduler.enqueue_request(Request("https://example.com/1", priority=1))
+        scheduler.enqueue_request(Request("https://example.com/2", priority=-1))
+        assert scheduler.next_request() is not None
+        with pytest.raises(
+            NotImplementedError, match="SCHEDULER_PRIORITY_FAIRNESS"
+        ):
+            scheduler.next_request()
 
 
 class TestMigration:

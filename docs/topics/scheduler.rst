@@ -38,7 +38,7 @@ Priority queues
 ===============
 
 .. autoclass:: scrapy.pqueues.PriorityQueueProtocol
-    :members: from_crawler, push, pop, close, changed, next_priority, state
+    :members: from_crawler, push, pop, close, changed, next_priority, priorities, pop_priority, state
     :special-members: __len__
 
 .. autoclass:: scrapy.pqueues.DownloaderAwarePriorityQueue

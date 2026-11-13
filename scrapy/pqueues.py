@@ -51,7 +51,8 @@ class QueueProtocol(Protocol):
 class PriorityQueueProtocol(Protocol):
     """Interface of :setting:`SCHEDULER_PRIORITY_QUEUE` classes.
 
-    :attr:`changed`, :meth:`next_priority` and :meth:`state` are optional.
+    :attr:`changed`, :meth:`next_priority`, :meth:`priorities`,
+    :meth:`pop_priority` and :meth:`state` are optional.
     """
 
     @classmethod
@@ -105,6 +106,24 @@ class PriorityQueueProtocol(Protocol):
         queues returns the lowest value, or from its memory queue on a tie, so
         any scale works as long as lower values pop first. Without this
         method, the scheduler pops memory requests first.
+        """
+
+    def priorities(self) -> list[int]:
+        """Return the priorities of the queues that currently hold requests,
+        in the order in which :meth:`pop` would visit them.
+
+        The scheduler needs this to bound how many requests it takes from the
+        highest-priority queue before giving one to a lower-priority queue, so
+        only queues that implement :meth:`next_priority` need this method.
+        """
+
+    def pop_priority(self, priority: int) -> Request | None:
+        """Remove and return the next request from the queue of *priority*,
+        or return ``None`` if that queue has no request.
+
+        Unlike :meth:`pop`, this does not change which priority :meth:`pop`
+        would return next unless the selected queue becomes empty. The
+        scheduler calls this only when bounded priority fairness is enabled.
         """
 
     def state(self) -> Any:
@@ -286,6 +305,22 @@ class ScrapyPriorityQueue:
 
     def next_priority(self) -> int | None:
         return self.curprio
+
+    def priorities(self) -> list[int]:
+        return sorted(
+            p
+            for p in self.queues.keys() | self._start_queues.keys()
+            if self.queues.get(p) or self._start_queues.get(p)
+        )
+
+    def pop_priority(self, priority: int) -> Request | None:
+        q = self.queues.get(priority) or self._start_queues.get(priority)
+        if q is None:
+            return None
+        request = q.pop()
+        if not q:
+            self._update_curprio()
+        return request
 
     def state(self) -> list[int]:
         return sorted(self.queues.keys() | self._start_queues.keys())
@@ -491,6 +526,46 @@ class DownloaderAwarePriorityQueue:
         stats = self._downloader_interface.stats(self.pqueues)
         slot = self._next_slot(stats, update_state=False)
         return self.pqueues[slot].next_priority()
+
+    def priorities(self) -> list[int]:
+        priorities: set[int] = set()
+        for queue in self.pqueues.values():
+            priorities.update(queue.priorities())
+        return sorted(priorities)
+
+    def pop_priority(self, priority: int) -> Request | None:
+        # The slot whose queue holds the request that pop() would return at
+        # this priority, so that picking another slot cannot reorder requests
+        # within the priority.
+        stats = self._downloader_interface.stats(self.pqueues)
+        candidates = [
+            slot
+            for slot in self.pqueues
+            if priority in self.pqueues[slot].priorities()
+        ]
+        if not candidates:
+            return None
+        slot = self._next_slot(
+            [
+                (active, name)
+                for active, name in stats
+                if name in candidates
+            ],
+            update_state=False,
+        )
+        queue = self.pqueues[slot]
+        request = queue.pop_priority(priority)
+        self._collect_change(queue)
+        if len(queue) == 0:
+            del self.pqueues[slot]
+            queue.close()
+            self.changed = True
+            if self.key:
+                # Reclaim the slot directory; rmdir leaves it alone if the
+                # downstream queues did not remove all their files.
+                with suppress(OSError):
+                    Path(self.key, _path_safe(slot)).rmdir()
+        return request
 
     def state(self) -> dict[str, list[int]]:
         return {slot: queue.state() for slot, queue in self.pqueues.items()}

@@ -42,6 +42,14 @@ def _peek(queue: ScrapyPriorityQueue | DownloaderAwarePriorityQueue) -> Request:
     return request
 
 
+def _pop_priority(
+    queue: ScrapyPriorityQueue | DownloaderAwarePriorityQueue, priority: int
+) -> Request:
+    request = queue.pop_priority(priority)
+    assert request is not None
+    return request
+
+
 class TestPriorityQueue:
     @pytest.fixture
     def crawler(self) -> Crawler:
@@ -315,6 +323,48 @@ class TestPriorityQueue:
         queue.pop()
         assert queue.next_priority() is None
 
+    def test_priorities(self, crawler: Crawler, tmp_path: Path) -> None:
+        queue = build_from_crawler(
+            ScrapyPriorityQueue, crawler, FifoMemoryQueue, str(tmp_path)
+        )
+        assert queue.priorities() == []
+        queue.push(Request("https://example.org/1", priority=2))
+        queue.push(Request("https://example.org/2"))
+        queue.push(Request("https://example.org/3", priority=-1))
+        assert queue.priorities() == [-2, 0, 1]
+        _pop(queue)
+        assert queue.priorities() == [0, 1]
+
+    def test_pop_priority(self, crawler: Crawler, tmp_path: Path) -> None:
+        queue = build_from_crawler(
+            ScrapyPriorityQueue, crawler, FifoMemoryQueue, str(tmp_path)
+        )
+        queue.push(Request("https://example.org/h1", priority=1))
+        queue.push(Request("https://example.org/h2", priority=1))
+        queue.push(Request("https://example.org/l1", priority=-1))
+        # Internal priorities negate request priorities: the low request sits
+        # at internal priority 1, the high requests at -1.
+        assert _pop_priority(queue, 1).url == "https://example.org/l1"
+        # Popping a lower priority does not change what pop() returns next.
+        assert queue.next_priority() == -1
+        assert _pop(queue).url == "https://example.org/h1"
+        # Draining the selected queue refreshes the current priority.
+        assert _pop_priority(queue, -1).url == "https://example.org/h2"
+        assert queue.next_priority() is None
+        assert queue.pop_priority(0) is None
+        queue.close()
+
+    def test_pop_priority_unknown_priority(
+        self, crawler: Crawler, tmp_path: Path
+    ) -> None:
+        queue = build_from_crawler(
+            ScrapyPriorityQueue, crawler, FifoMemoryQueue, str(tmp_path)
+        )
+        queue.push(Request("https://example.org/1"))
+        assert queue.pop_priority(5) is None
+        assert len(queue) == 1
+        queue.close()
+
 
 class TestDownloaderAwarePriorityQueue:
     @pytest.fixture
@@ -453,6 +503,21 @@ class TestDownloaderAwarePriorityQueue:
         queue.push(req)
         assert "example-slot" in queue
         assert "other-slot" not in queue
+
+    def test_priorities_and_pop_priority(
+        self, queue: DownloaderAwarePriorityQueue
+    ) -> None:
+        req_h = Request("https://example.org/h", priority=1)
+        req_h.meta[Downloader.DOWNLOAD_SLOT] = "slot-a"
+        req_l = Request("https://example.org/l", priority=-1)
+        req_l.meta[Downloader.DOWNLOAD_SLOT] = "slot-b"
+        queue.push(req_h)
+        queue.push(req_l)
+        assert queue.priorities() == [-1, 1]
+        assert _pop_priority(queue, 1).url == req_l.url
+        assert queue.priorities() == [-1]
+        assert _pop(queue).url == req_h.url
+        assert queue.pop_priority(-1) is None
 
 
 def test_slot_directory_removed_when_slot_drains(tmp_path: Path) -> None:

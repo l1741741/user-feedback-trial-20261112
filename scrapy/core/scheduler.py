@@ -252,6 +252,24 @@ class Scheduler(BaseScheduler):
     force a specific request order.
 
 
+    .. _bounded-priority-fairness:
+
+    Bounded priority fairness
+    --------------------------
+
+    A crawl that keeps receiving high-priority requests can leave
+    lower-priority requests waiting indefinitely. Set
+    :setting:`SCHEDULER_PRIORITY_FAIRNESS` to a positive integer to bound how
+    many requests are taken in a row from the highest-priority queues: once
+    that many have been taken and a request with a lower priority is still
+    waiting, the scheduler returns one such request (from the lowest
+    available priority) and starts counting again. Requests sharing a priority
+    keep their normal :ref:`request order <request-order>`.
+
+    The default, ``0``, disables the feature. With an empty queue or a single
+    priority, the setting has no effect.
+
+
     .. _concurrency-v-order:
 
     Concurrency affects order
@@ -377,6 +395,19 @@ class Scheduler(BaseScheduler):
         self._sync_every: int = (
             crawler.settings.getint("JOBDIR_SYNC_EVERY") if crawler else 0
         )
+        self._fairness_limit: int = (
+            crawler.settings.getint("SCHEDULER_PRIORITY_FAIRNESS") if crawler else 0
+        )
+        if self._fairness_limit < 0:
+            raise ValueError(
+                "SCHEDULER_PRIORITY_FAIRNESS must be a positive integer or 0,"
+                f" got {self._fairness_limit}"
+            )
+        # Number of requests popped in a row from whatever the highest
+        # priority is at pop time. A lower-priority request, or the highest
+        # priority changing (its queue drained), restarts the count.
+        self._fairness_count: int = 0
+        self._fairness_last_priority: int | None = None
         self._sdqclass: type[BaseQueue] | None = self._get_start_queue_cls(
             crawler, "DISK"
         )
@@ -456,22 +487,86 @@ class Scheduler(BaseScheduler):
         preferring the memory queue on a tie. Return ``None`` if there are no
         more enqueued requests.
 
+        When :setting:`SCHEDULER_PRIORITY_FAIRNESS` is enabled, a request from
+        a lower-priority queue is returned instead once the configured number
+        of requests have been taken in a row from the highest-priority queues,
+        if such a request exists.
+
         Increment the appropriate stats, such as: :stat:`scheduler/dequeued`,
         :stat:`scheduler/dequeued/disk`, :stat:`scheduler/dequeued/memory`.
         """
         request: Request | None = None
         assert self.stats is not None
-        if not self._dqs_first():
-            request = self.mqs.pop()
-            if request is not None:
-                self.stats.inc_value("scheduler/dequeued/memory")
+        if self._fairness_limit and self._fairness_count >= self._fairness_limit:
+            priority = self._lowest_priority()
+            if priority is not None:
+                request = self._fairness_pop(priority)
+        if request is None:
+            if not self._dqs_first():
+                request = self.mqs.pop()
+                if request is not None:
+                    self.stats.inc_value("scheduler/dequeued/memory")
+                    self._fairness_note_priority(-request.priority)
         if request is None:
             request = self._dqpop()
             if request is not None:
                 self.stats.inc_value("scheduler/dequeued/disk")
+                self._fairness_note_priority(-request.priority)
         if request is not None:
             self.stats.inc_value("scheduler/dequeued")
         return request
+
+    def _queue_priorities(self, queue: PriorityQueueProtocol) -> list[int]:
+        method = getattr(queue, "priorities", None)
+        if method is None:
+            raise NotImplementedError(
+                f"{queue.__class__.__name__} does not support"
+                " SCHEDULER_PRIORITY_FAIRNESS: its priority queue class must"
+                " implement priorities() and pop_priority()"
+            )
+        return method()
+
+    def _all_priorities(self) -> list[int]:
+        priorities = set(self._queue_priorities(self.mqs))
+        if self.dqs is not None:
+            priorities.update(self._queue_priorities(self.dqs))
+        return sorted(priorities)
+
+    def _lowest_priority(self) -> int | None:
+        priorities = self._all_priorities()
+        # The lowest internal priority value is the highest request priority,
+        # so a lower request priority is any value other than the first one.
+        lower = priorities[1:]
+        return lower[-1] if lower else None
+
+    def _fairness_pop(self, priority: int) -> Request | None:
+        # Memory requests take precedence over disk requests at the selected
+        # priority, the same as a regular pop on a tie.
+        request = self.mqs.pop_priority(priority)
+        if request is not None:
+            assert self.stats is not None
+            self.stats.inc_value("scheduler/dequeued/memory")
+        elif self.dqs is not None:
+            request = self.dqs.pop_priority(priority)
+            if request is not None:
+                assert self.stats is not None
+                self.stats.inc_value("scheduler/dequeued/disk")
+                self._sync_dqs_state()
+        if request is not None:
+            self._fairness_count = 0
+            self._fairness_last_priority = -request.priority
+        return request
+
+    def _fairness_note_priority(self, priority: int) -> None:
+        if not self._fairness_limit:
+            return
+        if priority == self._fairness_last_priority:
+            self._fairness_count += 1
+        else:
+            # The highest-priority queue changed, so requests from the new one
+            # start a fresh run.
+            self._fairness_count = 1
+            self._fairness_last_priority = priority
 
     def __len__(self) -> int:
         """
