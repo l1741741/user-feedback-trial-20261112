@@ -3,6 +3,36 @@
 ======
 
 
+Unreleased
+==========
+
+**WARNING:** this is a security update.
+
+* Harden ``<use>`` reference rendering:
+
+  - Override attributes (``x``, ``y``, ``width``, ``height``, ``viewBox``,
+    ``preserveAspectRatio``, ``fill``, ``stroke``, ``opacity`` and ``mask``)
+    are now applied to a private, per-reference clone of the resolved target.
+    The caller's tree, cached parse results and other instances of the same
+    target are no longer mutated, so repeated references no longer depend on
+    rendering order and a parsed tree can be rendered several times
+    identically.
+  - Cyclic references (including empty ``href`` values) are detected on the
+    current expansion path and raise a ``ValueError`` instead of exhausting
+    the Python recursion stack.
+  - In safe mode the nesting depth of simultaneously active references is
+    limited to 128 levels; deeper documents raise a ``ValueError`` before
+    Python recursion is exhausted. ``unsafe`` documents keep their previous
+    behavior.
+  - The 100 000 expanded-reference limit and the 128 level depth limit are
+    reset for every new rendering.
+  - A failed or filtered reference always restores the drawing context, so
+    sibling elements are no longer affected by a leftover transform, clip or
+    opacity state.
+  - External references keep following the existing ``unsafe`` /
+    ``url_fetcher`` / ``safe_fetch`` policy.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

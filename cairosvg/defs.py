@@ -8,10 +8,19 @@ This module handles clips, gradients, masks, patterns and external nodes.
 from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
 from .features import match_features
 from .helpers import paint, size, transform
-from .parser import Tree
+from .parser import Node, Tree
 from .shapes import rect
 from .surface import cairo
 from .url import parse_url
+
+# Maximum number of ``<use>`` references actually expanded during one
+# rendering. The counter is reset for every new surface.
+MAX_REFERENCES = 100_000
+
+# Maximum number of simultaneously active (nested) ``<use>`` references when
+# rendering in safe mode. The limit is enforced before Python can exhaust its
+# recursion stack. ``unsafe`` documents are not limited.
+MAX_REFERENCE_DEPTH = 128
 
 BLEND_OPERATORS = {
     'darken': cairo.OPERATOR_DARKEN,
@@ -332,44 +341,103 @@ def apply_filter_after_painting(surface, node, name):
                 surface.context.restore()
 
 
+def _clone_tree(node, parent=None):
+    """Return an independent, mutable copy of the referenced ``node``.
+
+    The reference resolution performed in :class:`~cairosvg.parser.Tree` may
+    reuse cached, read-only parsing results. Everything the drawing code can
+    write to (attributes, tag, children and their parent links) is duplicated
+    here, while immutable or read-only data (the ElementTree element, the
+    CSS style wrapper, text and the URL fetcher) is shared. The caller's tree
+    and any cached tree therefore keep their original state, and two
+    references to the same target never see each other's overrides.
+
+    """
+    clone = Node.__new__(Node)
+    dict.__init__(clone)
+    clone.children = ()
+    clone.element = node.element
+    clone.style = node.style
+    clone.tag = node.tag
+    clone.text = node.text
+    clone.url_fetcher = node.url_fetcher
+    clone.unsafe = node.unsafe
+    clone.xml_tree = node.xml_tree
+    clone.url = node.url
+    clone.parent = node.parent if parent is None else parent
+    clone.root = node.root
+    dict.update(clone, node)
+    clone.children = [
+        _clone_tree(child, parent=clone) for child in node.children]
+    return clone
+
+
 def use(surface, node):
     """Draw the content of another SVG node."""
     surface.reference_count += 1
-    if not node.unsafe and surface.reference_count > 100_000:
+    if not node.unsafe and surface.reference_count > MAX_REFERENCES:
         raise ValueError(
             'Abort rendering: more than 100 000 referenced elements')
+
     surface.context.save()
-    surface.context.translate(
-        size(surface, node.get('x'), 'x'), size(surface, node.get('y'), 'y'))
-    if 'x' in node:
-        del node['x']
-    if 'y' in node:
-        del node['y']
-    if 'viewBox' in node:
-        del node['viewBox']
-    if 'mask' in node:
-        del node['mask']
-    href = parse_url(node.get_href()).geturl()
     try:
-        tree = Tree(
-            url=href, url_fetcher=node.url_fetcher, parent=node,
-            tree_cache=surface.tree_cache, unsafe=node.unsafe)
-    except TypeError:
+        # In safe mode, bound the nested <use> depth explicitly instead of
+        # relying on the Python recursion limit.
+        if not node.unsafe and len(surface.reference_chain) >= (
+                MAX_REFERENCE_DEPTH):
+            raise ValueError(
+                'Abort rendering: <use> reference nesting is deeper than '
+                f'{MAX_REFERENCE_DEPTH} levels')
+
+        href = parse_url(node.get_href()).geturl()
+        try:
+            tree = Tree(
+                url=href, url_fetcher=node.url_fetcher, parent=node,
+                tree_cache=surface.tree_cache, unsafe=node.unsafe)
+        except TypeError:
+            # Unresolvable reference (e.g. missing id): nothing to draw.
+            return
+
+        if not match_features(tree.xml_tree):
+            # Conditional processing filters the reference out.
+            return
+
+        # Never write overrides onto the caller's <use> node or onto a tree
+        # shared through the cache: duplicate the resolved tree first.
+        tree = _clone_tree(tree, parent=node)
+
+        # A reference cycle through the current expansion path must terminate
+        # through the same safety path as any other reference failure.
+        if tree.xml_tree in surface.reference_chain:
+            raise ValueError(
+                'Abort rendering: cyclic <use> reference detected')
+        surface.reference_chain.add(tree.xml_tree)
+        try:
+            # The x/y offset of <use> applies to the cloned target only.
+            surface.context.translate(
+                size(surface, node.get('x'), 'x'),
+                size(surface, node.get('y'), 'y'))
+
+            if tree.tag in ('svg', 'symbol'):
+                # Explicitely specified
+                # http://www.w3.org/TR/SVG11/struct.html#UseElement
+                tree.tag = 'svg'
+                if 'width' in node and 'height' in node:
+                    tree['width'], tree['height'] = (
+                        node['width'], node['height'])
+
+            # ``opacity`` is not inherited (see NOT_INHERITED_ATTRIBUTES), so
+            # the value set on <use> would otherwise never reach the shadow
+            # content. Apply it to the private clone only; an opacity already
+            # defined on the target keeps precedence.
+            if 'opacity' in node and 'opacity' not in tree:
+                tree['opacity'] = node['opacity']
+
+            surface.draw(tree)
+        finally:
+            surface.reference_chain.remove(tree.xml_tree)
+    finally:
+        # Whatever happens (filtering, missing target, safety error or a
+        # drawing exception), the context saved for this reference must be
+        # balanced so that sibling elements keep a clean state.
         surface.context.restore()
-        return
-
-    if not match_features(tree.xml_tree):
-        surface.context.restore()
-        return
-
-    if tree.tag in ('svg', 'symbol'):
-        # Explicitely specified
-        # http://www.w3.org/TR/SVG11/struct.html#UseElement
-        tree.tag = 'svg'
-        if 'width' in node and 'height' in node:
-            tree['width'], tree['height'] = node['width'], node['height']
-
-    surface.draw(tree)
-    node.get('fill', None)
-    node.get('stroke', None)
-    surface.context.restore()

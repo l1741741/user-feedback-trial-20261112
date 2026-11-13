@@ -164,6 +164,10 @@ class Surface(object):
         self.text_path_width = 0
         self.tree_cache = {(tree.url, tree.get('id')): tree}
         self.reference_count = 0
+        # ElementTree elements of the <use> targets expanded on the current
+        # recursion path: used to detect reference cycles. A fresh surface
+        # (i.e. a new rendering) always starts with an empty path.
+        self.reference_chain = set()
         if parent_surface:
             self.markers = parent_surface.markers
             self.gradients = parent_surface.gradients
