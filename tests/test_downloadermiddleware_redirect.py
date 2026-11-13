@@ -647,3 +647,323 @@ def test_not_configured():
     crawler = get_crawler(DefaultSpider, {"REDIRECT_ENABLED": False})
     with pytest.raises(NotConfigured):
         build_from_crawler(RedirectMiddleware, crawler)
+
+
+SENSITIVE_HEADERS = {
+    "Authorization": "Bearer 123456",
+    "Proxy-Authorization": "Basic dXNlcjpwYXNz",
+    "Cookie": "session=abc",
+    "X-Api-Key": "secret-key",
+}
+SAFE_HEADER = ("X-Safe", "keep-me")
+
+
+def _strict_middleware(
+    *, custom_headers: list[str] | None = None
+) -> RedirectMiddleware:
+    settings: dict[str, object] = {"REDIRECT_STRICT_SENSITIVE_HEADERS_ENABLED": True}
+    if custom_headers is not None:
+        settings["REDIRECT_STRICT_SENSITIVE_HEADERS"] = custom_headers
+    else:
+        settings["REDIRECT_STRICT_SENSITIVE_HEADERS"] = ["X-Api-Key"]
+    crawler = get_crawler(DefaultSpider, settings)
+    crawler.spider = crawler._create_spider()
+    return build_from_crawler(RedirectMiddleware, crawler)
+
+
+class TestStrictSensitiveHeaders:
+    """Strict sensitive-header isolation behind
+    REDIRECT_STRICT_SENSITIVE_HEADERS_ENABLED."""
+
+    def setup_method(self):
+        self.mw = _strict_middleware()
+
+    def _redirect(
+        self,
+        source_url: str,
+        target_url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        status: int = 302,
+        method: str = "GET",
+        body: bytes | str | None = None,
+        meta: dict[str, object] | None = None,
+    ) -> tuple[Request, Request | Response]:
+        request = Request(
+            source_url,
+            headers=headers if headers is not None else {},
+            method=method,
+            body=body,
+            meta=meta,
+        )
+        response = Response(source_url, status=status, headers={"Location": target_url})
+        return request, self.mw.process_response(request, response)
+
+    @pytest.mark.parametrize(
+        ("source_url", "target_url", "same_origin"),
+        [
+            # Explicit vs. implicit default ports are the same origin.
+            ("http://example.com/a", "http://example.com:80/b", True),
+            ("https://example.com:443/a", "https://example.com/b", True),
+            # Host names are compared case-insensitively.
+            ("https://EXAMPLE.com/a", "https://example.com/b", True),
+            ("https://example.com/a", "https://Example.COM/b", True),
+            # A relative Location keeps the origin.
+            ("http://example.com/a", "/b", True),
+            ("https://example.com/a", "//example.com/b", True),
+            # Scheme changes change the origin, default ports included.
+            ("http://example.com/a", "https://example.com/b", False),
+            ("https://example.com/a", "http://example.com/b", False),
+            # A non-default port is part of the origin.
+            ("https://example.com/a", "https://example.com:8080/b", False),
+            ("https://example.com:8443/a", "https://example.com/b", False),
+            # Host and registrable-domain changes change the origin.
+            ("https://example.com/a", "https://example.org/b", False),
+            ("https://example.com/a", "https://sub.example.com/b", False),
+            ("https://example.com/a", "//example.org/b", False),
+        ],
+    )
+    def test_origin_detection(self, source_url, target_url, same_origin):
+        headers = {**SENSITIVE_HEADERS, SAFE_HEADER[0]: SAFE_HEADER[1]}
+        request, result = self._redirect(source_url, target_url, headers=headers)
+        assert isinstance(result, Request)
+        if same_origin:
+            assert result.headers == request.headers
+        else:
+            assert "Authorization" not in result.headers
+            assert "Proxy-Authorization" not in result.headers
+            assert "Cookie" not in result.headers
+            assert "X-Api-Key" not in result.headers
+            assert result.headers["X-Safe"] == b"keep-me"
+
+    def test_same_origin_keeps_all_headers(self):
+        headers = {**SENSITIVE_HEADERS, SAFE_HEADER[0]: SAFE_HEADER[1]}
+        request, result = self._redirect(
+            "https://example.com/login",
+            "https://example.com/dashboard",
+            headers=headers,
+        )
+        assert isinstance(result, Request)
+        assert result.headers == request.headers
+
+    def test_header_names_matched_case_insensitively(self):
+        headers = {
+            "authorization": "Bearer 1",
+            "PROXY-AUTHORIZATION": "Basic x",
+            "cOoKiE": "a=b",
+            "x-api-key": "k",
+            "X-Safe": "v",
+        }
+        _, result = self._redirect(
+            "https://example.com/a",
+            "https://example.org/b",
+            headers=headers,
+        )
+        assert isinstance(result, Request)
+        assert "Authorization" not in result.headers
+        assert "Proxy-Authorization" not in result.headers
+        assert "Cookie" not in result.headers
+        assert "X-Api-Key" not in result.headers
+        assert result.headers["X-Safe"] == b"v"
+
+    def test_custom_sensitive_headers_configured(self):
+        mw = _strict_middleware(custom_headers=["X-Token", "X-Secret"])
+        request = Request(
+            "https://example.com/a",
+            headers={"X-Token": "t", "X-Secret": "s", "X-Other": "o"},
+        )
+        response = Response(
+            request.url, headers={"Location": "https://example.org/b"}, status=302
+        )
+        result = mw.process_response(request, response)
+        assert isinstance(result, Request)
+        assert "X-Token" not in result.headers
+        assert "X-Secret" not in result.headers
+        assert result.headers["X-Other"] == b"o"
+
+    def test_headers_not_configured_as_sensitive_are_kept(self):
+        # A strict middleware without custom headers only strips the built-in
+        # sensitive headers, other headers cross origins untouched.
+        mw = _strict_middleware(custom_headers=[])
+        request = Request(
+            "https://example.com/a",
+            headers={"X-Api-Key": "k", "Authorization": "Bearer 1"},
+        )
+        response = Response(
+            request.url, headers={"Location": "https://example.org/b"}, status=302
+        )
+        result = mw.process_response(request, response)
+        assert isinstance(result, Request)
+        assert "Authorization" not in result.headers
+        assert result.headers["X-Api-Key"] == b"k"
+
+    def test_multi_hop_chain(self):
+        headers = {**SENSITIVE_HEADERS, SAFE_HEADER[0]: SAFE_HEADER[1]}
+        request = Request("https://a.example/start", headers=headers)
+
+        # Hop 1: same origin, every header is kept.
+        response = Response(
+            request.url, headers={"Location": "https://a.example/second"}, status=302
+        )
+        request2 = self.mw.process_response(request, response)
+        assert isinstance(request2, Request)
+        assert request2.headers == request.headers
+        assert request2.meta["redirect_urls"] == ["https://a.example/start"]
+
+        # Hop 2: another origin, sensitive headers are dropped.
+        response2 = Response(
+            request2.url, headers={"Location": "https://b.example/third"}, status=302
+        )
+        request3 = self.mw.process_response(request2, response2)
+        assert isinstance(request3, Request)
+        assert "Authorization" not in request3.headers
+        assert "Proxy-Authorization" not in request3.headers
+        assert "Cookie" not in request3.headers
+        assert "X-Api-Key" not in request3.headers
+        assert request3.headers["X-Safe"] == b"keep-me"
+        assert request3.meta["redirect_urls"] == [
+            "https://a.example/start",
+            "https://a.example/second",
+        ]
+        assert request3.meta["redirect_times"] == 2
+
+        # Hop 3: same origin as hop 2, the safe header stays and the dropped
+        # sensitive headers do not reappear.
+        response3 = Response(
+            request3.url, headers={"Location": "https://b.example/fourth"}, status=302
+        )
+        request4 = self.mw.process_response(request3, response3)
+        assert isinstance(request4, Request)
+        assert "Authorization" not in request4.headers
+        assert request4.headers["X-Safe"] == b"keep-me"
+        assert request4.meta["redirect_times"] == 3
+
+    def test_relative_location_keeps_origin(self):
+        headers = {**SENSITIVE_HEADERS, SAFE_HEADER[0]: SAFE_HEADER[1]}
+        request, result = self._redirect(
+            "https://example.com/a?x=1", "/relative/target", headers=headers
+        )
+        assert isinstance(result, Request)
+        assert result.url == "https://example.com/relative/target"
+        assert result.headers == request.headers
+
+    @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+    def test_method_conversion_preserved(self, status):
+        _, result = self._redirect(
+            "https://example.com/a",
+            "https://example.org/b",
+            headers=SENSITIVE_HEADERS,
+            status=status,
+            method="POST",
+            body=b"payload",
+        )
+        assert isinstance(result, Request)
+        assert "Authorization" not in result.headers
+        if status in {301, 302, 303}:
+            assert result.method == "GET"
+            assert result.body == b""
+        else:
+            assert result.method == "POST"
+            assert result.body == b"payload"
+
+    def test_dont_redirect_bypasses_isolation(self):
+        request = Request(
+            "https://example.com/a",
+            headers=SENSITIVE_HEADERS,
+            meta={"dont_redirect": True},
+        )
+        response = Response(
+            request.url, headers={"Location": "https://example.org/b"}, status=302
+        )
+        result = self.mw.process_response(request, response)
+        assert result is response
+        # The original request keeps all of its headers.
+        assert request.headers["Authorization"] == b"Bearer 123456"
+        assert request.headers["Cookie"] == b"session=abc"
+
+    def test_original_request_is_not_modified(self):
+        def callback(response):
+            return None
+
+        headers = {**SENSITIVE_HEADERS, SAFE_HEADER[0]: SAFE_HEADER[1]}
+        request = Request(
+            "https://example.com/a",
+            headers=headers,
+            method="POST",
+            body=b"original-body",
+            callback=callback,
+            meta={"custom": "value"},
+        )
+        headers_before = request.headers.copy()
+        meta_before = dict(request.meta)
+        body_before = request.body
+
+        response = Response(
+            request.url, headers={"Location": "https://example.org/b"}, status=307
+        )
+        result = self.mw.process_response(request, response)
+        assert isinstance(result, Request)
+        assert result is not request
+
+        # The original request keeps its URL, method, body, callback, headers
+        # and the meta values it started with.
+        assert request.url == "https://example.com/a"
+        assert request.method == "POST"
+        assert request.body == body_before == b"original-body"
+        assert request.callback is callback
+        assert request.headers == headers_before
+        assert request.headers["Authorization"] == b"Bearer 123456"
+        assert request.headers["Cookie"] == b"session=abc"
+        for key, value in meta_before.items():
+            assert request.meta[key] == value
+
+
+class TestStrictSensitiveHeadersDisabledByDefault:
+    """With the setting off (the default), redirect behavior is unchanged:
+    only the legacy Cookie and Authorization handling applies, and other
+    sensitive headers (e.g. Proxy-Authorization, custom ones) are kept."""
+
+    def setup_method(self):
+        crawler = get_crawler(DefaultSpider)
+        crawler.spider = crawler._create_spider()
+        self.mw = build_from_crawler(RedirectMiddleware, crawler)
+
+    def test_default_setting_is_off(self):
+        assert self.mw.strict_sensitive_headers is False
+
+    def test_cross_origin_keeps_non_legacy_headers(self):
+        request = Request(
+            "https://example.com/a",
+            headers={
+                "Authorization": "Bearer 1",
+                "Proxy-Authorization": "Basic x",
+                "Cookie": "a=b",
+                "X-Api-Key": "k",
+            },
+        )
+        response = Response(
+            request.url, headers={"Location": "https://example.org/b"}, status=302
+        )
+        result = self.mw.process_response(request, response)
+        assert isinstance(result, Request)
+        assert "Authorization" not in result.headers
+        assert "Cookie" not in result.headers
+        assert result.headers["Proxy-Authorization"] == b"Basic x"
+        assert result.headers["X-Api-Key"] == b"k"
+
+    def test_same_origin_keeps_everything(self):
+        request = Request(
+            "https://example.com/a",
+            headers={
+                "Authorization": "Bearer 1",
+                "Proxy-Authorization": "Basic x",
+                "Cookie": "a=b",
+                "X-Api-Key": "k",
+            },
+        )
+        response = Response(
+            request.url, headers={"Location": "https://example.com/b"}, status=302
+        )
+        result = self.mw.process_response(request, response)
+        assert isinstance(result, Request)
+        assert result.headers == request.headers

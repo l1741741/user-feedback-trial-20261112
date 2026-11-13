@@ -311,6 +311,17 @@ and a crawl that spans multiple domains can leak them to unintended hosts:
   HTTPS to HTTP, but you can tighten it further (for example, to
   ``same-origin`` or ``no-referrer``) if needed.
 
+* On redirects, the
+  :class:`~scrapy.downloadermiddlewares.redirect.RedirectMiddleware` removes
+  ``Cookie`` and ``Authorization`` headers when the target does not match
+  their scoping rules, but other headers, such as
+  ``Proxy-Authorization`` or custom authentication headers, follow the
+  redirect unchanged. Enable
+  :setting:`REDIRECT_STRICT_SENSITIVE_HEADERS_ENABLED` to remove every
+  sensitive header, including the ones you list in
+  :setting:`REDIRECT_STRICT_SENSITIVE_HEADERS`, whenever a redirect crosses an
+  origin (a different scheme, host or port).
+
 .. _security-job-state:
 
 Job state integrity

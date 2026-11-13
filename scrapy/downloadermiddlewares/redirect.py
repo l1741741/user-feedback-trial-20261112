@@ -30,6 +30,26 @@ logger = logging.getLogger(__name__)
 # RedirectMiddleware.
 _STANDARD_HTTP_CODES = frozenset({301, 302, 303, 307, 308})
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+# Sensitive headers that strict origin isolation always removes on redirects
+# to another origin, in addition to the headers configured through
+# REDIRECT_STRICT_SENSITIVE_HEADERS.
+_STRICT_SENSITIVE_HEADERS = frozenset(
+    {"Authorization", "Proxy-Authorization", "Cookie"}
+)
+
+
+def _origin(request: Request) -> tuple[str, str | None, int | None]:
+    """Return the origin of *request* as a ``(scheme, host, port)`` tuple,
+    with the host lower-cased and default ports made explicit."""
+    parsed = urlparse_cached(request)
+    return (
+        parsed.scheme,
+        parsed.hostname,
+        parsed.port or _DEFAULT_PORTS.get(parsed.scheme),
+    )
+
 
 class BaseRedirectMiddleware:
     crawler: Crawler
@@ -41,6 +61,13 @@ class BaseRedirectMiddleware:
 
         self.max_redirect_times: int = settings.getint("REDIRECT_MAX_TIMES")
         self.priority_adjust: int = settings.getint("REDIRECT_PRIORITY_ADJUST")
+        self.strict_sensitive_headers: bool = settings.getbool(
+            "REDIRECT_STRICT_SENSITIVE_HEADERS_ENABLED"
+        )
+        self.sensitive_header_names: frozenset[str] = frozenset(
+            _STRICT_SENSITIVE_HEADERS
+            | frozenset(settings.getlist("REDIRECT_STRICT_SENSITIVE_HEADERS"))
+        )
         self._referer_spider_middleware: RefererMiddleware | None = None
 
     @classmethod
@@ -140,44 +167,63 @@ class BaseRedirectMiddleware:
             redirect_request.meta.pop("_auth_proxy", None)
             redirect_request.headers.pop(b"Proxy-Authorization", None)
 
-        has_cookie_header = "Cookie" in redirect_request.headers
-        has_authorization_header = "Authorization" in redirect_request.headers
-        if has_cookie_header or has_authorization_header:
-            default_ports = {"http": 80, "https": 443}
-
-            parsed_source_request = urlparse_cached(source_request)
-            source_scheme, source_host, source_port = (
-                parsed_source_request.scheme,
-                parsed_source_request.hostname,
-                parsed_source_request.port
-                or default_ports.get(parsed_source_request.scheme),
-            )
-
-            parsed_redirect_request = urlparse_cached(redirect_request)
-            redirect_scheme, redirect_host, redirect_port = (
-                parsed_redirect_request.scheme,
-                parsed_redirect_request.hostname,
-                parsed_redirect_request.port
-                or default_ports.get(parsed_redirect_request.scheme),
-            )
-
-            if has_cookie_header and (
-                redirect_scheme not in {source_scheme, "https"}
-                or source_host != redirect_host
-            ):
-                del redirect_request.headers["Cookie"]
-
-            # https://fetch.spec.whatwg.org/#ref-for-cors-non-wildcard-request-header-name
-            if has_authorization_header and (
-                source_scheme != redirect_scheme
-                or source_host != redirect_host
-                or source_port != redirect_port
-            ):
-                del redirect_request.headers["Authorization"]
+        if self.strict_sensitive_headers:
+            self._isolate_sensitive_headers(source_request, redirect_request)
+        else:
+            self._drop_cross_origin_headers(redirect_request, source_request)
 
         self.handle_referer(redirect_request, response)
 
         return redirect_request
+
+    def _isolate_sensitive_headers(
+        self, source_request: Request, redirect_request: Request
+    ) -> None:
+        """In strict mode, remove the sensitive headers from
+        *redirect_request* whenever its origin differs from that of
+        *source_request*. Same-origin redirects keep every header."""
+        if _origin(source_request) == _origin(redirect_request):
+            return
+        for header_name in self.sensitive_header_names:
+            redirect_request.headers.pop(header_name, None)
+
+    def _drop_cross_origin_headers(
+        self, redirect_request: Request, source_request: Request
+    ) -> None:
+        has_cookie_header = "Cookie" in redirect_request.headers
+        has_authorization_header = "Authorization" in redirect_request.headers
+        if not has_cookie_header and not has_authorization_header:
+            return
+
+        parsed_source_request = urlparse_cached(source_request)
+        source_scheme, source_host, source_port = (
+            parsed_source_request.scheme,
+            parsed_source_request.hostname,
+            parsed_source_request.port
+            or _DEFAULT_PORTS.get(parsed_source_request.scheme),
+        )
+
+        parsed_redirect_request = urlparse_cached(redirect_request)
+        redirect_scheme, redirect_host, redirect_port = (
+            parsed_redirect_request.scheme,
+            parsed_redirect_request.hostname,
+            parsed_redirect_request.port
+            or _DEFAULT_PORTS.get(parsed_redirect_request.scheme),
+        )
+
+        if has_cookie_header and (
+            redirect_scheme not in {source_scheme, "https"}
+            or source_host != redirect_host
+        ):
+            del redirect_request.headers["Cookie"]
+
+        # https://fetch.spec.whatwg.org/#ref-for-cors-non-wildcard-request-header-name
+        if has_authorization_header and (
+            source_scheme != redirect_scheme
+            or source_host != redirect_host
+            or source_port != redirect_port
+        ):
+            del redirect_request.headers["Authorization"]
 
     def _redirect_request_using_get(
         self, request: Request, response: Response, redirect_url: str

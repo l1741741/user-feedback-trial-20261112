@@ -245,3 +245,60 @@ def test_not_configured():
     crawler = get_crawler(Spider, {"METAREFRESH_ENABLED": False})
     with pytest.raises(NotConfigured):
         build_from_crawler(MetaRefreshMiddleware, crawler)
+
+
+def test_strict_sensitive_headers_cross_origin():
+    crawler = get_crawler(
+        Spider,
+        {
+            "REDIRECT_STRICT_SENSITIVE_HEADERS_ENABLED": True,
+            "REDIRECT_STRICT_SENSITIVE_HEADERS": ["X-Api-Key"],
+        },
+    )
+    mw = build_from_crawler(MetaRefreshMiddleware, crawler)
+    headers = {
+        "Authorization": "Bearer 1",
+        "Proxy-Authorization": "Basic x",
+        "Cookie": "a=b",
+        "X-Api-Key": "k",
+        "X-Safe": "v",
+    }
+    request = Request("https://example.com/page", headers=headers)
+    response = HtmlResponse(
+        request.url,
+        body=meta_refresh_body("https://example.org/newpage"),
+    )
+    result = mw.process_response(request, response)
+    assert isinstance(result, Request)
+    assert result.url == "https://example.org/newpage"
+    assert "Authorization" not in result.headers
+    assert "Proxy-Authorization" not in result.headers
+    assert "Cookie" not in result.headers
+    assert "X-Api-Key" not in result.headers
+    assert result.headers["X-Safe"] == b"v"
+    # The original request is untouched.
+    assert request.headers["Authorization"] == b"Bearer 1"
+    assert request.headers["Cookie"] == b"a=b"
+
+
+def test_strict_sensitive_headers_same_origin():
+    crawler = get_crawler(
+        Spider,
+        {
+            "REDIRECT_STRICT_SENSITIVE_HEADERS_ENABLED": True,
+            "REDIRECT_STRICT_SENSITIVE_HEADERS": ["X-Api-Key"],
+        },
+    )
+    mw = build_from_crawler(MetaRefreshMiddleware, crawler)
+    headers = {
+        "Authorization": "Bearer 1",
+        "Cookie": "a=b",
+        "X-Api-Key": "k",
+    }
+    request = Request("https://example.com/page", headers=headers)
+    response = HtmlResponse(
+        request.url, body=meta_refresh_body("https://example.com:443/newpage")
+    )
+    result = mw.process_response(request, response)
+    assert isinstance(result, Request)
+    assert result.headers == request.headers

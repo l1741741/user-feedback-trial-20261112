@@ -952,6 +952,8 @@ settings (see the settings documentation for more info):
 * :setting:`REDIRECT_ENABLED`
 * :setting:`REDIRECT_HTTP_CODES`
 * :setting:`REDIRECT_MAX_TIMES`
+* :setting:`REDIRECT_STRICT_SENSITIVE_HEADERS`
+* :setting:`REDIRECT_STRICT_SENSITIVE_HEADERS_ENABLED`
 
 .. reqmeta:: dont_redirect
 
@@ -1086,6 +1088,60 @@ Default: ``20``
 
 The maximum number of redirections that will be followed for a single request.
 If maximum redirections are exceeded, the request is aborted and ignored.
+
+.. setting:: REDIRECT_STRICT_SENSITIVE_HEADERS_ENABLED
+
+REDIRECT_STRICT_SENSITIVE_HEADERS_ENABLED
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: VERSION
+
+Default: ``False``
+
+Whether strict sensitive-header isolation is enabled for redirects.
+
+By default, :class:`RedirectMiddleware` and :class:`MetaRefreshMiddleware`
+only remove the ``Cookie`` and ``Authorization`` headers on redirects, using
+the rules described in :ref:`security-credential-leakage`. Enable this
+setting to instead compare the
+`origin <https://developer.mozilla.org/en-US/docs/Glossary/Origin>`_ of
+every redirect target with that of the request that triggered it, and,
+whenever the origin changes, remove all sensitive headers from the
+redirected request.
+
+The origin is the scheme, the host name (case-insensitive) and the effective
+port, so ``http://example.com`` and ``http://example.com:80`` share an
+origin, while ``http://example.com`` and ``https://example.com`` do not.
+Redirects to the same origin keep the original behavior.
+
+The headers removed on an origin change are ``Authorization``,
+``Proxy-Authorization`` and ``Cookie``, plus the headers listed in
+:setting:`REDIRECT_STRICT_SENSITIVE_HEADERS`. Header names are matched
+case-insensitively. The original request is never modified.
+
+.. setting:: REDIRECT_STRICT_SENSITIVE_HEADERS
+
+REDIRECT_STRICT_SENSITIVE_HEADERS
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: VERSION
+
+Default: ``[]``
+
+Names of additional request headers that
+:class:`RedirectMiddleware` and :class:`MetaRefreshMiddleware` remove from a
+redirected request when its origin differs from that of the request that
+triggered the redirect. It only has an effect when
+:setting:`REDIRECT_STRICT_SENSITIVE_HEADERS_ENABLED` is enabled.
+
+Header names are matched case-insensitively, in addition to the
+``Authorization``, ``Proxy-Authorization`` and ``Cookie`` headers that are
+always removed in that mode. For example, to also drop an API key header:
+
+.. code-block:: python
+
+    REDIRECT_STRICT_SENSITIVE_HEADERS_ENABLED = True
+    REDIRECT_STRICT_SENSITIVE_HEADERS = ["X-Api-Key"]
 
 MetaRefreshMiddleware
 ---------------------
