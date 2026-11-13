@@ -2127,6 +2127,66 @@ Default: ``'scrapy.robotstxt.ProtegoRobotParser'``
 The parser backend to use for parsing ``robots.txt`` files. For more information see
 :ref:`topics-dlmw-robots`.
 
+.. setting:: ROBOTSTXT_CACHE_MAXSIZE
+
+ROBOTSTXT_CACHE_MAXSIZE
+-----------------------
+
+.. versionadded:: 2.20.0
+
+Default: ``256``
+
+The maximum number of completed ``robots.txt`` results the
+:class:`~scrapy.downloadermiddlewares.robotstxt.RobotsTxtMiddleware` keeps in
+its cache. Only completed results count toward this limit: a ``robots.txt``
+download that is currently in flight is shared by every request to the same
+origin and is never evicted, regardless of the cache size.
+
+The cache is keyed by origin, i.e. the scheme, the lower-cased host name and
+the effective port (``80`` for HTTP and ``443`` for HTTPS by default), so
+rules are never shared between different schemes, hosts or non-default ports.
+
+Only a positive integer is accepted; any other value is ignored and the
+default is used instead.
+
+.. setting:: ROBOTSTXT_CACHE_TTL
+
+ROBOTSTXT_CACHE_TTL
+-------------------
+
+.. versionadded:: 2.20.0
+
+Default: ``3600``
+
+The time, in seconds, during which a successfully downloaded and parsed
+``robots.txt`` result is reused for further requests to the same origin
+before it is requested again. Set it to ``0`` to never cache successful
+results, so every origin re-downloads its ``robots.txt`` on its next
+request. Negative values are ignored and the default is used instead.
+
+A monotonic clock is used, so changes of the system clock do not affect
+expiration.
+
+.. setting:: ROBOTSTXT_FAILURE_TTL
+
+ROBOTSTXT_FAILURE_TTL
+---------------------
+
+.. versionadded:: 2.20.0
+
+Default: ``30``
+
+The time, in seconds, during which a failed ``robots.txt`` download is
+negatively cached. Failures keep the fail-open behavior, i.e. requests are
+allowed while the failure is cached, but a new ``robots.txt`` download is
+attempted once this shorter TTL elapses, even while
+:setting:`ROBOTSTXT_CACHE_TTL` would still be in effect. Set it to ``0`` to
+disable negative caching, so every request after a failure retries the
+download. Negative values are ignored and the default is used instead.
+
+A monotonic clock is used, so changes of the system clock do not affect
+expiration.
+
 .. setting:: ROBOTSTXT_USER_AGENT
 
 ROBOTSTXT_USER_AGENT

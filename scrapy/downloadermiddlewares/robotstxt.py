@@ -7,20 +7,25 @@ enable this middleware and enable the ROBOTSTXT_OBEY setting.
 from __future__ import annotations
 
 import logging
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Self
 
-from twisted.internet.defer import Deferred
+from twisted.internet.defer import CancelledError, Deferred
 
 from scrapy import signals
 from scrapy.exceptions import CloseSpider, IgnoreRequest, NotConfigured
 from scrapy.http import Request, Response
 from scrapy.http.request import NO_CALLBACK
 from scrapy.utils.decorators import _warn_spider_arg
-from scrapy.utils.defer import maybe_deferred_to_future
+from scrapy.utils.defer import deferred_from_coro, maybe_deferred_to_future
 from scrapy.utils.httpobj import urlparse_cached
 from scrapy.utils.misc import build_from_crawler, load_object
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from scrapy import Spider
     from scrapy.crawler import Crawler
     from scrapy.robotstxt import RobotParser
@@ -28,6 +33,88 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _robots_origin(request: Request) -> tuple[str, str, int]:
+    """Return the normalized origin of *request* as a
+    ``(scheme, hostname, port)`` tuple.
+
+    The scheme and the hostname are lower-cased, an omitted or default port
+    collapses onto the scheme's default port (80 for HTTP, 443 for HTTPS), so
+    requests that share an origin share their robots.txt rules while different
+    schemes, hostnames or non-default ports stay isolated.
+    """
+    parsed = urlparse_cached(request)
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    port = parsed.port
+    if port is None:
+        port = _DEFAULT_PORTS.get(scheme, 80)
+    return scheme, hostname, port
+
+
+def _robots_url(origin: tuple[str, str, int]) -> str:
+    """Build the canonical robots.txt URL for *origin*.
+
+    Unlike string-concatenating the request's netloc, this never carries
+    userinfo (user name and password), a query string or a fragment, and keeps
+    IPv6 addresses wrapped in brackets.
+    """
+    scheme, hostname, port = origin
+    if ":" in hostname:
+        host = f"[{hostname}]"
+    else:
+        host = hostname
+    default_port = _DEFAULT_PORTS.get(scheme, 80)
+    if port == default_port:
+        return f"{scheme}://{host}/robots.txt"
+    return f"{scheme}://{host}:{port}/robots.txt"
+
+
+@dataclass
+class _CachedRobots:
+    """A completed robots.txt lookup in the bounded cache."""
+
+    # None means the download failed and the result is negatively cached.
+    parser: RobotParser | None
+    # monotonic timestamp at which the entry expires
+    expires_at: float
+
+
+@dataclass
+class _RobotsFetch:
+    """A single shared robots.txt download and parse for one origin.
+
+    Every caller to the same origin while this is in flight gets its own
+    :class:`~twisted.internet.defer.Deferred` waiter, so cancelling one page
+    request (and its waiter) never cancels the shared download or the other
+    waiters.
+    """
+
+    origin: tuple[str, str, int]
+    robots_url: str
+    # True when an explicit robots.txt page request is doing the download, in
+    # which case process_response()/process_exception() own its completion.
+    external: bool = False
+    waiters: list[Deferred[RobotParser | None]] = field(default_factory=list)
+
+    def add_waiter(self) -> Deferred[RobotParser | None]:
+        # The no-op canceller makes waiter cancellation local: Deferred.cancel()
+        # fires this waiter with CancelledError without touching the shared
+        # fetch or the other waiters, and Deferred.asFuture()'s cancellation
+        # hook therefore cannot propagate up to the shared download either.
+        waiter: Deferred[RobotParser | None] = Deferred(lambda d: None)
+        self.waiters.append(waiter)
+        return waiter
+
+    def fire(self, parser: RobotParser | None) -> None:
+        waiters, self.waiters = self.waiters, []
+        for waiter in waiters:
+            if not waiter.called:
+                waiter.callback(parser)
 
 
 class RobotsTxtMiddleware:
@@ -55,6 +142,14 @@ class RobotsTxtMiddleware:
     setting. Or you can also :ref:`implement support for a new parser
     <support-for-new-robots-parser>`.
 
+    Parsed rules are cached per origin (scheme, host and port). The cache only
+    holds completed results and is bounded by
+    :setting:`ROBOTSTXT_CACHE_MAXSIZE`; in-flight downloads are shared by every
+    request to the same origin and are never evicted. Successful results are
+    reused for :setting:`ROBOTSTXT_CACHE_TTL` seconds, while download failures,
+    which keep the fail-open behavior, are only negatively cached for
+    :setting:`ROBOTSTXT_FAILURE_TTL` seconds.
+
     If no :ref:`start request <start-requests>` can be crawled, and robots.txt
     rules denied at least one of them, the crawl stops with the
     ``robotstxt_denied`` :stat:`finish_reason`, as long as
@@ -72,7 +167,24 @@ class RobotsTxtMiddleware:
         self._robotstxt_useragent: str | None = crawler.settings["ROBOTSTXT_USER_AGENT"]
         self.crawler: Crawler = crawler
         self._stats: StatsCollector = crawler.stats
-        self._parsers: dict[str, RobotParser | Deferred[RobotParser | None] | None] = {}
+        self._cache_maxsize: int = self._read_positive_int_setting(
+            crawler, "ROBOTSTXT_CACHE_MAXSIZE", 256
+        )
+        self._cache_ttl: float = self._read_ttl_setting(
+            crawler, "ROBOTSTXT_CACHE_TTL", 3600.0
+        )
+        self._failure_ttl: float = self._read_ttl_setting(
+            crawler, "ROBOTSTXT_FAILURE_TTL", 30.0
+        )
+        # Only completed lookups live here, most recently used last. In-flight
+        # downloads have a separate store and are never evicted from it.
+        self._cache: OrderedDict[tuple[str, str, int], _CachedRobots] = (
+            OrderedDict()
+        )
+        self._inflight: dict[tuple[str, str, int], _RobotsFetch] = {}
+        # Indirection over the monotonic clock so TTL behavior can be tested
+        # deterministically without sleeping.
+        self._monotonic: Callable[[], float] = time.monotonic
         self._parserimpl: type[RobotParser] = load_object(
             crawler.settings.get("ROBOTSTXT_PARSER")
         )
@@ -84,6 +196,36 @@ class RobotsTxtMiddleware:
             self._response_received, signal=signals.response_received
         )
         crawler.signals.connect(self._spider_idle, signal=signals.spider_idle)
+
+    @staticmethod
+    def _read_positive_int_setting(
+        crawler: Crawler, name: str, default: int
+    ) -> int:
+        value = crawler.settings.getint(name, default)
+        if value <= 0:
+            logger.warning(
+                "Ignoring invalid %(name)s=%(value)r: it must be a positive "
+                "integer, using %(default)d instead.",
+                {"name": name, "value": value, "default": default},
+                extra={"spider": crawler.spider},
+            )
+            return default
+        return value
+
+    @staticmethod
+    def _read_ttl_setting(
+        crawler: Crawler, name: str, default: float
+    ) -> float:
+        value = crawler.settings.getfloat(name, default)
+        if value < 0:
+            logger.warning(
+                "Ignoring invalid %(name)s=%(value)r: it must be 0 or a "
+                "positive number, using %(default)s instead.",
+                {"name": name, "value": value, "default": default},
+                extra={"spider": crawler.spider},
+            )
+            return default
+        return value
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
@@ -111,43 +253,47 @@ class RobotsTxtMiddleware:
             return
         if request.url.startswith("data:") or request.url.startswith("file:"):
             return
-        netloc = urlparse_cached(request).netloc
-        if netloc not in self._parsers and self._is_robotstxt_request(request):
+        origin = _robots_origin(request)
+        if (
+            origin not in self._inflight
+            and self._is_robotstxt_request(request)
+        ):
             # Let this request download normally and use its own response as
-            # this host's robots.txt, instead of triggering a second,
+            # this origin's robots.txt, instead of triggering a second,
             # separate download of the same URL.
-            self._parsers[netloc] = Deferred()
+            fetch = _RobotsFetch(origin, request.url, external=True)
+            self._inflight[origin] = fetch
             self._stats.inc_value("robotstxt/request_count")
             return
-        rp = await self.robot_parser(request)
+        rp = await self.robot_parser(request, origin)
         self.process_request_2(rp, request)
 
     @_warn_spider_arg
     async def process_response(
         self, request: Request, response: Response, spider: Spider | None = None
     ) -> Response:
-        netloc = urlparse_cached(request).netloc
-        parser = self._parsers.get(netloc)
+        origin = _robots_origin(request)
+        fetch = self._inflight.get(origin)
         if (
-            isinstance(parser, Deferred)
-            and not parser.called
+            fetch is not None
+            and fetch.external
             and self._is_robotstxt_request(request)
         ):
-            await self._parse_robots(response, netloc, request)
+            await self._parse_robots(response, fetch, request)
         return response
 
     @_warn_spider_arg
     async def process_exception(
         self, request: Request, exception: Exception, spider: Spider | None = None
     ) -> None:
-        netloc = urlparse_cached(request).netloc
-        parser = self._parsers.get(netloc)
+        origin = _robots_origin(request)
+        fetch = self._inflight.get(origin)
         if (
-            isinstance(parser, Deferred)
-            and not parser.called
+            fetch is not None
+            and fetch.external
             and self._is_robotstxt_request(request)
         ):
-            self._robots_error(exception, netloc, request)
+            self._robots_error(exception, fetch, request)
 
     @staticmethod
     def _is_robotstxt_request(request: Request) -> bool:
@@ -155,8 +301,7 @@ class RobotsTxtMiddleware:
         # without going through process_response()/process_exception().
         if request.meta.get("dont_obey_robotstxt"):
             return False
-        url = urlparse_cached(request)
-        return request.url == f"{url.scheme}://{url.netloc}/robots.txt"
+        return request.url == _robots_url(_robots_origin(request))
 
     def process_request_2(self, rp: RobotParser | None, request: Request) -> None:
         if rp is None:
@@ -177,48 +322,87 @@ class RobotsTxtMiddleware:
                 self._start_request_denied = True
             raise IgnoreRequest("Forbidden by robots.txt")
 
-    async def robot_parser(self, request: Request) -> RobotParser | None:
-        url = urlparse_cached(request)
-        netloc = url.netloc
+    async def robot_parser(
+        self,
+        request: Request,
+        origin: tuple[str, str, int] | None = None,
+    ) -> RobotParser | None:
+        if origin is None:
+            origin = _robots_origin(request)
 
-        if netloc not in self._parsers:
-            self._parsers[netloc] = Deferred()
-            robotsurl = f"{url.scheme}://{url.netloc}/robots.txt"
-            meta: dict[str, Any] = {
-                "dont_obey_robotstxt": True,
-                "is_robotstxt_request": True,
-            }
-            if "download_handler" in request.meta:
-                meta["download_handler"] = request.meta["download_handler"]
-            robotsreq = Request(
-                robotsurl,
-                priority=self.DOWNLOAD_PRIORITY,
-                meta=meta,
-                callback=NO_CALLBACK,
-            )
-            try:
-                resp = await self.crawler.engine.download_async(robotsreq)
-                await self._parse_robots(resp, netloc, request)
-            except Exception as e:
-                self._robots_error(e, netloc, request)
+        cached = self._cache.get(origin)
+        if cached is not None:
+            if cached.expires_at > self._monotonic():
+                self._cache.move_to_end(origin)
+                return cached.parser
+            # Expired entries are dropped lazily; they are completed results, so
+            # evicting them never touches an in-flight download.
+            del self._cache[origin]
+
+        fetch = self._inflight.get(origin)
+        if fetch is None:
+            fetch = _RobotsFetch(origin, _robots_url(origin))
+            self._inflight[origin] = fetch
             self._stats.inc_value("robotstxt/request_count")
+            driver = deferred_from_coro(self._download_robots(fetch, request))
+            # The waiter Deferreds, not this driver, deliver the result to the
+            # callers. The driver never raises in normal operation: download
+            # failures are handled in _download_robots(). A CancelledError only
+            # reaches here when the event loop shuts down, in which case the
+            # whole loop is going away; swallow it so it can't surface as an
+            # unhandled Deferred error.
+            driver.addErrback(self._swallow_driver_cancellation)
+        # Otherwise an existing fetch owns the download, either an internal one
+        # or the explicit robots.txt page request, whose response comes back
+        # through process_response()/process_exception(). This caller only
+        # waits. The waiter's no-op canceller makes a cancellation local to this
+        # caller: it can neither cancel the shared download nor the other
+        # waiters.
+        waiter = fetch.add_waiter()
+        return await maybe_deferred_to_future(waiter)
 
-        parser = self._parsers[netloc]
-        if isinstance(parser, Deferred):
-            # Every caller needs to get its own Deferred, so that awaiting or
-            # cancelling one doesn't affect others.
-            waiter: Deferred[RobotParser | None] = Deferred()
+    @staticmethod
+    def _swallow_driver_cancellation(failure: Any) -> None:
+        failure.trap(CancelledError)
 
-            def cb(result: RobotParser | None) -> RobotParser | None:
-                waiter.callback(result)
-                return result
+    def _build_robots_request(
+        self, fetch: _RobotsFetch, request: Request
+    ) -> Request:
+        meta: dict[str, Any] = {
+            "dont_obey_robotstxt": True,
+            "is_robotstxt_request": True,
+        }
+        if "download_handler" in request.meta:
+            meta["download_handler"] = request.meta["download_handler"]
+        # A fresh Request: no cookies, no headers (no Cookie or Authorization
+        # from the page request), no userinfo, query string or fragment.
+        return Request(
+            fetch.robots_url,
+            priority=self.DOWNLOAD_PRIORITY,
+            meta=meta,
+            callback=NO_CALLBACK,
+        )
 
-            parser.addCallback(cb)
-            return await maybe_deferred_to_future(waiter)
-        return parser
+    async def _download_robots(
+        self, fetch: _RobotsFetch, request: Request
+    ) -> None:
+        robotsreq = self._build_robots_request(fetch, request)
+        try:
+            response = await self.crawler.engine.download_async(robotsreq)
+            await self._parse_robots(response, fetch, request)
+        except Exception as e:
+            self._robots_error(e, fetch, request)
+        except BaseException:
+            # e.g. the event loop shutting down: still release every waiter and
+            # clear the in-flight slot so nothing can stay pending forever.
+            self._finish_fetch(fetch, None, cache=False)
+            raise
 
     async def _parse_robots(
-        self, response: Response, netloc: str, request: Request
+        self,
+        response: Response,
+        fetch: _RobotsFetch,
+        request: Request,
     ) -> None:
         self._stats.inc_value("robotstxt/response_count")
         self._stats.inc_value(f"robotstxt/response_status_count/{response.status}")
@@ -229,12 +413,11 @@ class RobotsTxtMiddleware:
             request=request,
             response=response,
         )
-        rp_dfd = self._parsers[netloc]
-        assert isinstance(rp_dfd, Deferred)
-        self._parsers[netloc] = rp
-        rp_dfd.callback(rp)
+        self._finish_fetch(fetch, rp, cache=self._cache_ttl > 0)
 
-    def _robots_error(self, exc: Exception, netloc: str, request: Request) -> None:
+    def _robots_error(
+        self, exc: Exception, fetch: _RobotsFetch, request: Request
+    ) -> None:
         if not isinstance(exc, IgnoreRequest):
             logger.error(
                 f"Error downloading {request}",
@@ -243,7 +426,37 @@ class RobotsTxtMiddleware:
             )
             key = f"robotstxt/exception_count/{type(exc)}"
             self._stats.inc_value(key)
-        rp_dfd = self._parsers[netloc]
-        assert isinstance(rp_dfd, Deferred)
-        self._parsers[netloc] = None
-        rp_dfd.callback(None)
+        # Fail open, and only negatively cache for the (shorter) failure TTL.
+        self._finish_fetch(fetch, None, cache=self._failure_ttl > 0)
+
+    def _finish_fetch(
+        self,
+        fetch: _RobotsFetch,
+        parser: RobotParser | None,
+        *,
+        cache: bool,
+    ) -> None:
+        # A fetch object is only ever finished once, and only its own
+        # completion can replace its in-flight slot, so a late callback of an
+        # old download can never overwrite a newer cache entry.
+        if self._inflight.get(fetch.origin) is not fetch:
+            return
+        del self._inflight[fetch.origin]
+        if cache:
+            ttl = self._cache_ttl if parser is not None else self._failure_ttl
+            entry = _CachedRobots(
+                parser=parser,
+                expires_at=self._monotonic() + ttl,
+            )
+            self._store_cached(fetch.origin, entry)
+        fetch.fire(parser)
+
+    def _store_cached(
+        self,
+        origin: tuple[str, str, int],
+        entry: _CachedRobots,
+    ) -> None:
+        self._cache[origin] = entry
+        self._cache.move_to_end(origin)
+        while len(self._cache) > self._cache_maxsize:
+            self._cache.popitem(last=False)

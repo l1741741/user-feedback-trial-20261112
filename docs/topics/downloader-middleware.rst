@@ -1300,6 +1300,23 @@ If :attr:`Request.meta <scrapy.Request.meta>` has
 the request will be ignored by this middleware even if
 :setting:`ROBOTSTXT_OBEY` is enabled.
 
+Robots.txt rules are cached per origin: the scheme, the lower-cased host name
+and the effective port (80 for HTTP and 443 for HTTPS by default). Different
+schemes, host names or non-default ports therefore keep isolated rules, while
+an explicit default port and an omitted port map to the same origin. The
+``robots.txt`` request is rebuilt from that origin, so it never carries the
+user name, password, query string, fragment, cookies or ``Authorization``
+header of the page request.
+
+Concurrent requests to the same origin share a single ``robots.txt``
+download: cancelling one page request only cancels that request's wait, never
+the shared download or the other waiting requests. Completed results are kept
+in a bounded least-recently-used cache (see
+:setting:`ROBOTSTXT_CACHE_MAXSIZE`); successful results are reused for
+:setting:`ROBOTSTXT_CACHE_TTL` seconds and download failures, which fail open,
+are only negatively cached for :setting:`ROBOTSTXT_FAILURE_TTL` seconds.
+In-flight downloads are not part of the bounded cache and are never evicted.
+
 Parsers vary in several aspects:
 
 * Language of implementation
