@@ -68,6 +68,11 @@ CSV
     option, but it is important for CSV because unlike many other export
     formats CSV uses a fixed header.
 
+-   To protect text cells that spreadsheet applications could interpret as
+    formulas, use the ``protect_cells`` parameter of
+    :class:`~scrapy.exporters.CsvItemExporter`, e.g. through
+    ``item_export_kwargs``.
+
 .. _topics-feed-format-xml:
 
 XML

@@ -31,6 +31,46 @@ logger = logging.getLogger(__name__)
 
 _SCALAR_TYPES: frozenset[type] = frozenset({bool, bytes, float, int, str, type(None)})
 
+#: Prefix prepended to dangerous CSV cell values when cell protection is
+#: enabled. Spreadsheet applications display the value literally and hide the
+#: leading apostrophe.
+_CSV_CELL_ESCAPE_PREFIX = "'"
+
+#: Characters that most spreadsheet applications interpret as the start of a
+#: formula when they are the first non-whitespace character of a cell.
+_CSV_FORMULA_STARTS = frozenset("=+-@")
+
+#: Characters that make a cell dangerous when they are its very first
+#: character: formula starts, plus tab and line breaks, which some parsers
+#: interpret as cell or row boundaries.
+_CSV_DANGEROUS_STARTS = _CSV_FORMULA_STARTS | frozenset("\t\r\n")
+
+
+def _escape_csv_cell(value: Any) -> Any:
+    """Return *value* prefixed with an apostrophe if a spreadsheet
+    application could interpret it as a formula, and *value* unchanged
+    otherwise.
+
+    A cell is dangerous when its first character is one of ``=``, ``+``,
+    ``-``, ``@``, a tab or a line break, or when the first
+    non-whitespace character (Unicode whitespace included) is one of ``=``,
+    ``+``, ``-``, ``@``. Values that are not strings, empty strings and
+    values already starting with the escape prefix are returned unchanged,
+    so escaping the same value twice does not accumulate prefixes.
+    """
+    if (
+        not isinstance(value, str)
+        or not value
+        or value.startswith(_CSV_CELL_ESCAPE_PREFIX)
+    ):
+        return value
+    if value[0] in _CSV_DANGEROUS_STARTS:
+        return _CSV_CELL_ESCAPE_PREFIX + value
+    stripped = value.lstrip()
+    if stripped and stripped[0] in _CSV_FORMULA_STARTS:
+        return _CSV_CELL_ESCAPE_PREFIX + value
+    return value
+
 __all__ = [
     "BaseItemExporter",
     "CsvItemExporter",
@@ -312,6 +352,8 @@ class CsvItemExporter(BaseItemExporter):
         include_headers_line: bool = True,
         join_multivalued: str = ",",
         errors: str | None = None,
+        *,
+        protect_cells: bool | Iterable[str] = False,
         **kwargs: Any,
     ):
         super().__init__(dont_fail=True, **kwargs)
@@ -331,6 +373,17 @@ class CsvItemExporter(BaseItemExporter):
         self._join_multivalued = join_multivalued
         self._autodetected_fields = False
         self._data_loss_warned = False
+        # protect_cells=True protects every field, an iterable of output
+        # field names protects only those fields, anything else disables
+        # protection.
+        self._protect_all_cells: bool = protect_cells is True
+        self._protected_cells: frozenset[str] | None = (
+            None
+            if protect_cells is True or not protect_cells
+            else frozenset([protect_cells])
+            if isinstance(protect_cells, str)
+            else frozenset(protect_cells)
+        )
 
     def serialize_field(
         self, field: Mapping[str, Any] | Field, name: str, value: Any
@@ -368,9 +421,23 @@ class CsvItemExporter(BaseItemExporter):
                     f"See: https://docs.scrapy.org/en/latest/topics/feed-exports.html#feed-export-fields",
                 )
                 self._data_loss_warned = True
-        fields = self.get_serialized_fields(item, default_value="", include_empty=True)
+        fields = list(
+            self.get_serialized_fields(item, default_value="", include_empty=True)
+        )
         values = list(self._build_row(x for _, x in fields))
+        if self._protect_all_cells or self._protected_cells is not None:
+            values = [
+                self._protect_cell(name, value)
+                for (name, _), value in zip(fields, values)
+            ]
         self.csv_writer.writerow(values)
+
+    def _protect_cell(self, field_name: str, value: Any) -> Any:
+        if self._protect_all_cells or (
+            self._protected_cells is not None and field_name in self._protected_cells
+        ):
+            return _escape_csv_cell(value)
+        return value
 
     def finish_exporting(self) -> None:
         self.stream.detach()  # Avoid closing the wrapped file.

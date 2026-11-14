@@ -402,7 +402,7 @@ XmlItemExporter
 CsvItemExporter
 ---------------
 
-.. class:: CsvItemExporter(file, include_headers_line=True, join_multivalued=',', errors=None, **kwargs)
+.. class:: CsvItemExporter(file, include_headers_line=True, join_multivalued=',', errors=None, *, protect_cells=False, **kwargs)
 
    Exports items in CSV format to the given file-like object. If the
    :attr:`fields_to_export` attribute is set, it will be used to define the
@@ -426,6 +426,23 @@ CsvItemExporter
       errors are to be handled. For more information see
       :class:`io.TextIOWrapper`.
    :type errors: str
+
+   :param protect_cells: Protect text cells that spreadsheet applications
+      could interpret as formulas. If ``True``, every exported text cell
+      whose first character is ``=``, ``+``, ``-``, ``@``, a tab or a line
+      break, or whose first non-whitespace character (Unicode whitespace
+      included) is one of ``=``, ``+``, ``-``, ``@``, gets an apostrophe
+      (``'``) prepended after serialization and before CSV quoting, so that
+      spreadsheet applications display the value literally. An iterable of
+      output field names (after :setting:`FEED_EXPORT_FIELDS` renaming)
+      protects only those fields. Non-string
+      values, such as numbers and ``None``, are never modified, and cells
+      already starting with an apostrophe are left unchanged, so exporting
+      the same item twice does not accumulate prefixes. The header line is
+      not protected.
+
+      .. versionadded:: VERSION
+   :type protect_cells: bool | collections.abc.Iterable[str]
 
    The additional keyword arguments of this ``__init__`` method are passed to the
    :class:`BaseItemExporter` ``__init__`` method, and the leftover arguments to the

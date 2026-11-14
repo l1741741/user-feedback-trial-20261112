@@ -47,6 +47,15 @@ class FriendsItem(Item):
     friends = Field()
 
 
+class FormulaItem(Item):
+    name = Field(serializer=lambda value: "=" + value)
+
+
+class ListFieldItem(Item):
+    name = Field()
+    tags = Field(serializer=lambda value: value)
+
+
 @dataclasses.dataclass
 class MyDataClass:
     name: str
@@ -444,6 +453,134 @@ class TestCsvItemExporter(TestBaseItemExporter):
         assert len(caplog.records) == 1
         assert "CSVExporter dropped fields" in caplog.text
         assert "price" in caplog.text
+
+    def assertExportBytes(
+        self, item: Any, expected: bytes, items: int = 1, **kwargs: Any
+    ) -> BytesIO:
+        fp = BytesIO()
+        ie = CsvItemExporter(fp, **kwargs)
+        ie.start_exporting()
+        for _ in range(items):
+            ie.export_item(item)
+        ie.finish_exporting()
+        del ie  # See the first “del self.ie” in this file for context.
+        assert fp.getvalue() == expected
+        return fp
+
+    def test_protect_cells_disabled_by_default(self):
+        self.assertExportBytes({"name": "=1+1"}, b"name\r\n=1+1\r\n")
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("=1+1", b"'=1+1"),
+            ("+cmd", b"'+cmd"),
+            ("-2+3", b"'-2+3"),
+            ("@SUM(A1)", b"'@SUM(A1)"),
+            ("\t=x", b"'\t=x"),
+            ("\rx", b"\"'\rx\""),
+            ("\nx", b"\"'\nx\""),
+            (" =1", b"' =1"),
+            ("\u00a0=1", b"'\xc2\xa0=1"),
+            ("\u2003=1", b"'\xe2\x80\x83=1"),
+        ],
+    )
+    def test_protect_cells_dangerous_values(self, value: str, expected: bytes):
+        self.assertExportBytes(
+            {"name": value}, b"name\r\n" + expected + b"\r\n", protect_cells=True
+        )
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "hello",
+            "  padded  ",
+            "a=b",
+            "1+1",
+            "",
+            "'=already-protected",
+        ],
+    )
+    def test_protect_cells_safe_values_untouched(self, value: str):
+        # csv.writer quotes an empty string to tell it apart from None.
+        expected = b'""' if value == "" else value.encode()
+        self.assertExportBytes(
+            {"name": value},
+            b"name\r\n" + expected + b"\r\n",
+            protect_cells=True,
+        )
+
+    def test_protect_cells_non_string_values_untouched(self):
+        self.assertExportBytes(
+            {"neg_int": -5, "neg_float": -3.14, "zero": 0, "missing": None},
+            b"neg_int,neg_float,zero,missing\r\n-5,-3.14,0,\r\n",
+            protect_cells=True,
+        )
+
+    def test_protect_cells_missing_field_untouched(self):
+        self.assertExportBytes(
+            {"name": "=x"},
+            b"name,missing\r\n'=x,\r\n",
+            fields_to_export=["name", "missing"],
+            protect_cells=True,
+        )
+
+    def test_protect_cells_after_serializer(self):
+        self.assertExportBytes(
+            FormulaItem(name="x"), b"name\r\n'=x\r\n", protect_cells=True
+        )
+
+    def test_protect_cells_repeat_export_no_accumulation(self):
+        item = {"name": "=x"}
+        self.assertExportBytes(
+            item, b"name\r\n'=x\r\n'=x\r\n", items=2, protect_cells=True
+        )
+        assert item == {"name": "=x"}
+
+    def test_protect_cells_multivalued_field(self):
+        item = {"name": "John", "friends": ["=a", "b"]}
+        self.assertExportBytes(
+            item, b"name,friends\r\nJohn,\"'=a,b\"\r\n", protect_cells=True
+        )
+        assert item["friends"] == ["=a", "b"]
+
+    def test_protect_cells_serializer_returned_list_not_mutated(self):
+        item = ListFieldItem(name="n", tags=["=a", "b"])
+        self.assertExportBytes(
+            item, b'name,tags\r\nn,"[\'=a\', \'b\']"\r\n', protect_cells=True
+        )
+        assert item["tags"] == ["=a", "b"]
+
+    def test_protect_cells_nested_item_untouched(self):
+        self.assertExportBytes(
+            {"name": "John", "meta": {"cmd": "=1"}},
+            b"name,meta\r\nJohn,{'cmd': '=1'}\r\n",
+            protect_cells=True,
+        )
+
+    @pytest.mark.parametrize("protect_cells", [["note"], "note"])
+    def test_protect_cells_per_field(self, protect_cells):
+        self.assertExportBytes(
+            {"name": "=x", "note": "=y"},
+            b"name,note\r\n=x,'=y\r\n",
+            protect_cells=protect_cells,
+        )
+
+    def test_protect_cells_renamed_field(self):
+        self.assertExportBytes(
+            {"name": "=x"},
+            b"Name\r\n'=x\r\n",
+            fields_to_export={"name": "Name"},
+            protect_cells=["Name"],
+        )
+
+    def test_protect_cells_dialect(self):
+        self.assertExportBytes(
+            {"name": "=x\ty"},
+            b"name\r\n\"'=x\ty\"\r\n",
+            dialect="excel-tab",
+            protect_cells=True,
+        )
 
 
 class TestCsvItemExporterDataclass(TestCsvItemExporter):
