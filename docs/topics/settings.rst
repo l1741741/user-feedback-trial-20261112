@@ -2589,6 +2589,33 @@ length`_, even though this setting exists for different reasons.
 
 .. _Microsoft Internet Explorer maximum URL length: https://web.archive.org/web/20250206050143/https://support.microsoft.com/en-us/topic/maximum-url-length-is-2-083-characters-in-internet-explorer-174e7c8a-6666-f4e0-6fd6-908b53c12246
 
+.. setting:: URLLENGTH_LIMIT_MEASURE
+
+URLLENGTH_LIMIT_MEASURE
+-----------------------
+
+Default: ``'chars'``
+
+Scope: ``scrapy.spidermiddlewares.urllength``
+
+.. versionadded:: VERSION
+
+How the length of a request URL is measured against
+:setting:`URLLENGTH_LIMIT`:
+
+-   ``'chars'`` counts the characters of
+    :attr:`Request.url <scrapy.Request.url>`, including the fragment. This
+    matches the historical behavior.
+-   ``'bytes'`` counts the UTF-8 bytes of the request target that is actually
+    sent to the server, covering the scheme, authority, path and query, but
+    not the fragment, which stays on the client and is never transmitted.
+
+Use ``'bytes'`` when non-ASCII characters are common: one character may take
+several UTF-8 bytes, so a URL can fit within the character limit while still
+exceeding the byte limit enforced by a server.
+
+Any other value causes a :exc:`ValueError` when the middleware is built.
+
 .. setting:: USER_AGENT
 
 USER_AGENT

@@ -244,6 +244,7 @@ __all__ = [
     "TWISTED_REACTOR_ENABLED",
     "UPLOAD_TIMEOUT",
     "URLLENGTH_LIMIT",
+    "URLLENGTH_LIMIT_MEASURE",
     "USER_AGENT",
     "WARN_ON_GENERATOR_RETURN_VALUE",
 ]
@@ -669,6 +670,7 @@ TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
 UPLOAD_TIMEOUT = None
 
 URLLENGTH_LIMIT = 2083
+URLLENGTH_LIMIT_MEASURE = "chars"
 
 USER_AGENT = f"Scrapy/{import_module('scrapy').__version__} (+https://scrapy.org)"
 

@@ -496,3 +496,5 @@ UrlLengthMiddleware
    settings (see the settings documentation for more info):
 
       * :setting:`URLLENGTH_LIMIT` - The maximum URL length to allow for crawled URLs.
+      * :setting:`URLLENGTH_LIMIT_MEASURE` - Whether the limit is applied to
+        URL characters or to the UTF-8 bytes of the request target.

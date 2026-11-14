@@ -826,3 +826,30 @@ one per actual value of the placeholder.
     :setting:`URLLENGTH_LIMIT`.
 
     Set by :class:`~scrapy.spidermiddlewares.urllength.UrlLengthMiddleware`.
+
+.. stat:: urllength/chars/request_ignored_count
+.. stat:: urllength/bytes/request_ignored_count
+
+``urllength/chars/request_ignored_count`` and
+``urllength/bytes/request_ignored_count``
+    Number of requests dropped under each
+    :setting:`URLLENGTH_LIMIT_MEASURE` strategy. Only the key matching the
+    configured strategy is set.
+
+    .. versionadded:: VERSION
+
+    Set by :class:`~scrapy.spidermiddlewares.urllength.UrlLengthMiddleware`.
+
+.. stat:: urllength/chars/max_ignored_length
+.. stat:: urllength/bytes/max_ignored_length
+
+``urllength/chars/max_ignored_length`` and
+``urllength/bytes/max_ignored_length``
+    Largest measured URL length among the requests dropped under each
+    :setting:`URLLENGTH_LIMIT_MEASURE` strategy. Only the key matching the
+    configured strategy is set. The query string is not logged; only the
+    length is recorded.
+
+    .. versionadded:: VERSION
+
+    Set by :class:`~scrapy.spidermiddlewares.urllength.UrlLengthMiddleware`.
