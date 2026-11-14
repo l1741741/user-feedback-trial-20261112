@@ -205,6 +205,7 @@ class RedirectMiddleware(BaseRedirectMiddleware):
         self.redirect_http_codes: set[int] = {
             int(x) for x in settings.getlist("REDIRECT_HTTP_CODES")
         }
+        self.strict_method: bool = settings.getbool("REDIRECT_STRICT_METHOD")
 
     def _is_redirect(self, request: Request, response: Response) -> bool:
         meta_http_codes = request.meta.get("redirect_http_codes")
@@ -221,6 +222,27 @@ class RedirectMiddleware(BaseRedirectMiddleware):
         # rather than a redirection target, and the response body may be that
         # resource, which following Location would discard.
         return not _body_size(response)
+
+    def _use_get_method(self, request: Request, status: int) -> bool:
+        """Whether the request that follows a redirect with *status* to
+        *request* must become a bodyless GET request.
+
+        With the default browser-compatible handling, a POST request becomes
+        a GET request on 301 and 302 responses, while other methods keep
+        theirs, and any non-GET, non-HEAD request becomes a GET request on
+        303 responses and on status codes without standard redirection
+        semantics.
+
+        With strict method handling, 301 and 302 responses keep the method
+        and the body of the original request, as the HTTP standard prescribes,
+        leaving 303 responses, and status codes without standard semantics,
+        as the only ones that may turn a request into a GET request.
+        """
+        if status in {301, 302}:
+            return not self.strict_method and request.method == "POST"
+        if status in {307, 308}:
+            return False
+        return request.method not in {"GET", "HEAD"}
 
     @_warn_spider_arg
     def process_response(
@@ -251,11 +273,10 @@ class RedirectMiddleware(BaseRedirectMiddleware):
         # request as is, and so do 301 and 302 responses, except for POST
         # requests, for historical reasons. Any other status code gets the
         # handling of 303 responses, a bodyless GET request, which is the safest
-        # choice for status codes with no defined redirection semantics.
-        if (response.status in {301, 302} and request.method == "POST") or (
-            response.status not in {301, 302, 307, 308}
-            and request.method not in {"GET", "HEAD"}
-        ):
+        # choice for status codes with no defined redirection semantics. The
+        # REDIRECT_STRICT_METHOD setting removes the historical exception, so
+        # that 301 and 302 responses also keep the method and the body.
+        if self._use_get_method(request, response.status):
             redirected = self._redirect_request_using_get(
                 request, response, redirected_url
             )

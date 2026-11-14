@@ -952,6 +952,43 @@ settings (see the settings documentation for more info):
 * :setting:`REDIRECT_ENABLED`
 * :setting:`REDIRECT_HTTP_CODES`
 * :setting:`REDIRECT_MAX_TIMES`
+* :setting:`REDIRECT_STRICT_METHOD`
+
+How the method and the body of a request change on a redirect depends on the
+response status code:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Status code
+     - Default handling
+     - Strict method handling
+       (:setting:`REDIRECT_STRICT_METHOD`)
+   * - 301, 302
+     - A ``POST`` request becomes a ``GET`` request without a body, matching
+       the historical behavior of web browsers. Other methods, including
+       ``GET`` and ``HEAD``, keep their method and body.
+     - The method and the body are kept, as the HTTP standard prescribes.
+   * - 303
+     - Any method other than ``GET`` and ``HEAD`` becomes a ``GET`` request
+       without a body. ``GET`` and ``HEAD`` keep their method.
+     - Same as the default handling.
+   * - 307, 308
+     - The method and the body are kept.
+     - The method and the body are kept.
+   * - Other codes in :setting:`REDIRECT_HTTP_CODES`
+     - Followed like 303 responses: a bodyless ``GET`` request, unless the
+       original request used ``GET`` or ``HEAD``.
+     - Same as the default handling.
+
+When a request becomes a bodyless ``GET`` request, the headers that describe
+the original request body, namely ``Content-Type``, ``Content-Length``,
+``Content-Encoding``, ``Content-Language`` and ``Content-Location``, are
+removed from the redirected request. Other headers are kept. On redirects
+that keep the body, its headers are kept with it.
+
+A new :class:`~scrapy.Request` object is built for every redirect, so
+modifying the redirected request never affects the original one.
 
 .. reqmeta:: dont_redirect
 
@@ -1086,6 +1123,27 @@ Default: ``20``
 
 The maximum number of redirections that will be followed for a single request.
 If maximum redirections are exceeded, the request is aborted and ignored.
+
+.. setting:: REDIRECT_STRICT_METHOD
+
+REDIRECT_STRICT_METHOD
+^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: VERSION
+
+Default: ``False``
+
+Whether 301 and 302 responses preserve the method and the body of the original
+request, as the HTTP standard prescribes.
+
+By default, a ``POST`` request that receives a 301 or 302 response is followed
+with a bodyless ``GET`` request, matching the historical behavior of web
+browsers. Set this setting to ``True`` to follow 301 and 302 responses
+with the same method and body as the original request, the same way 307 and
+308 responses are always handled. The handling of the other redirection
+status codes, including 303, 307 and 308, does not change. See the table
+above for the full method transition rules, and
+:doc:`redirect-method-migration` for a migration guide.
 
 MetaRefreshMiddleware
 ---------------------

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from scrapy.downloadermiddlewares.redirect import RedirectMiddleware
-from scrapy.exceptions import NotConfigured
+from scrapy.exceptions import IgnoreRequest, NotConfigured
 from scrapy.http import BodyFileResponse, Request, Response
 from scrapy.spidermiddlewares.referer import (
     POLICY_NO_REFERRER,
@@ -160,6 +160,72 @@ class TestRedirectMiddleware(TestRedirectBase):
         assert "Content-Language" not in req2.headers
         assert "Content-Location" not in req2.headers
         assert req2.headers["X-Custom"] == b"foo"
+
+    @pytest.mark.parametrize("status", [301, 302, 303])
+    def test_original_request_not_mutated_on_get_conversion(self, status):
+        source_url = f"http://www.example.com/{status}"
+        target_url = "http://www.example.com/redirected"
+        body = b"test"
+        request = Request(
+            source_url,
+            method="POST",
+            body=body,
+            headers={"Content-Type": "text/plain", "Content-Length": "4"},
+        )
+        response = Response(
+            source_url, headers={"Location": target_url}, status=status
+        )
+        redirect_request = self.mw.process_response(request, response)
+        assert isinstance(redirect_request, Request)
+        assert redirect_request is not request
+
+        assert request.method == "POST"
+        assert request.body == body
+        assert request.url == source_url
+        assert request.headers[b"Content-Type"] == b"text/plain"
+        assert request.headers[b"Content-Length"] == b"4"
+        assert "redirect_urls" not in request.meta
+
+    @pytest.mark.parametrize("status", [307, 308])
+    def test_original_request_not_mutated_when_body_kept(self, status):
+        source_url = f"http://www.example.com/{status}"
+        target_url = "http://www.example.com/redirected"
+        body = b"test"
+        request = Request(
+            source_url,
+            method="POST",
+            body=body,
+            headers={"Content-Type": "text/plain", "Content-Length": "4"},
+        )
+        response = Response(
+            source_url, headers={"Location": target_url}, status=status
+        )
+        redirect_request = self.mw.process_response(request, response)
+        assert isinstance(redirect_request, Request)
+        assert redirect_request is not request
+        assert "redirect_urls" not in request.meta
+        assert request.method == "POST"
+        assert request.body == body
+
+    @pytest.mark.parametrize("status", [301, 302])
+    def test_default_setting_keeps_put_and_delete(self, status):
+        """The default middleware leaves non-POST methods untouched on 301 and
+        302 responses, the REDIRECT_STRICT_METHOD setting only changes the
+        handling of POST requests."""
+        source_url = f"http://www.example.com/{status}"
+        target_url = "http://www.example.com/redirected"
+        request = Request(source_url, method="MKCOL", body=b"body")
+        response = Response(
+            source_url, headers={"Location": target_url}, status=status
+        )
+        redirect_request = self.mw.process_response(request, response)
+        assert isinstance(redirect_request, Request)
+        assert redirect_request.method == "MKCOL"
+        assert redirect_request.body == b"body"
+
+    def test_default_setting_value(self):
+        crawler = get_crawler(DefaultSpider)
+        assert crawler.settings.getbool("REDIRECT_STRICT_METHOD") is False
 
     @pytest.mark.parametrize(
         (
@@ -389,6 +455,374 @@ class TestRedirectMiddleware(TestRedirectBase):
         request = Request(url)
         response = Response(url, status=302, headers={"Location": "/redirected"})
         assert mw.process_response(request, response) is response
+
+
+class TestRedirectStrictMethod:
+    """Tests of the REDIRECT_STRICT_METHOD setting, under which 301 and 302
+    responses keep the method and the body of the original request instead of
+    turning POST requests into bodyless GET requests."""
+
+    def setup_method(self):
+        crawler = get_crawler(
+            DefaultSpider, {"REDIRECT_STRICT_METHOD": True}
+        )
+        crawler.spider = crawler._create_spider()
+        self.mw = build_from_crawler(RedirectMiddleware, crawler)
+
+    @pytest.mark.parametrize("status", [301, 302])
+    @pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH"])
+    def test_301_302_keep_method_and_body(self, status, method):
+        source_url = f"http://www.example.com/{status}"
+        target_url = "http://www.example.com/redirected"
+        body = b"request-body"
+        request = Request(
+            source_url,
+            method=method,
+            body=body,
+            headers={
+                "Content-Type": "text/plain",
+                "Content-Length": str(len(body)),
+                "X-Custom": "keep-me",
+            },
+        )
+        response = Response(
+            source_url, headers={"Location": target_url}, status=status
+        )
+
+        redirect_request = self.mw.process_response(request, response)
+        assert isinstance(redirect_request, Request)
+        assert redirect_request.url == target_url
+        assert redirect_request.method == method
+        assert redirect_request.body == body
+        assert redirect_request.headers[b"Content-Type"] == b"text/plain"
+        assert (
+            redirect_request.headers[b"Content-Length"]
+            == str(len(body)).encode()
+        )
+        assert redirect_request.headers[b"X-Custom"] == b"keep-me"
+
+    @pytest.mark.parametrize("status", [301, 302])
+    def test_301_302_get_and_head_unchanged(self, status):
+        source_url = f"http://www.example.com/{status}"
+        target_url = "http://www.example.com/redirected"
+        for method in ("GET", "HEAD"):
+            request = Request(source_url, method=method)
+            response = Response(
+                source_url, headers={"Location": target_url}, status=status
+            )
+            redirect_request = self.mw.process_response(request, response)
+            assert isinstance(redirect_request, Request)
+            assert redirect_request.method == method
+            assert not redirect_request.body
+
+    @pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH"])
+    def test_303_still_becomes_get(self, method):
+        source_url = "http://www.example.com/303"
+        target_url = "http://www.example.com/redirected"
+        body = b"request-body"
+        request = Request(
+            source_url,
+            method=method,
+            body=body,
+            headers={
+                "Content-Type": "text/plain",
+                "Content-Length": str(len(body)),
+            },
+        )
+        response = Response(
+            source_url, headers={"Location": target_url}, status=303
+        )
+
+        redirect_request = self.mw.process_response(request, response)
+        assert isinstance(redirect_request, Request)
+        assert redirect_request.method == "GET"
+        assert not redirect_request.body
+        assert "Content-Type" not in redirect_request.headers
+        assert "Content-Length" not in redirect_request.headers
+
+    @pytest.mark.parametrize("method", ["GET", "HEAD"])
+    def test_303_keeps_get_and_head(self, method):
+        source_url = "http://www.example.com/303"
+        target_url = "http://www.example.com/redirected"
+        request = Request(source_url, method=method)
+        response = Response(
+            source_url, headers={"Location": target_url}, status=303
+        )
+        redirect_request = self.mw.process_response(request, response)
+        assert isinstance(redirect_request, Request)
+        assert redirect_request.method == method
+
+    @pytest.mark.parametrize("status", [307, 308])
+    @pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH"])
+    def test_307_308_keep_method_and_body(self, status, method):
+        source_url = f"http://www.example.com/{status}"
+        target_url = "http://www.example.com/redirected"
+        body = b"request-body"
+        request = Request(
+            source_url,
+            method=method,
+            body=body,
+            headers={
+                "Content-Type": "text/plain",
+                "Content-Length": str(len(body)),
+            },
+        )
+        response = Response(
+            source_url, headers={"Location": target_url}, status=status
+        )
+
+        redirect_request = self.mw.process_response(request, response)
+        assert isinstance(redirect_request, Request)
+        assert redirect_request.method == method
+        assert redirect_request.body == body
+        assert redirect_request.headers[b"Content-Type"] == b"text/plain"
+        assert (
+            redirect_request.headers[b"Content-Length"]
+            == str(len(body)).encode()
+        )
+
+    @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+    def test_head_request_kept_for_every_status(self, status):
+        source_url = f"http://www.example.com/{status}"
+        target_url = "http://www.example.com/redirected"
+        request = Request(source_url, method="HEAD")
+        response = Response(
+            source_url, headers={"Location": target_url}, status=status
+        )
+        redirect_request = self.mw.process_response(request, response)
+        assert isinstance(redirect_request, Request)
+        assert redirect_request.method == "HEAD"
+        assert not redirect_request.body
+
+    def test_second_hop_keeps_method_and_body(self):
+        """A redirect chain keeps the method and the body on every hop, and
+        accumulates the standard redirect metadata."""
+        body = b"request-body"
+        request = Request(
+            "http://www.example.com/first",
+            method="POST",
+            body=body,
+            headers={"Content-Type": "text/plain", "Content-Length": "12"},
+        )
+        response1 = Response(
+            "http://www.example.com/first",
+            headers={"Location": "http://www.example.com/second"},
+            status=301,
+        )
+        request2 = self.mw.process_response(request, response1)
+        assert isinstance(request2, Request)
+        assert request2.method == "POST"
+        assert request2.body == body
+
+        response2 = Response(
+            "http://www.example.com/second",
+            headers={"Location": "http://www.example.com/third"},
+            status=302,
+        )
+        request3 = self.mw.process_response(request2, response2)
+        assert isinstance(request3, Request)
+        assert request3.url == "http://www.example.com/third"
+        assert request3.method == "POST"
+        assert request3.body == body
+        assert request3.headers[b"Content-Type"] == b"text/plain"
+        assert request3.meta["redirect_urls"] == [
+            "http://www.example.com/first",
+            "http://www.example.com/second",
+        ]
+        assert request3.meta["redirect_reasons"] == [301, 302]
+        assert request3.meta["redirect_times"] == 2
+
+    def test_strict_then_303_drops_body(self):
+        """When a method-preserving hop is followed by a 303 hop, the second
+        redirect still turns the request into a bodyless GET request."""
+        body = b"request-body"
+        request = Request(
+            "http://www.example.com/first",
+            method="POST",
+            body=body,
+            headers={"Content-Type": "text/plain", "Content-Length": "12"},
+        )
+        response1 = Response(
+            "http://www.example.com/first",
+            headers={"Location": "http://www.example.com/second"},
+            status=301,
+        )
+        request2 = self.mw.process_response(request, response1)
+        assert isinstance(request2, Request)
+        assert request2.method == "POST"
+
+        response2 = Response(
+            "http://www.example.com/second",
+            headers={"Location": "http://www.example.com/third"},
+            status=303,
+        )
+        request3 = self.mw.process_response(request2, response2)
+        assert isinstance(request3, Request)
+        assert request3.method == "GET"
+        assert not request3.body
+        assert "Content-Type" not in request3.headers
+        assert "Content-Length" not in request3.headers
+
+    def test_relative_location_kept(self):
+        request = Request(
+            "http://www.example.com/path",
+            method="POST",
+            body=b"request-body",
+            headers={"Content-Type": "text/plain"},
+        )
+        response = Response(
+            "http://www.example.com/path",
+            headers={"Location": "/other"},
+            status=301,
+        )
+        redirect_request = self.mw.process_response(request, response)
+        assert isinstance(redirect_request, Request)
+        assert redirect_request.url == "http://www.example.com/other"
+        assert redirect_request.method == "POST"
+        assert redirect_request.body == b"request-body"
+
+    def test_no_location_returns_response(self):
+        request = Request("http://www.example.com", method="POST")
+        response = Response("http://www.example.com", status=301)
+        assert self.mw.process_response(request, response) is response
+
+    def test_dont_redirect_takes_precedence(self):
+        request = Request(
+            "http://www.example.com",
+            method="POST",
+            meta={"dont_redirect": True},
+        )
+        response = Response(
+            "http://www.example.com",
+            headers={"Location": "http://www.example.com/other"},
+            status=301,
+        )
+        assert self.mw.process_response(request, response) is response
+
+    def test_max_redirect_times_still_enforced(self):
+        self.mw.max_redirect_times = 1
+        request = Request("http://www.example.com", method="POST")
+        response = Response(
+            "http://www.example.com",
+            headers={"Location": "http://www.example.com/other"},
+            status=301,
+        )
+        request2 = self.mw.process_response(request, response)
+        assert isinstance(request2, Request)
+        with pytest.raises(IgnoreRequest):
+            self.mw.process_response(request2, response)
+
+    def test_original_request_not_mutated(self):
+        body = b"request-body"
+        request = Request(
+            "http://www.example.com/first",
+            method="POST",
+            body=body,
+            headers={"Content-Type": "text/plain", "Content-Length": "12"},
+        )
+        response = Response(
+            "http://www.example.com/first",
+            headers={"Location": "http://www.example.com/second"},
+            status=301,
+        )
+        self.mw.process_response(request, response)
+
+        assert request.method == "POST"
+        assert request.body == body
+        assert request.url == "http://www.example.com/first"
+        assert request.headers[b"Content-Type"] == b"text/plain"
+        assert request.headers[b"Content-Length"] == b"12"
+        assert "redirect_urls" not in request.meta
+
+    def test_repeated_processing_is_stable(self):
+        """Processing the same request/response pair twice gives equivalent
+        redirect requests and leaves the original request untouched."""
+        body = b"request-body"
+        request = Request(
+            "http://www.example.com/first",
+            method="POST",
+            body=body,
+            headers={"Content-Type": "text/plain", "Content-Length": "12"},
+        )
+        response = Response(
+            "http://www.example.com/first",
+            headers={"Location": "http://www.example.com/second"},
+            status=302,
+        )
+        first = self.mw.process_response(request, response)
+        second = self.mw.process_response(request, response)
+        assert isinstance(first, Request)
+        assert isinstance(second, Request)
+        assert first is not second
+        assert first.url == second.url
+        assert first.method == second.method == "POST"
+        assert first.body == second.body == body
+        assert "redirect_urls" not in request.meta
+
+    @pytest.mark.parametrize(
+        ("status", "method"),
+        [
+            (301, "POST"),
+            (302, "POST"),
+            (303, "POST"),
+            (307, "POST"),
+            (308, "POST"),
+            (301, "MKCOL"),
+            (303, "MKCOL"),
+            (307, "MKCOL"),
+        ],
+    )
+    def test_location_encoding_error_propagates(self, status, method, monkeypatch):
+        """A Location header that cannot be decoded keeps raising instead of
+        being turned into a redirect."""
+
+        def broken_redirect_url(url, location):
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "bad location")
+
+        monkeypatch.setattr(
+            "scrapy.downloadermiddlewares.redirect._redirect_url",
+            broken_redirect_url,
+        )
+        request = Request("http://www.example.com", method=method)
+        response = Response(
+            "http://www.example.com",
+            headers={"Location": "http://www.example.com/other"},
+            status=status,
+        )
+        with pytest.raises(UnicodeDecodeError):
+            self.mw.process_response(request, response)
+
+    def test_redirect_loop_rejected(self):
+        """A redirect chain that revisits the same URL is stopped by the
+        maximum redirection limit with IgnoreRequest, not followed forever."""
+        self.mw.max_redirect_times = 2
+        request = Request(
+            "http://www.example.com/a",
+            method="POST",
+            body=b"request-body",
+            headers={"Content-Type": "text/plain"},
+        )
+        locations = {
+            "http://www.example.com/a": "http://www.example.com/b",
+            "http://www.example.com/b": "http://www.example.com/a",
+        }
+        current: Request = request
+        for _ in range(2):
+            response = Response(
+                current.url,
+                headers={"Location": locations[current.url]},
+                status=301,
+            )
+            redirected = self.mw.process_response(current, response)
+            assert isinstance(redirected, Request)
+            current = redirected
+        response = Response(
+            current.url,
+            headers={"Location": locations[current.url]},
+            status=301,
+        )
+        with pytest.raises(IgnoreRequest, match="max redirections reached"):
+            self.mw.process_response(current, response)
 
     def test_meta_http_codes(self):
         """The redirect_http_codes request metadata key overrides the

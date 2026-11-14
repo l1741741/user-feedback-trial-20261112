@@ -233,6 +233,7 @@ Extending Scrapy
    topics/architecture
    topics/addons
    topics/downloader-middleware
+   topics/redirect-method-migration
    topics/spider-middleware
    topics/extensions
    topics/signals
@@ -251,6 +252,9 @@ Extending Scrapy
 
 :doc:`topics/downloader-middleware`
     Customize how pages get requested and downloaded.
+
+:doc:`topics/redirect-method-migration`
+    Switch redirects to the strict, standard-compliant method policy.
 
 :doc:`topics/spider-middleware`
     Customize the input and output of your spiders.
