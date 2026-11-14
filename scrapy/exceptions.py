@@ -156,6 +156,17 @@ class UnsupportedURLSchemeError(Exception):
     """Indicates that the URL scheme is not supported."""
 
 
+class RequestDictError(ValueError):
+    """Raised when a request cannot be converted to or from a strict,
+    versioned request dictionary.
+
+    .. versionadded:: VERSION
+
+    The error message starts with the path of the offending field, e.g.
+    ``meta['selector']: ...``.
+    """
+
+
 # Items
 
 

@@ -239,9 +239,89 @@ Other functions related to requests
 
 .. autofunction:: scrapy.http.request.NO_CALLBACK
 
+.. autofunction:: scrapy.utils.request.register_request_type
+
 .. autofunction:: scrapy.utils.request.request_from_dict
 
 .. autofunction:: scrapy.utils.httpobj.urlparse_cached
+
+
+.. _request-dicts:
+
+Request dictionaries
+--------------------
+
+:meth:`Request.to_dict() <scrapy.Request.to_dict>` returns a dictionary, and
+:func:`~scrapy.utils.request.request_from_dict` restores the request from it.
+
+The default dictionary format, also used by
+:ref:`scheduler queues <topics-scheduler>`, is not versioned and does not
+validate its values, and subclasses are restored from the ``_class`` field
+using :func:`~scrapy.utils.misc.load_object`. That is unsafe for data that
+crosses a trust boundary, such as request dictionaries read from a job
+directory written by another version of your project.
+
+Pass ``strict=True`` to both methods to use the versioned format instead:
+
+.. code-block:: python
+
+    import json
+
+    import scrapy
+    from scrapy.utils.request import request_from_dict
+
+
+    class MySpider(scrapy.Spider):
+        name = "my_spider"
+
+        def parse(self, response):
+            request = scrapy.Request(
+                "https://www.example.com", callback=self.parse_item
+            )
+            payload = json.dumps(request.to_dict(spider=self, strict=True))
+            data = json.loads(payload)
+            restored = request_from_dict(data, spider=self, strict=True)
+            assert restored.url == request.url
+
+        def parse_item(self, response): ...
+
+The strict dictionary:
+
+-   Contains ``schema_version`` and ``request_type`` fields. Only the
+    supported schema version is accepted, and only classes registered with
+    :func:`~scrapy.utils.request.register_request_type` can be restored. The
+    built-in classes are registered by default.
+
+-   Is JSON-safe. Bytes, including header names and values as well as the
+    body, are base64-encoded, and tuples are tagged, so a JSON round trip is
+    lossless.
+
+-   Is validated in full before the :class:`~scrapy.Request` object, and so
+    any subclass constructor, is called. Validation errors are raised as
+    :class:`~scrapy.exceptions.RequestDictError`, whose message starts with
+    the path of the offending field, e.g. ``meta['items'][0]``.
+
+-   Stores ``callback`` and ``errback`` as the name of a method of the given
+    spider. On restore, the name must resolve to a method of that spider;
+    nothing is imported or evaluated. Use ``None`` for requests without a
+    callback, or :func:`~scrapy.http.request.NO_CALLBACK` where a special
+    sentinel is needed.
+
+-   Accepts only ``None``, booleans, integers, finite floats, strings,
+    bytes, lists, tuples, and dictionaries in :attr:`~scrapy.Request.meta`
+    and :attr:`~scrapy.Request.cb_kwargs`, whose keys must be strings, and
+    in :attr:`~scrapy.Request.cookies`, whose keys may also be bytes.
+    Other objects, such as :class:`~scrapy.Selector` instances or database
+    connections, cannot be restored and are rejected with their path. Store
+    a serializable identifier instead.
+
+Validation never mutates the input dictionary, its nested values, or the
+spider, and restored requests never share mutable containers with the input
+or with each other.
+
+If you add attributes to a :class:`~scrapy.Request` subclass, they are stored
+under the ``attributes`` field as long as the subclass lists them in
+:attr:`~scrapy.Request.attributes`.
 
 
 .. _request-fingerprints:

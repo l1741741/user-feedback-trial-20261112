@@ -24,4 +24,6 @@ the :ref:`download handler exceptions <download-handlers-exceptions>`.
 
 .. autoexception:: NotSupported
 
+.. autoexception:: RequestDictError
+
 .. autoexception:: StopDownload

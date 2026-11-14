@@ -558,14 +558,40 @@ class Request(object_ref):
 
         return request_to_curl(self)
 
-    def to_dict(self, *, spider: scrapy.Spider | None = None) -> dict[str, Any]:
+    def to_dict(
+        self, *, spider: scrapy.Spider | None = None, strict: bool = False
+    ) -> dict[str, Any]:
         """Return a dictionary containing the Request's data.
 
         Use :func:`~scrapy.utils.request.request_from_dict` to convert back into a :class:`~scrapy.Request` object.
 
         If a spider is given, this method will try to find out the name of the spider methods used as callback
         and errback and include them in the output dict, raising an exception if they cannot be found.
+
+        .. versionchanged:: VERSION
+           Added the *strict* parameter.
+
+        If *strict* is true, the returned dictionary is a versioned,
+        JSON-safe request dictionary that
+        :func:`~scrapy.utils.request.request_from_dict` validates in full
+        before restoring the request. It adds the ``schema_version`` and
+        ``request_type`` fields, base64-encodes bytes, and tags tuples and
+        dictionaries with non-string keys.
+
+        With *strict*, the callback and errback must be ``None`` or bound
+        methods of the spider given in *spider*; no other callable can be
+        referenced. The request class must have been registered with
+        :func:`~scrapy.utils.request.register_request_type`. Values in
+        :attr:`meta <scrapy.Request.meta>`, :attr:`cookies
+        <scrapy.Request.cookies>` or :attr:`cb_kwargs
+        <scrapy.Request.cb_kwargs>` that cannot be stored safely, such as
+        arbitrary objects, raise :class:`~scrapy.exceptions.RequestDictError`
+        naming the field path.
         """
+        if strict:
+            from scrapy.utils.request import _request_to_dict_strict  # noqa: PLC0415
+
+            return _request_to_dict_strict(self, spider=spider)
         d = {
             "url": self.url,  # urls are safe (safe_string_url)
             "callback": (
