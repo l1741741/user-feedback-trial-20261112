@@ -2192,6 +2192,19 @@ The ``SQLite`` types store requests in an SQLite database, which makes writes
 slower but keeps the queue usable after an unclean shutdown. See
 :ref:`security-job-state`.
 
+.. versionadded:: VERSION
+   The frame queue types
+   ``scrapy.squeues.PickleFifoFrameDiskQueue``,
+   ``scrapy.squeues.PickleLifoFrameDiskQueue``,
+   ``scrapy.squeues.MarshalFifoFrameDiskQueue`` and
+   ``scrapy.squeues.MarshalLifoFrameDiskQueue``. Each request is written as a
+   self-contained frame carrying a version, length and checksum, and becomes
+   visible only once the whole frame is committed to disk. On restart, a frame
+   left half-written by an interrupted process is discarded when it is the
+   last frame, while damage in the middle of the storage is reported as an
+   error instead of silently skipping requests. See
+   :ref:`topics-jobs-frame-queues`.
+
 
 .. setting:: SCHEDULER_MEMORY_QUEUE
 

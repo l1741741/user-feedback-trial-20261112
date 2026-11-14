@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Self
 
 from queuelib import queue
 
+from scrapy._frame_disk_queue import FrameFifoDiskQueue, FrameLifoDiskQueue
 from scrapy.utils.request import request_from_dict
 
 if TYPE_CHECKING:
@@ -183,6 +184,26 @@ _MarshalLifoSerializationSQLiteQueue = _serializable_queue(
     marshal.dumps,
     marshal.loads,
 )
+_PickleFifoFrameDiskQueue = _serializable_queue(
+    _with_mkdir(FrameFifoDiskQueue),  # type: ignore[arg-type]
+    _pickle_serialize,
+    pickle.loads,
+)
+_PickleLifoFrameDiskQueue = _serializable_queue(
+    _with_mkdir(FrameLifoDiskQueue),  # type: ignore[arg-type]
+    _pickle_serialize,
+    pickle.loads,
+)
+_MarshalFifoFrameDiskQueue = _serializable_queue(
+    _with_mkdir(FrameFifoDiskQueue),  # type: ignore[arg-type]
+    marshal.dumps,
+    marshal.loads,
+)
+_MarshalLifoFrameDiskQueue = _serializable_queue(
+    _with_mkdir(FrameLifoDiskQueue),  # type: ignore[arg-type]
+    marshal.dumps,
+    marshal.loads,
+)
 
 # public queue classes
 PickleFifoDiskQueue = _scrapy_serialization_queue(_PickleFifoSerializationDiskQueue)
@@ -197,5 +218,9 @@ MarshalFifoSQLiteQueue = _scrapy_serialization_queue(
 MarshalLifoSQLiteQueue = _scrapy_serialization_queue(
     _MarshalLifoSerializationSQLiteQueue
 )
+PickleFifoFrameDiskQueue = _scrapy_serialization_queue(_PickleFifoFrameDiskQueue)
+PickleLifoFrameDiskQueue = _scrapy_serialization_queue(_PickleLifoFrameDiskQueue)
+MarshalFifoFrameDiskQueue = _scrapy_serialization_queue(_MarshalFifoFrameDiskQueue)
+MarshalLifoFrameDiskQueue = _scrapy_serialization_queue(_MarshalLifoFrameDiskQueue)
 FifoMemoryQueue = _scrapy_non_serialization_queue(queue.FifoMemoryQueue)  # type: ignore[arg-type]
 LifoMemoryQueue = _scrapy_non_serialization_queue(queue.LifoMemoryQueue)  # type: ignore[arg-type]

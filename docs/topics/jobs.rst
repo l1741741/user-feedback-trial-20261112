@@ -98,6 +98,70 @@ Persistence gotchas
 There are a few things to keep in mind if you want to use Scrapy's persistence
 support:
 
+.. _topics-jobs-frame-queues:
+
+Frame disk queues
+-----------------
+
+The regular disk queue types
+(``scrapy.squeues.PickleFifoDiskQueue``,
+``scrapy.squeues.PickleLifoDiskQueue`` and their ``Marshal`` variants) store
+each request as one length-prefixed record with no checksum. If a process is
+killed while the next request is being written, that record can be left half
+written; on resume, the queue may then fail to read that request and the
+following ones, or report a different queue length than what is stored.
+
+The frame disk queue types avoid this. Each request is stored as a frame that
+starts with a fixed marker and version, carries the payload length and a
+checksum, and ends with a commit marker. The frame is synced before it becomes
+visible to the scheduler, so a request is either fully stored or not stored at
+all. The available frame types are
+``scrapy.squeues.PickleFifoFrameDiskQueue``,
+``scrapy.squeues.PickleLifoFrameDiskQueue``,
+``scrapy.squeues.MarshalFifoFrameDiskQueue`` and
+``scrapy.squeues.MarshalLifoFrameDiskQueue``. They are opt-in through
+:setting:`SCHEDULER_DISK_QUEUE` (and :setting:`SCHEDULER_START_DISK_QUEUE`
+when separate start request queues are used); the default queue types keep
+their original on-disk format.
+
+Resuming a crawl
+~~~~~~~~~~~~~~~~
+
+When a frame queue is opened, it validates every frame it still owns:
+
+- If the only unreadable data is a partially written frame at the very end of
+  the storage, that frame was never committed and is discarded. The requests
+  committed before it are all still available, in the same FIFO or LIFO order.
+
+- If a frame in the middle of the storage is missing, truncated or has a bad
+  checksum, opening the queue raises an error and leaves every file in the job
+  directory untouched. The crawl does not skip past the damaged request, which
+  could silently drop product pages; inspect and repair or restart the job from
+  that job directory instead.
+
+A job directory created by a regular disk queue is opened and migrated
+automatically the first time a frame queue of the same order (FIFO or LIFO) is
+pointed at it. Frame files carry the marker and version described above, so a
+damaged frame file is reported as a frame error rather than misread as the
+older length-prefixed format. A job must still be resumed with the same Scrapy
+version, as described under :ref:`job-dir-scrapy-version-changes` below.
+
+Rolling back a failed write
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A write, flush or sync can fail because the disk is full or returns an error.
+In a frame queue the bytes of the unfinished frame are truncated back to the
+last committed frame before the error is propagated, so the failed request is
+not counted in the queue length and cannot be popped. The next successful
+push appends a complete frame after the intact data. Requests that could not
+be serialized are still kept only in memory, exactly as with the regular
+queues; they never reach the job directory and therefore cannot corrupt it.
+
+Only one crawl process may open a given frame queue directory. An advisory lock
+file is taken before any write and a second process opening the same directory
+fails fast instead of appending interleaved frames. Closing a queue more than
+once is harmless, and an empty queue removes its data and lock files.
+
 Pause limitations
 -----------------
 
@@ -105,6 +169,8 @@ Job pausing and resuming is only supported when the spider is paused by
 stopping it cleanly. Forced, sudden or otherwise unclean shutdown can lead to
 data corruption in the job directory, which may prevent the spider from
 resuming correctly.
+
+.. _job-dir-scrapy-version-changes:
 
 Scrapy version changes
 ----------------------
