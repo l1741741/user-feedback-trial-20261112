@@ -329,7 +329,8 @@ spider_idle
         * items being processed in the item pipeline
 
     If the idle state persists after all handlers of this signal have finished,
-    the engine starts closing the spider. After the spider has finished
+    the engine starts closing the spider, possibly after waiting for the
+    :setting:`ENGINE_IDLE_GRACE_PERIOD` seconds. After the spider has finished
     closing, the :signal:`spider_closed` signal is sent.
 
     You may raise a :exc:`~scrapy.exceptions.DontCloseSpider` exception to

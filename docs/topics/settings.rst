@@ -1493,6 +1493,33 @@ Set to ``0`` to disable the warning.
 
 See :ref:`event-loop-lag`.
 
+.. setting:: ENGINE_IDLE_GRACE_PERIOD
+
+ENGINE_IDLE_GRACE_PERIOD
+-----------------------
+
+Default: ``0.0``
+
+The number of seconds the engine keeps an idle spider open before closing
+it. When the spider has no scheduled or in-progress requests and no items
+being processed, the engine waits for this period instead of closing the
+spider immediately. If a new request is scheduled, an item is processed, or
+a :signal:`spider_idle` handler raises
+:exc:`~scrapy.exceptions.DontCloseSpider` during the wait, the close is
+canceled and the engine goes back to watching the spider. When the period
+elapses, the scheduler, the downloader, and the scraper are checked again,
+and the spider closes only if every component is still idle.
+
+Set to ``0`` to close the spider as soon as it becomes idle, the default
+behavior. The value must be a finite non-negative number of seconds.
+
+An explicit spider close, including one requested with
+:meth:`~scrapy.crawler.Crawler.stop_async` or raised as
+:exc:`~scrapy.exceptions.CloseSpider` from a :signal:`spider_idle`
+handler, is never delayed by this setting.
+
+.. versionadded:: VERSION
+
 .. setting:: EXTENSIONS
 
 EXTENSIONS

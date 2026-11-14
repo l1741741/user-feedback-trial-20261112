@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import warnings
 from enum import Enum
 from functools import partial
@@ -35,6 +36,8 @@ from scrapy.http.request import _active_crawler_scope
 from scrapy.utils._stopmode import _max_stop_mode, _normalize_stop_mode, _StopMode
 from scrapy.utils.asyncio import (
     AsyncioLoopingCall,
+    CallLaterResult,
+    call_later,
     create_looping_call,
     is_asyncio_available,
 )
@@ -197,6 +200,19 @@ class ExecutionEngine:
     ) -> None:
         self.crawler: Crawler = crawler
         self.settings: Settings = crawler.settings
+        grace_period = self.settings.getfloat("ENGINE_IDLE_GRACE_PERIOD")
+        if not math.isfinite(grace_period) or grace_period < 0:
+            raise ValueError(
+                "ENGINE_IDLE_GRACE_PERIOD must be a finite non-negative number"
+                f" of seconds, got {grace_period!r}"
+            )
+        self._idle_grace_period: float = grace_period
+        # A delayed call waiting for the idle grace period to pass, and the
+        # generation of the idle observation it belongs to. The generation is
+        # bumped every time an observation is made or canceled, so a delayed
+        # call from a previous observation or a previous spider is a no-op.
+        self._idle_close_call: CallLaterResult | None = None
+        self._idle_generation: int = 0
         self.signals: SignalManager = crawler.signals
         self.logformatter: LogFormatter = crawler.logformatter
         self._slot: _Slot | None = None
@@ -417,10 +433,17 @@ class ExecutionEngine:
         await self.close_spider_async(reason=reason, error=error)
 
     def pause(self) -> None:
+        # A paused engine does not process requests, so a grace period must not
+        # close the spider while the engine is paused. Unpausing starts a fresh
+        # idle observation via the slot heartbeat.
+        self._cancel_idle_grace()
         self.paused = True
 
     def unpause(self) -> None:
+        self._cancel_idle_grace()
         self.paused = False
+        if self._slot is not None:
+            self._slot.nextcall.schedule()
 
     async def _process_start_next(self) -> None:
         """Processes the next item or request from Spider.start().
@@ -463,6 +486,7 @@ class ExecutionEngine:
                     self.crawl(item_or_request)
                 else:
                     assert self._slot is not None
+                    self._cancel_idle_grace()
                     self.scraper._start_itemproc_nowait(item_or_request)
                     self._slot.nextcall.schedule()
 
@@ -500,6 +524,12 @@ class ExecutionEngine:
         if self._state is not EngineState.RUNNING or self.paused:
             return
         assert self._slot is not None
+
+        # A request that arrived since the last tick or the completion of an
+        # in-progress request or item makes the spider non-idle, canceling an
+        # idle grace period that may be counting down.
+        if self._idle_close_call is not None and not self.spider_is_idle():
+            self._cancel_idle_grace()
 
         while not self.needs_backout():
             if not self._start_scheduled_request():
@@ -623,6 +653,7 @@ class ExecutionEngine:
             raise RuntimeError(f"No open spider to crawl: {request}")
         if self._drained():
             raise RuntimeError(f"Cannot crawl {request}: the spider is closing")
+        self._cancel_idle_grace()
         self._schedule_request(request)
         self._slot.nextcall.schedule()  # type: ignore[union-attr]
 
@@ -685,6 +716,7 @@ class ExecutionEngine:
             if self._drained():
                 raise RuntimeError(f"Cannot download {request}: the spider is closing")
             assert self._slot is not None
+            self._cancel_idle_grace()
             self._slot.add_request(request)
             try:
                 response_or_request = await maybe_deferred_to_future(
@@ -851,15 +883,74 @@ class ExecutionEngine:
             if isinstance(x, Failure) and isinstance(x.value, ex)
         }
         if DontCloseSpider in detected_ex:
+            self._cancel_idle_grace()
             return
+        if not self.spider_is_idle():
+            self._cancel_idle_grace()
+            return
+        default_reason = "start_error" if self._start_error else "finished"
+        ex = detected_ex.get(
+            CloseSpider,
+            CloseSpider(reason=default_reason, error=self._start_error),
+        )
+        assert isinstance(ex, CloseSpider)  # typing
+        # A CloseSpider raised by a spider_idle handler is an explicit close and
+        # bypasses the grace period. A default close waits for it.
+        if CloseSpider in detected_ex or self._idle_grace_period == 0:
+            self._cancel_idle_grace()
+            self._idle_generation += 1
+            self._schedule_idle_close(ex.reason, ex.error)
+            return
+        self._start_idle_grace(ex.reason, ex.error)
+
+    def _start_idle_grace(self, reason: str, error: bool) -> None:
+        """Wait for the idle grace period before closing the spider.
+
+        If another idle observation is made while a grace period is already
+        counting down, it keeps the original deadline instead of scheduling a
+        second delayed close.
+        """
+        if self._idle_close_call is not None:
+            return
+        self._idle_generation += 1
+        generation = self._idle_generation
+        self._idle_close_call = call_later(
+            self._idle_grace_period,
+            self._idle_grace_fired,
+            generation,
+            reason,
+            error,
+        )
+
+    def _idle_grace_fired(
+        self, generation: int, reason: str, error: bool
+    ) -> None:
+        """Close the spider after the grace period, unless the idle observation
+        was superseded or new work arrived during the grace period."""
+        self._idle_close_call = None
+        if (
+            generation != self._idle_generation
+            or self._state is not EngineState.RUNNING
+            or self._slot is None
+        ):
+            return
+        # Re-check every component: a request may have been scheduled, or a
+        # download or an item may still be in progress, at deadline time.
+        self._idle_generation += 1
         if self.spider_is_idle():
-            default_reason = "start_error" if self._start_error else "finished"
-            ex = detected_ex.get(
-                CloseSpider,
-                CloseSpider(reason=default_reason, error=self._start_error),
-            )
-            assert isinstance(ex, CloseSpider)  # typing
-            _schedule_coro(self.close_spider_async(reason=ex.reason, error=ex.error))
+            self._schedule_idle_close(reason, error)
+
+    def _schedule_idle_close(self, reason: str, error: bool) -> None:
+        _schedule_coro(self.close_spider_async(reason=reason, error=error))
+
+    def _cancel_idle_grace(self) -> None:
+        """Cancel a pending idle grace period, if any, so that the next idle
+        observation starts a fresh one."""
+        if self._idle_close_call is None:
+            return
+        self._idle_close_call.cancel()
+        self._idle_close_call = None
+        self._idle_generation += 1
 
     def close_spider(
         self,
@@ -973,6 +1064,9 @@ class ExecutionEngine:
         assert self._slot is not None
         assert self.spider is not None
         spider = self.spider
+        # Explicit and error-driven closes take precedence over a pending idle
+        # grace period instead of waiting for it.
+        self._cancel_idle_grace()
         self._transition_to(EngineState.SPIDER_CLOSING)
         if self._start_request_processing_awaitable is not None:
             if (

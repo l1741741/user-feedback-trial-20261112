@@ -87,6 +87,7 @@ __all__ = [
     "DUPEFILTER_CLASS",
     "DUPEFILTER_DEBUG",
     "EDITOR",
+    "ENGINE_IDLE_GRACE_PERIOD",
     "EVENT_LOOP_LAG_THRESHOLD",
     "EXTENSIONS",
     "EXTENSIONS_BASE",
@@ -383,6 +384,8 @@ if sys.platform == "win32":
     EDITOR = "%s -m idlelib.idle"
 
 EVENT_LOOP_LAG_THRESHOLD = 10.0
+
+ENGINE_IDLE_GRACE_PERIOD = 0.0
 
 EXTENSIONS: dict[str, int] = {}
 EXTENSIONS_BASE = {
