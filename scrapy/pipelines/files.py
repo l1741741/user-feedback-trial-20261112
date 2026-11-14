@@ -42,6 +42,7 @@ from scrapy.pipelines.media import (
     FileInfo,
     FileInfoOrError,
     MediaPipeline,
+    MEDIA_SOURCE_URL_META_KEY,
     _MediaRequestFiltered,
 )
 from scrapy.utils._datatypes import CaseInsensitiveDict
@@ -709,6 +710,7 @@ class FilesPipeline(MediaPipeline):
 
     @_warn_spider_arg
     async def close_spider(self, spider: Spider | None = None) -> None:
+        await super().close_spider()
         close = getattr(self.store, "close", None)
         if close is not None:
             await ensure_awaitable(close())
@@ -921,7 +923,15 @@ class FilesPipeline(MediaPipeline):
             raise TypeError(
                 f"{self.files_urls_field} must be a list of URLs, got {type(urls).__name__}. "
             )
-        return [Request(u, callback=NO_CALLBACK) for u in urls]
+        return [self._build_media_request(u) for u in urls]
+
+    def _build_media_request(self, url: str) -> Request:
+        # Keep the URL exactly as the spider provided it. Request() percent-
+        # encodes it, so request.url (and the FileInfo "url" field) is the URL
+        # after Request normalization, while this meta value is the URL before.
+        request = Request(url, callback=NO_CALLBACK)
+        request.meta[MEDIA_SOURCE_URL_META_KEY] = url
+        return request
 
     def file_downloaded(
         self,
@@ -937,7 +947,16 @@ class FilesPipeline(MediaPipeline):
         self, results: list[FileInfoOrError], item: Any, info: MediaPipeline.SpiderInfo
     ) -> Any:
         with suppress(KeyError):
-            ItemAdapter(item)[self.files_result_field] = [x for ok, x in results if ok]
+            if self.results_by_source_index:
+                # Keep one record per input position, failures included, so the
+                # result indices stay aligned with the input URL list.
+                ItemAdapter(item)[self.files_result_field] = [
+                    record for _ok, record in results
+                ]
+            else:
+                ItemAdapter(item)[self.files_result_field] = [
+                    x for ok, x in results if ok
+                ]
         return item
 
     def file_path(

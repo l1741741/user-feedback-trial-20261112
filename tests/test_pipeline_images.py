@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import hashlib
 import io
@@ -11,6 +12,7 @@ from shutil import rmtree
 from tempfile import mkdtemp
 from typing import Any
 from unittest import mock
+from unittest.mock import MagicMock
 
 import attr
 import pytest
@@ -22,6 +24,7 @@ from scrapy.item import Field, Item
 from scrapy.pipelines.files import FilesPipeline, GCSFilesStore, S3FilesStore
 from scrapy.pipelines.images import ImageException, ImagesPipeline
 from scrapy.utils.misc import build_from_crawler
+from scrapy.utils.spider import DefaultSpider
 from scrapy.utils.test import get_crawler
 from tests.test_pipeline_files import CrawlerAwareStore
 from tests.utils.cloud import mock_google_cloud_storage
@@ -791,6 +794,80 @@ class TestImagesPipelineCustomSettings:
         assert files_store.POLICY is None
         assert images_store.POLICY == "authenticatedRead"
         assert GCSFilesStore.POLICY is None
+
+
+class TestImagesPipelineSourceIndex:
+    """MEDIA_RESULTS_BY_SOURCE_INDEX with the real ImagesPipeline and a local
+    fake downloader serving generated images (no network)."""
+
+    def setup_method(self):
+        self.tempdir = mkdtemp()
+        self.downloader = _ImageFakeDownloader()
+        crawler = get_crawler(
+            DefaultSpider,
+            {
+                "IMAGES_STORE": self.tempdir,
+                "MEDIA_RESULTS_BY_SOURCE_INDEX": True,
+            },
+        )
+        crawler.spider = crawler._create_spider()
+        crawler.engine = MagicMock(download_async=self.downloader)
+        self.pipeline = build_from_crawler(ImagesPipeline, crawler)
+        self.pipeline.open_spider()
+
+    def teardown_method(self):
+        rmtree(self.tempdir)
+
+    @coroutine_test
+    async def test_duplicate_image_downloaded_once_with_two_positions(self):
+        _, buf = _create_image("JPEG", "RGB", (10, 10), (1, 2, 3))
+        body = buf.getvalue()
+        shared = "http://example.com/shared.jpg"
+        other = "http://example.com/other.jpg"
+        item = {"image_urls": [shared, other, shared]}
+
+        task = asyncio.ensure_future(self.pipeline.process_item(item))
+        await self.downloader.wait_pending(2)
+        assert self.downloader.attempts == {shared: 1, other: 1}
+        self.downloader.succeed(shared, Response(shared, body=body))
+        self.downloader.succeed(other, Response(other, body=body))
+        processed = await task
+
+        images = ItemAdapter(processed)["images"]
+        assert [r["source_index"] for r in images] == [0, 1, 2]
+        assert [r["source_url"] for r in images] == [shared, other, shared]
+        # Both positions of the shared URL point at the one stored image.
+        assert images[0]["path"] == images[2]["path"]
+        assert images[0]["checksum"] == images[2]["checksum"]
+        assert (Path(self.tempdir) / images[0]["path"]).exists()
+        # Two source positions but one actual image download.
+        stats = self.pipeline.crawler.stats.get_stats()
+        assert stats["image_source_count"] == 3
+        assert stats["image_status_count/downloaded"] == 2
+
+
+class _ImageFakeDownloader:
+    def __init__(self) -> None:
+        self.attempts: dict[str, int] = {}
+        self._pending: dict[str, asyncio.Future[Response]] = {}
+
+    async def __call__(self, request: Request) -> Response:
+        self.attempts[request.url] = self.attempts.get(request.url, 0) + 1
+        future: asyncio.Future[Response] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._pending[request.url] = future
+        return await future
+
+    async def wait_pending(self, count: int) -> None:
+        for _ in range(100):
+            if len(self._pending) == count:
+                return
+            await asyncio.sleep(0)
+        raise AssertionError(f"expected {count} pending downloads")
+
+    def succeed(self, url: str, response: Response) -> None:
+        self._pending.pop(url).set_result(response)
 
 
 def _create_image(format_: str, *a: Any, **kw: Any) -> tuple[Image.Image, io.BytesIO]:

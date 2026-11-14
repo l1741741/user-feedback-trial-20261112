@@ -710,6 +710,168 @@ class TestFilesPipeline:
             list(pipeline.get_media_requests(item, None))  # type: ignore[arg-type]
 
 
+class TestFilesPipelineSourceIndex:
+    """End-to-end coverage of MEDIA_RESULTS_BY_SOURCE_INDEX with the real
+    FilesPipeline, a local fake downloader and a filesystem store (no network).
+    """
+
+    def setup_method(self):
+        self.tempdir = mkdtemp()
+        self.downloader = _CountingFakeDownloader()
+        crawler = get_crawler(
+            DefaultSpider,
+            {
+                "FILES_STORE": self.tempdir,
+                "MEDIA_RESULTS_BY_SOURCE_INDEX": True,
+            },
+        )
+        crawler.spider = crawler._create_spider()
+        crawler.engine = MagicMock(download_async=self.downloader)
+        self.pipeline = build_from_crawler(FilesPipeline, crawler)
+        self.pipeline.open_spider()
+
+    def teardown_method(self):
+        rmtree(self.tempdir)
+
+    def _response(self, url: str, *, body: bytes = b"data") -> Response:
+        return Response(url, body=body)
+
+    @staticmethod
+    def _item(*urls: str) -> dict[str, Any]:
+        # A plain dict, with a real list, so the pipeline keeps the ordering.
+        return {"file_urls": list(urls)}
+
+    @coroutine_test
+    async def test_result_aligned_with_input_urls_including_failure(self):
+        ok_url = "http://example.com/ok.txt"
+        broken_url = "http://example.com/broken.txt"
+        item = self._item(ok_url, broken_url, ok_url)
+        item_task = asyncio.ensure_future(self.pipeline.process_item(item))
+        await self.downloader.wait_pending(2)
+
+        # One distinct URL is downloaded once despite the repeated position.
+        assert self.downloader.attempts == {ok_url: 1, broken_url: 1}
+        self.downloader.fail(broken_url, FileException("download-error"))
+        self.downloader.succeed(ok_url, self._response(ok_url))
+        processed = await item_task
+
+        records = ItemAdapter(processed)["files"]
+        assert [r["source_index"] for r in records] == [0, 1, 2]
+        assert [r["source_url"] for r in records] == [
+            ok_url,
+            broken_url,
+            ok_url,
+        ]
+        # The failure stays in the middle instead of shifting the last index.
+        assert "path" in records[0] and "checksum" in records[0]
+        assert records[1]["error_type"] == "scrapy.pipelines.media.FileException"
+        assert records[1]["source_index"] == 1
+        assert records[1]["source_url"] == broken_url
+        assert records[2]["path"] == records[0]["path"]
+        assert records[2]["checksum"] == records[0]["checksum"]
+        # The stored file really exists and the checksum matches its contents.
+        assert (Path(self.tempdir) / records[0]["path"]).exists()
+
+    @coroutine_test
+    async def test_two_items_sharing_url_keep_independent_records(self):
+        shared = "http://example.com/shared.txt"
+        item1 = self._item(shared, "http://example.com/a.txt")
+        item2 = self._item(shared, "http://example.com/b.txt")
+        task1 = asyncio.ensure_future(self.pipeline.process_item(item1))
+        task2 = asyncio.ensure_future(self.pipeline.process_item(item2))
+        await self.downloader.wait_pending(3)
+        assert self.downloader.attempts[shared] == 1
+        for url in (shared, "http://example.com/a.txt", "http://example.com/b.txt"):
+            self.downloader.succeed(url, self._response(url))
+        processed1, processed2 = await asyncio.gather(task1, task2)
+
+        records1 = ItemAdapter(processed1)["files"]
+        records2 = ItemAdapter(processed2)["files"]
+        assert records1 is not records2
+        assert [r["source_url"] for r in records1] == [
+            shared,
+            "http://example.com/a.txt",
+        ]
+        assert [r["source_url"] for r in records2] == [
+            shared,
+            "http://example.com/b.txt",
+        ]
+        records1[0]["path"] = "tampered"
+        assert records2[0]["path"] != "tampered"
+
+    @coroutine_test
+    async def test_cache_hit_does_not_redownload_and_keeps_positions(self):
+        url = "http://example.com/cached.txt"
+        first_task = asyncio.ensure_future(
+            self.pipeline.process_item(self._item(url))
+        )
+        await self.downloader.wait_pending(1)
+        self.downloader.succeed(url, self._response(url))
+        first = await first_task
+        first_record = ItemAdapter(first)["files"][0]
+        assert self.downloader.attempts == {url: 1}
+
+        second = await self.pipeline.process_item(self._item(url, url))
+        records = ItemAdapter(second)["files"]
+        assert len(records) == 2
+        assert [r["source_index"] for r in records] == [0, 1]
+        assert all(r["checksum"] == first_record["checksum"] for r in records)
+        # Still a single actual download: both positions hit the cache.
+        assert self.downloader.attempts == {url: 1}
+
+    @coroutine_test
+    async def test_source_and_download_stats_are_separate(self):
+        url = "http://example.com/stat.txt"
+        missing = "http://example.com/missing.txt"
+        task = asyncio.ensure_future(
+            self.pipeline.process_item(self._item(url, url, missing))
+        )
+        await self.downloader.wait_pending(2)
+        self.downloader.succeed(url, self._response(url))
+        self.downloader.fail(missing, FileException("download-error"))
+        await task
+
+        stats = self.pipeline.crawler.stats.get_stats()
+        # Three input positions: two sharing the downloaded URL, one failed.
+        assert stats["file_source_count"] == 3
+        assert stats["file_source_status_count/ok"] == 2
+        assert stats["file_source_status_count/failed"] == 1
+        # The download-family stats count actual downloads, not positions:
+        # the shared URL was downloaded a single time.
+        assert stats["file_count"] == 1
+        assert stats["file_status_count/downloaded"] == 1
+
+
+class _CountingFakeDownloader:
+    """Fake engine.download_async with manually resolved futures and download
+    attempt counting, so fingerprint merging and cache hits are observable."""
+
+    def __init__(self) -> None:
+        self.attempts: dict[str, int] = {}
+        self._pending: dict[str, asyncio.Future[Response]] = {}
+
+    async def __call__(self, request: Request) -> Response:
+        self.attempts[request.url] = self.attempts.get(request.url, 0) + 1
+        future: asyncio.Future[Response] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._pending[request.url] = future
+        return await future
+
+    async def wait_pending(self, count: int) -> None:
+        for _ in range(100):
+            if len(self._pending) == count:
+                return
+            await asyncio.sleep(0)
+        raise AssertionError(f"expected {count} pending downloads")
+
+    def succeed(self, url: str, response: Response) -> None:
+        self._pending.pop(url).set_result(response)
+
+    def fail(self, url: str, exception: BaseException) -> None:
+        self._pending.pop(url).set_exception(exception)
+
+
 class TestFilesPipelineFieldsMixin(ABC):
     @property
     @abstractmethod

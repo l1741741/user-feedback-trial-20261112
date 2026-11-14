@@ -171,6 +171,7 @@ __all__ = [
     "MAIL_TLS",
     "MAIL_USER",
     "MEDIA_CACHE_SIZE",
+    "MEDIA_RESULTS_BY_SOURCE_INDEX",
     "MEDIA_STORAGES",
     "MEDIA_STORAGES_BASE",
     "MEMDEBUG_ENABLED",
@@ -528,6 +529,11 @@ MAIL_SSL = False
 MAIL_TLS = False
 
 MEDIA_CACHE_SIZE = -1
+
+# When enabled, media pipelines (FilesPipeline, ImagesPipeline and custom
+# MediaPipeline subclasses) deliver one result record per input URL position,
+# including explicit failure records, instead of only successful results.
+MEDIA_RESULTS_BY_SOURCE_INDEX = False
 
 MEDIA_STORAGES: dict[str, str] = {}
 MEDIA_STORAGES_BASE = {

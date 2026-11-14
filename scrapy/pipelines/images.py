@@ -17,7 +17,6 @@ from itemadapter import ItemAdapter
 
 from scrapy.exceptions import NotConfigured, ScrapyDeprecationWarning
 from scrapy.http import Request, Response
-from scrapy.http.request import NO_CALLBACK
 from scrapy.pipelines.files import FilesPipeline, _checksum_algorithm
 from scrapy.pipelines.media import FileException
 from scrapy.utils.defer import ensure_awaitable
@@ -282,13 +281,20 @@ class ImagesPipeline(FilesPipeline):
             raise TypeError(
                 f"{self.images_urls_field} must be a list of URLs, got {type(urls).__name__}. "
             )
-        return [Request(u, callback=NO_CALLBACK) for u in urls]
+        return [self._build_media_request(url) for url in urls]
 
     def item_completed(
         self, results: list[FileInfoOrError], item: Any, info: MediaPipeline.SpiderInfo
     ) -> Any:
         with suppress(KeyError):
-            ItemAdapter(item)[self.images_result_field] = [x for ok, x in results if ok]
+            if self.results_by_source_index:
+                ItemAdapter(item)[self.images_result_field] = [
+                    record for _ok, record in results
+                ]
+            else:
+                ItemAdapter(item)[self.images_result_field] = [
+                    x for ok, x in results if ok
+                ]
         return item
 
     def file_path(

@@ -739,6 +739,156 @@ recently used outcomes to keep, or to ``0`` to keep none:
 
     MEDIA_CACHE_SIZE = 10000
 
+Keeping one result per input URL position
+-----------------------------------------
+
+.. setting:: MEDIA_RESULTS_BY_SOURCE_INDEX
+
+.. versionadded:: 2.21.0
+
+When several items, or several positions of the same item, reference the same
+media URL, the media pipelines download that URL only once, following the
+request fingerprint, and reuse the outcome. By default the result list handed
+to :meth:`~item_completed` follows each request's position, but
+:class:`~scrapy.pipelines.files.FilesPipeline` and
+:class:`~scrapy.pipelines.images.ImagesPipeline` then drop failed entries when
+writing the ``files`` / ``images`` field, so a failure shifts the indices of
+the entries that follow it, and there is no machine-readable description of
+the failed URL.
+
+Enable :setting:`MEDIA_RESULTS_BY_SOURCE_INDEX` to keep exactly one record per
+input URL position, failures included:
+
+.. code-block:: python
+
+    MEDIA_RESULTS_BY_SOURCE_INDEX = True
+
+In this mode, downloads are still merged by request fingerprint (a duplicated
+image is fetched once), but every input position gets its own record placed
+back at its original index. A successful record is a dict with the keys:
+
+* ``source_index`` (int) — 0-based position of the source URL in the input
+  URL list (and therefore in the requests returned by
+  :meth:`~get_media_requests`).
+
+* ``source_url`` (str) — the URL exactly as it appeared in the item, before
+  :class:`~scrapy.http.Request` construction and URL percent-encoding.
+
+* ``url`` (str) — the request URL after Request URL normalization. This is
+  the same value as the ``url`` key of a regular :ref:`file info
+  <topics-media-pipeline-override>` dict; redirects do not change it.
+
+* ``path`` (str), ``checksum`` (str or ``None``) and ``status`` (str) — the
+  actual download outcome, identical for every position that shares the URL.
+
+A failed position is kept in place as a record with the keys:
+
+* ``source_index`` (int) and ``source_url`` (str) — as above.
+
+* ``url`` (str or ``None``) — the normalized request URL, when a request was
+  built.
+
+* ``error_type`` (str) — dotted class name of the exception, e.g.
+  ``"scrapy.pipelines.media.FileException"``.
+
+* ``error_message`` (str) — the string representation of that exception.
+
+Each item keeps its own independent list of records, so mutating one item's
+results never affects another item even when they reference the same URL.
+Cancelling the wait of one position, a request carrying ``dont_filter`` and
+cache hits do not change what the other items download: the shared download is
+shielded and completed once.
+
+Two families of stats are kept separate. The usual download stats
+(``file_count`` / ``image_count`` and ``file_status_count/...`` /
+``image_status_count/...``) count actual downloader and store activity, while
+the new stats count input positions:
+
+* ``file_source_count`` / ``image_source_count`` — number of source positions
+  processed.
+
+* ``file_source_status_count/ok`` (or ``failed``) /
+  ``image_source_status_count/ok`` (or ``failed``) — number of successful or
+  failed source positions.
+
+When the spider closes while some positions are still in flight, those
+positions are released as failure records whose ``error_type`` is
+``"scrapy.pipelines.media._MediaPipelineClosed"`` instead of being left
+waiting. The setting defaults to ``False``, in which case the historical
+:meth:`~item_completed` behavior is unchanged.
+
+Product collection example
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A product item can carry both ``image_urls`` and ``file_urls``, and the same
+URL can appear in several products or more than once in the same list. The
+spider and the item below are unchanged by the setting; they keep yielding the
+raw URL lists:
+
+.. code-block:: python
+
+    import scrapy
+
+
+    class ProductItem(scrapy.Item):
+        sku = scrapy.Field()
+        image_urls = scrapy.Field()
+        file_urls = scrapy.Field()
+        images = scrapy.Field()
+        files = scrapy.Field()
+
+
+    class ProductSpider(scrapy.Spider):
+        name = "products"
+        start_urls = ["https://shop.example/products"]
+
+        def parse(self, response):
+            for card in response.css(".product-card"):
+                yield ProductItem(
+                    sku=card.attrib["data-sku"],
+                    image_urls=card.css("img::attr(src)").getall(),
+                    file_urls=card.css("a.manual::attr(href)").getall(),
+                )
+
+With the setting enabled, a later cleaning pipeline can read every position
+back at its original index and rely on the explicit failure class instead of
+parsing log output. Each record either carries the real ``path`` and
+``checksum`` or an ``error_type`` / ``error_message`` pair:
+
+.. code-block:: python
+
+    from itemadapter import ItemAdapter
+
+
+    class ProductCleaningPipeline:
+        def process_item(self, item, spider):
+            adapter = ItemAdapter(item)
+            for field in ("images", "files"):
+                for record in adapter.get(field, []):
+                    if "error_type" in record:
+                        # Keep the row and its index; flag it for a retry.
+                        record["needs_retry"] = True
+                    else:
+                        record["stored_uri"] = f"s3://bucket/{record['path']}"
+            return item
+
+Configure both pipelines as usual, and turn the mode on in the settings:
+
+.. code-block:: python
+
+    ITEM_PIPELINES = {
+        "scrapy.pipelines.images.ImagesPipeline": 1,
+        "scrapy.pipelines.files.FilesPipeline": 2,
+        "myproject.pipelines.ProductCleaningPipeline": 3,
+    }
+    IMAGES_STORE = "s3://bucket/images"
+    FILES_STORE = "s3://bucket/files"
+    MEDIA_RESULTS_BY_SOURCE_INDEX = True
+
+Two products referencing the same image still trigger a single download, yet
+each product receives its own record at its own index; editing one product's
+record never touches the other product's list.
+
 .. _topics-media-pipeline-override:
 
 Extending the Media Pipelines
