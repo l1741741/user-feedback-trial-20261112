@@ -22,7 +22,11 @@ from scrapy.linkextractors import IGNORED_EXTENSIONS, _matches
 from scrapy.utils.httpobj import urlparse_cached
 from scrapy.utils.misc import arg_to_iter, rel_has_nofollow
 from scrapy.utils.python import unique as unique_list
-from scrapy.utils.url import url_is_from_any_domain
+from scrapy.utils.url import (
+    _normalize_origin,
+    _origin_matches,
+    url_is_from_any_domain,
+)
 
 if TYPE_CHECKING:
     from lxml.html import HtmlElement
@@ -222,6 +226,20 @@ class LxmlLinkExtractor:
         .. versionadded:: 2.20.0
     :type schemes: str or list
 
+    :param allowed_origins: a single value or list of HTTP or HTTPS origins
+        (``scheme://host[:port]``) that extracted links must share. Each value
+        must be an origin without user information, path, query or fragment;
+        hosts, trailing dots, internationalized domain names, IPv6 addresses
+        and ports are normalized. Relative links are resolved against the
+        document's base URL (see the HTML ``<base>`` tag) and the response URL
+        first, and the origin of the resulting absolute URL is matched
+        exactly, so different schemes or ports, and similar but distinct
+        hosts, do not match. Pass an empty list to extract no links. If not
+        given, links are not filtered by origin.
+
+        .. versionadded:: VERSION
+    :type allowed_origins: str or list
+
     :param restrict_xpaths: an XPath (or list of XPaths) that defines regions
         inside the response where links should be extracted. If given, only the
         text selected by those XPaths will be scanned for links.
@@ -341,6 +359,7 @@ class LxmlLinkExtractor:
         deny_tags: str | Iterable[str] = (),
         deny_attrs: str | Iterable[str] = (),
         schemes: str | Iterable[str] | None = None,
+        allowed_origins: str | Iterable[str] | None = None,
     ):
         tags, attrs = set(arg_to_iter(tags)), set(arg_to_iter(attrs))
         deny_tags, deny_attrs = (
@@ -373,6 +392,11 @@ class LxmlLinkExtractor:
         self.schemes: set[str] | None = (
             None if schemes is None else set(arg_to_iter(schemes))
         )
+        self.allowed_origins: set[str] | None = (
+            None
+            if allowed_origins is None
+            else {_normalize_origin(origin) for origin in arg_to_iter(allowed_origins)}
+        )
         self.restrict_text: list[re.Pattern[str]] = self._compile_regexes(restrict_text)
 
     @staticmethod
@@ -385,6 +409,10 @@ class LxmlLinkExtractor:
     def _link_allowed(self, link: Link, schemes: set[str]) -> bool:
         parsed_url = urlparse_cached(link.url)
         if schemes and parsed_url.scheme not in schemes:
+            return False
+        if self.allowed_origins is not None and not _origin_matches(
+            link.url, self.allowed_origins
+        ):
             return False
         if self.allow_res and not _matches(link.url, self.allow_res):
             return False

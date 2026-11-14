@@ -11,6 +11,8 @@ from scrapy.linkextractors import IGNORED_EXTENSIONS
 from scrapy.spiders import Spider
 from scrapy.utils.url import (
     _is_filesystem_path,
+    _normalize_origin,
+    _origin_matches,
     add_http_if_no_scheme,
     guess_scheme,
     strip_url,
@@ -424,3 +426,98 @@ class TestStripUrl:
 )
 def test__is_filesystem_path(path: str, expected: bool) -> None:
     assert _is_filesystem_path(path) == expected
+
+
+@pytest.mark.parametrize(
+    ("origin", "expected"),
+    [
+        # Scheme and host case
+        ("http://example.com", "http://example.com"),
+        ("HTTP://EXAMPLE.COM", "http://example.com"),
+        # Trailing dot
+        ("http://example.com.", "http://example.com"),
+        # Default ports are dropped
+        ("http://example.com:80", "http://example.com"),
+        ("https://example.com:443", "https://example.com"),
+        # Non-default ports are kept
+        ("http://example.com:8080", "http://example.com:8080"),
+        ("https://example.com:8080", "https://example.com:8080"),
+        # IPv6 literals are bracketed and compressed
+        ("http://[2001:DB8::1]", "http://[2001:db8::1]"),
+        ("http://[2001:db8::1]:80", "http://[2001:db8::1]"),
+        ("http://[::1]:8080", "http://[::1]:8080"),
+        # IDNA: Unicode and punycode normalize to the same origin
+        ("http://bücher.example", "http://xn--bcher-kva.example"),
+        ("http://xn--bcher-kva.example", "http://xn--bcher-kva.example"),
+        ("http://例え.jp:8443", "http://xn--r8jz45g.jp:8443"),
+    ],
+)
+def test_normalize_origin(origin: str, expected: str) -> None:
+    assert _normalize_origin(origin) == expected
+
+
+def test_normalize_origin_equivalent_inputs() -> None:
+    variants = [
+        "http://example.com",
+        "http://EXAMPLE.com",
+        "http://example.com.",
+        "http://example.com:80",
+    ]
+    assert len({_normalize_origin(origin) for origin in variants}) == 1
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "ftp://example.com",  # unsupported scheme
+        "file:///etc/passwd",
+        "mailto:someone@example.com",
+        "http://user:pass@example.com",  # user info
+        "http://user@example.com",
+        "http://example.com/",  # path
+        "http://example.com/path",
+        "http://example.com?q=1",  # query
+        "http://example.com#fragment",  # fragment
+        "http://example.com;params",  # parameters hidden in the netloc
+        "http://example.com\\@evil.com",
+        "http://",  # missing host
+        "http://example.com:0",  # invalid port
+        "http://example.com:65536",  # port out of range
+        "http://example.com:not-a-port",
+        "http://[bad]",  # malformed IPv6 literal
+        "http://[fe80::1%eth0]",  # IPv6 zone id
+        "http://example.com ",  # whitespace in the host
+        "not-a-url",
+        "://example.com",
+    ],
+)
+def test_normalize_origin_invalid(origin: str) -> None:
+    with pytest.raises(ValueError, match="Invalid origin|Invalid host"):
+        _normalize_origin(origin)
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        # The origin is taken from the final absolute URL; path, query and
+        # fragment do not matter but scheme, host and port do.
+        ("https://example.com/page?a=1#frag", True),
+        ("https://example.com:443/page", True),
+        ("https://EXAMPLE.COM./page", True),
+        ("http://example.com/page", False),  # cross-protocol
+        ("https://example.com:8080/page", False),  # non-default port
+        ("https://notexample.com/page", False),  # similar but distinct host
+        ("https://ample.com/page", False),
+        ("ftp://example.com/page", False),  # other scheme
+        ("mailto:someone@example.com", False),
+        ("not a url", False),
+        ("", False),
+    ],
+)
+def test_origin_matches(url: str, expected: bool) -> None:
+    origins = {_normalize_origin("https://example.com")}
+    assert _origin_matches(url, origins) is expected
+
+
+def test_origin_matches_empty_set() -> None:
+    assert not _origin_matches("http://example.com/page", set())

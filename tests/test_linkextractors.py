@@ -923,6 +923,256 @@ class TestLxmlLinkExtractor:
         bad_link = Link("should_have_prefix.example")
         assert not LxmlLinkExtractor()._link_allowed(bad_link, {"http", "https"})
 
+    @pytest.mark.parametrize(
+        ("configured", "expected"),
+        [
+            # Case, trailing dot and the default port normalize to one origin.
+            (
+                ["HTTP://EXAMPLE.COM.", "http://example.com:80"],
+                {"http://example.com"},
+            ),
+            # IDNA and non-default ports are normalized but kept distinct.
+            (
+                ["http://bücher.example", "http://example.com:8080"],
+                {"http://xn--bcher-kva.example", "http://example.com:8080"},
+            ),
+            # IPv6 literals are bracketed and compressed.
+            (["http://[2001:DB8::1]:8080"], {"http://[2001:db8::1]:8080"}),
+            # An empty list is kept as an empty set and allows nothing.
+            ([], set()),
+            # A single value is accepted like a list.
+            ("http://example.com", {"http://example.com"}),
+        ],
+    )
+    def test_allowed_origins_normalized(
+        self, configured: Any, expected: set[str]
+    ) -> None:
+        lx = LxmlLinkExtractor(allowed_origins=configured)
+        assert lx.allowed_origins == expected
+
+    @pytest.mark.parametrize(
+        "origin",
+        [
+            "ftp://example.com",
+            "http://user:pass@example.com",
+            "http://example.com/",
+            "http://example.com/path",
+            "http://example.com?q=1",
+            "http://example.com#frag",
+            "http://example.com:65536",
+            "http://[bad]",
+        ],
+    )
+    def test_allowed_origins_invalid(self, origin: str) -> None:
+        with pytest.raises(ValueError, match="Invalid origin|Invalid host"):
+            LxmlLinkExtractor(allowed_origins=[origin])
+
+    def test_allowed_origins_filters_links(self) -> None:
+        html = b"""<html><body>
+        <a href="http://example.com/same">same host</a>
+        <a href="https://example.com/cross-scheme">cross scheme</a>
+        <a href="http://example.com:8080/port">non-default port</a>
+        <a href="http://example.com:80/default-port">explicit default port</a>
+        <a href="http://notexample.com/similar">similar host</a>
+        <a href="http://other.example.org/other">other host</a>
+        <a href="ftp://example.com/ftp">ftp scheme</a>
+        </body></html>"""
+        response = HtmlResponse("https://response.example/page", body=html)
+        lx = LxmlLinkExtractor(allowed_origins=["http://example.com"])
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/same",
+            "http://example.com:80/default-port",
+        ]
+
+    def test_allowed_origins_multiple(self) -> None:
+        html = b"""<html><body>
+        <a href="http://example.com/a">a</a>
+        <a href="https://secure.example.org/b">b</a>
+        <a href="http://[2001:db8::1]:9000/c">c</a>
+        <a href="http://else.example.net/d">d</a>
+        </body></html>"""
+        response = HtmlResponse("http://response.example/", body=html)
+        lx = LxmlLinkExtractor(
+            allowed_origins=[
+                "http://example.com",
+                "https://secure.example.org",
+                "http://[2001:db8::1]:9000",
+            ]
+        )
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/a",
+            "https://secure.example.org/b",
+            "http://[2001:db8::1]:9000/c",
+        ]
+
+    def test_allowed_origins_empty_allows_nothing(self) -> None:
+        html = b'<a href="http://example.com/a">a</a><a href="/b">b</a>'
+        response = HtmlResponse("http://example.com/index.html", body=html)
+        assert LxmlLinkExtractor(allowed_origins=[]).extract_links(response) == []
+
+    def test_allowed_origins_uses_base_tag_for_relative_links(self) -> None:
+        # Relative hrefs are resolved against the <base> tag, not the response
+        # URL, and the origin of the resolved URL decides.
+        html = b"""<html><head>
+        <base href="http://base.example:8080/root/" />
+        </head><body>
+        <a href="page.html">base relative</a>
+        <a href="/absolute.html">base absolute</a>
+        <a href="http://example.com/external">external</a>
+        </body></html>"""
+        response = HtmlResponse("https://response.example/index", body=html)
+
+        lx = LxmlLinkExtractor(
+            allowed_origins=["http://base.example:8080", "http://example.com"]
+        )
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://base.example:8080/root/page.html",
+            "http://base.example:8080/absolute.html",
+            "http://example.com/external",
+        ]
+
+        other = LxmlLinkExtractor(allowed_origins=["https://response.example"])
+        assert other.extract_links(response) == []
+
+    def test_allowed_origins_without_base_tag_uses_response_url(self) -> None:
+        html = b'<a href="page.html">relative</a><a href="/root/x">absolute</a>'
+        response = HtmlResponse("https://response.example:8443/index", body=html)
+        lx = LxmlLinkExtractor(allowed_origins=["https://response.example:8443"])
+        assert [link.url for link in lx.extract_links(response)] == [
+            "https://response.example:8443/page.html",
+            "https://response.example:8443/root/x",
+        ]
+
+    def test_allowed_origins_keeps_text_nofollow_fragment(self) -> None:
+        html = b"""<html><body>
+        <a href="/a#section" rel="nofollow">followed text</a>
+        <a href="http://example.com/b">plain</a>
+        </body></html>"""
+        response = HtmlResponse("http://example.com/index", body=html)
+        lx = LxmlLinkExtractor(allowed_origins=["http://example.com"])
+        assert lx.extract_links(response) == [
+            Link(
+                url="http://example.com/a#section",
+                text="followed text",
+                nofollow=True,
+            ),
+            Link(url="http://example.com/b", text="plain"),
+        ]
+
+    def test_allowed_origins_with_canonicalize(self) -> None:
+        html = b'<a href="/p?b=2&amp;a=1">x</a><a href="http://other.example/p">y</a>'
+        response = HtmlResponse("http://example.com/", body=html)
+        lx = LxmlLinkExtractor(
+            allowed_origins=["http://example.com"], canonicalize=True
+        )
+        assert lx.extract_links(response) == [
+            Link(url="http://example.com/p?a=1&b=2", text="x")
+        ]
+
+    def test_allowed_origins_combines_with_other_filters(self) -> None:
+        html = b"""<html><body>
+        <a href="http://example.com/keep.html">keep</a>
+        <a href="http://example.com/skip.jpg">denied extension</a>
+        <a href="http://example.com/deny.html">denied regex</a>
+        <a href="http://other.example/keep.html">other origin</a>
+        </body></html>"""
+        response = HtmlResponse("http://response.example/", body=html)
+        lx = LxmlLinkExtractor(
+            allowed_origins=["http://example.com"], deny=("deny",)
+        )
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/keep.html"
+        ]
+
+    def test_allowed_origins_with_restrict_selectors(self) -> None:
+        html = b"""<html><body>
+        <div id="in"><a href="http://example.com/in">in</a></div>
+        <div id="out"><a href="http://example.com/out">out</a></div>
+        </body></html>"""
+        response = HtmlResponse("http://response.example/", body=html)
+        lx = LxmlLinkExtractor(
+            allowed_origins=["http://example.com"],
+            restrict_xpaths='//div[@id="in"]',
+        )
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/in"
+        ]
+
+    def test_allowed_origins_idna_and_ipv6(self) -> None:
+        html = b"""<html><head>
+        <base href="http://xn--bcher-kva.example/" />
+        </head><body>
+        <a href="/idn">IDNA host through the base tag</a>
+        <a href="http://[2001:DB8::1]/v6">IPv6 host</a>
+        <a href="http://[2001:db8::1]:80/default">IPv6 default port</a>
+        </body></html>"""
+        response = HtmlResponse("http://response.example/", body=html)
+        lx = LxmlLinkExtractor(
+            allowed_origins=[
+                "http://bücher.example",
+                "http://[2001:db8::1]",
+            ]
+        )
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://xn--bcher-kva.example/idn",
+            "http://[2001:db8::1]/v6",
+            "http://[2001:db8::1]:80/default",
+        ]
+
+    def test_allowed_origins_with_process_value_none(self) -> None:
+        def drop_first(value: str) -> str | None:
+            return None if value.endswith("drop.html") else value
+
+        html = b"""<html><body>
+        <a href="http://example.com/drop.html">dropped</a>
+        <a href="http://example.com/keep.html">kept</a>
+        </body></html>"""
+        response = HtmlResponse("http://response.example/", body=html)
+        lx = LxmlLinkExtractor(
+            allowed_origins=["http://example.com"], process_value=drop_first
+        )
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/keep.html"
+        ]
+
+    def test_allowed_origins_repeated_calls_are_independent(self) -> None:
+        first = HtmlResponse(
+            "http://response.example/",
+            body=b'<a href="http://example.com/a">a</a>',
+        )
+        second = HtmlResponse(
+            "http://response.example/",
+            body=b'<a href="http://example.com/b">b</a>',
+        )
+        lx = LxmlLinkExtractor(allowed_origins=["http://example.com"])
+        assert [link.url for link in lx.extract_links(first)] == [
+            "http://example.com/a"
+        ]
+        # The deduplication state of the first call must not leak into this one.
+        assert [link.url for link in lx.extract_links(second)] == [
+            "http://example.com/b"
+        ]
+
+    def test_allowed_origins_does_not_mutate_inputs(self) -> None:
+        html = b'<a href="http://example.com/a">a</a>'
+        response = HtmlResponse("http://response.example/", body=html)
+        configured = ["http://example.com"]
+        lx = LxmlLinkExtractor(allowed_origins=configured)
+        lx.extract_links(response)
+        assert configured == ["http://example.com"]
+        assert response.url == "http://response.example/"
+
+    def test_allowed_origins_default_disables_origin_filtering(self) -> None:
+        html = b"""<html><body>
+        <a href="http://example.com/a">a</a>
+        <a href="https://other.example.org/b">b</a>
+        <a href="/relative">c</a>
+        </body></html>"""
+        response = HtmlResponse("http://response.example/", body=html)
+        lx = LxmlLinkExtractor()
+        assert lx.allowed_origins is None
+        assert len(lx.extract_links(response)) == 3
+
 
 class TestLxmlParserLinkExtractor:
     def test_extract_links(self):

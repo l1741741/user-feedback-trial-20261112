@@ -5,10 +5,11 @@ library.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import warnings
 from typing import TYPE_CHECKING, TypeAlias
-from urllib.parse import ParseResult, urljoin, urlunparse
+from urllib.parse import ParseResult, urljoin, urlparse, urlunparse
 
 import w3lib.url
 from w3lib.url import any_to_uri, parse_url, safe_url_string
@@ -62,6 +63,97 @@ def _spider_domains(spider: type[Spider]) -> Iterable[str]:
 def url_is_from_spider(url: UrlT | Request | Response, spider: type[Spider]) -> bool:
     """Return True if the url belongs to the given spider"""
     return url_is_from_any_domain(url, _spider_domains(spider))
+
+
+def _normalize_origin(url: str) -> str:
+    """Return the normalized origin of *url*, an absolute HTTP or HTTPS URL.
+
+    The origin is the ``scheme://host[:port]`` tuple. Hosts are lowercased,
+    a trailing dot is removed, internationalized domain names are encoded with
+    IDNA, IPv6 addresses are compressed, and default ports (80 for HTTP, 443
+    for HTTPS) are omitted. Raise :class:`ValueError` if *url* is not such an
+    origin: it must carry no user information, path, query, fragment or
+    parameters.
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:  # malformed IPv6 literal
+        raise ValueError(f"Invalid origin: {url!r}") from exc
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"Invalid origin: {url!r}. Only http and https origins are supported."
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(
+            f"Invalid origin: {url!r}. Origins must not contain user info."
+        )
+    if parsed.path or parsed.query or parsed.fragment or parsed.params:
+        raise ValueError(
+            f"Invalid origin: {url!r}. Origins must not contain a path, query "
+            "or fragment."
+        )
+    # Without a slash, characters such as ";" or "@" stay in the netloc instead
+    # of starting a path or user info, e.g. "http://example.com;params" or
+    # "http://example.com\\@evil.com". Reject anything an authority must not
+    # contain; the port (if any) is validated separately below.
+    authority = parsed.netloc.rsplit("@", 1)[-1]
+    if any(char in authority for char in (";", "\\", "?", "#", "/", " ")):
+        raise ValueError(f"Invalid origin: {url!r}. Invalid host or port.")
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(f"Invalid origin: {url!r}. Missing host.")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"Invalid origin: {url!r}. Invalid port.") from exc
+    if port is not None and not port:
+        raise ValueError(
+            f"Invalid origin: {url!r}. Port must be between 1 and 65535."
+        )
+    return _build_origin(parsed.scheme, hostname, port)
+
+
+def _build_origin(scheme: str, hostname: str, port: int | None) -> str:
+    """Build a normalized origin string from its components."""
+    host = _normalize_host(hostname)
+    if ":" in host:  # IPv6 address, which must be bracketed in a URL
+        host = f"[{host}]"
+    default_port = 80 if scheme == "http" else 443
+    if port and port != default_port:
+        return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{host}"
+
+
+def _normalize_host(hostname: str) -> str:
+    """Return *hostname* lowercased, without a trailing dot, with IDNA-encoded
+    internationalized labels and compressed IPv6 literals."""
+    try:
+        address = ipaddress.IPv6Address(hostname)
+    except ValueError:
+        pass
+    else:
+        if address.scope_id is not None:
+            raise ValueError(f"Invalid host: {hostname!r}.")
+        return str(address)
+    hostname = hostname.lower().rstrip(".")
+    try:
+        return hostname.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ValueError(f"Invalid host: {hostname!r}.") from exc
+
+
+def _origin_matches(url: str, origins: set[str]) -> bool:
+    """Return whether the origin of *url* is in *origins*, a set of
+    normalized origins. Non-HTTP(S) URLs never match."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return False
+        return _build_origin(
+            parsed.scheme, parsed.hostname, parsed.port
+        ) in origins
+    except ValueError:
+        return False
 
 
 def url_has_any_extension(
