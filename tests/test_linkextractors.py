@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 import pytest
-from w3lib.url import canonicalize_url
+from w3lib.url import canonicalize_url, safe_url_string
 
 from scrapy.http import HtmlResponse, TextResponse, XmlResponse
 from scrapy.link import Link
@@ -219,6 +219,16 @@ class TestLxmlLinkExtractor:
         assert not lx.matches("http://blah1.com/blah2")
         assert not lx.matches("http://blah2.com/blah1")
         assert not lx.matches("http://blah2.com/blah2")
+
+        lx = LxmlLinkExtractor(
+            allow_origins=("http://blah1.com", "https://blah1.com:8443")
+        )
+        assert lx.matches("http://blah1.com/anything")
+        assert not lx.matches("https://blah1.com/anything")
+        assert lx.matches("https://blah1.com:8443/anything")
+        assert not lx.matches("http://notblah1.com/")
+        assert not lx.matches("http://sub.blah1.com/")
+        assert not lx.matches("mailto:someone@blah1.com")
 
     def test_restrict_xpaths(self):
         lx = LxmlLinkExtractor(restrict_xpaths=('//div[@id="subwrapper"]',))
@@ -968,3 +978,430 @@ class TestLxmlParserLinkExtractor:
             strip=False, process=reject_trailing_whitespace
         )
         assert lx_no_strip.extract_links(response) == []
+
+
+class TestLxmlLinkExtractorAllowOrigins:
+    def _response(
+        self, body: bytes, url: str = "http://example.com/index"
+    ) -> HtmlResponse:
+        return HtmlResponse(url, body=body)
+
+    @pytest.mark.parametrize(
+        ("configured", "link", "allowed"),
+        [
+            # Same origin, including the default port spelled explicitly.
+            ("http://example.com", "http://example.com/page", True),
+            ("http://example.com:80", "http://example.com/page", True),
+            ("http://example.com", "http://example.com:80/page", True),
+            # Scheme is part of the origin: HTTP downgrade is rejected.
+            ("https://example.com", "http://example.com/page", False),
+            ("http://example.com", "https://example.com/page", False),
+            # Port is part of the origin.
+            ("http://example.com:8080", "http://example.com:8080/page", True),
+            ("http://example.com", "http://example.com:8080/page", False),
+            ("http://example.com:8080", "http://example.com/page", False),
+            # Hosts match exactly, no suffix or prefix matching.
+            ("http://example.com", "http://notexample.com/page", False),
+            ("http://example.com", "http://sub.example.com/page", False),
+            ("http://sub.example.com", "http://example.com/page", False),
+            # Case, trailing dots and IDNA are normalized.
+            ("http://EXAMPLE.COM", "http://example.com./page", True),
+            ("http://xn--bcher-kva.example", "http://xn--bcher-kva.example/p", True),
+            ("http://xn--bcher-kva.example", "http://xn--bcher-kva.example./p", True),
+            # IPv6 notation is normalized for comparison, its default port
+            # is dropped. The emitted URL keeps its original IPv6 spelling.
+            (
+                "http://[2001:db8::1]",
+                "http://[2001:DB8:0:0:0:0:0:1]:80/p",
+                True,
+            ),
+            ("http://[::1]:8080", "http://[::1]:8080/p", True),
+            ("http://[::1]", "http://[::1]:8080/p", False),
+            # Userinfo is never part of the origin.
+            ("http://example.com:8080", "http://user:pass@example.com:8080/p", True),
+            ("http://example.com", "http://example.com@notexample.com/p", False),
+            (
+                "http://example.com",
+                "http://user@example.com@notexample.com/p",
+                False,
+            ),
+            # Percent-encoded separators cannot turn one host into another.
+            ("http://example.com", "http://example.com%2F@notexample.com/p", False),
+            ("http://notexample.com", "http://example.com%2F@notexample.com/p", True),
+            ("http://example.com", "http://example.com%40notexample.com/p", False),
+            # Links without a host (non-hierarchical schemes) never match.
+            ("http://example.com", "mailto:someone@example.com", False),
+        ],
+    )
+    def test_origin_matching(self, configured: str, link: str, allowed: bool) -> None:
+        lx = LxmlLinkExtractor(allow_origins=configured, schemes=())
+        assert lx.matches(link) is allowed
+        html = f'<a href="{link}">x</a>'.encode()
+        response = self._response(html)
+        extracted = lx.extract_links(response)
+        assert bool(extracted) is allowed
+        if allowed:
+            # safe_url_string leaves IPv6 spelling untouched, while every
+            # other case emits the link URL exactly as authored.
+            expected_url = (
+                safe_url_string(link) if link.startswith("http://[") else link
+            )
+            assert extracted[0].url == expected_url
+            assert extracted[0].text == "x"
+
+    @pytest.mark.parametrize(
+        "origin",
+        [
+            "",
+            "example.com",
+            "//example.com",
+            "/path",
+            "http://",
+            "http://[::1",
+            "http://example.com:99999",
+            "mailto:someone@example.com",
+        ],
+    )
+    def test_invalid_origin_raises(self, origin: str) -> None:
+        with pytest.raises(ValueError, match=r"Origin|Invalid IPv6|Port out of range"):
+            LxmlLinkExtractor(allow_origins=origin)
+
+    def test_default_behavior_unchanged(self) -> None:
+        body = b"""
+        <a href="http://example.com/a">a</a>
+        <a href="http://other.example:8080/b">b</a>
+        <a href="https://example.com/c">c</a>
+        """
+        response = self._response(body)
+        urls = [link.url for link in LxmlLinkExtractor().extract_links(response)]
+        assert urls == [
+            "http://example.com/a",
+            "http://other.example:8080/b",
+            "https://example.com/c",
+        ]
+
+    def test_relative_links_take_response_origin(self) -> None:
+        body = b"""
+        <a href="relative/page">relative</a>
+        <a href="/root/page">root</a>
+        <a href="?query=1">query</a>
+        """
+        response = self._response(body)
+        lx = LxmlLinkExtractor(allow_origins="http://example.com")
+        assert lx.extract_links(response) == [
+            Link(
+                url="http://example.com/relative/page",
+                text="relative",
+                fragment="",
+                nofollow=False,
+            ),
+            Link(
+                url="http://example.com/root/page",
+                text="root",
+                fragment="",
+                nofollow=False,
+            ),
+            Link(
+                url="http://example.com/index?query=1",
+                text="query",
+                fragment="",
+                nofollow=False,
+            ),
+        ]
+        # The same page fetched over HTTPS has a different origin.
+        https_response = self._response(body, url="https://example.com/index")
+        assert lx.extract_links(https_response) == []
+
+    def test_base_tag_changes_the_origin(self) -> None:
+        body = b"""<html><head><base href="http://other.example:8080/base/" /></head>
+        <body><a href="item/1.html">item</a>
+        <a href="http://example.com/direct.html">direct</a></body></html>"""
+        response = self._response(body)
+
+        lx = LxmlLinkExtractor(allow_origins=("http://other.example:8080",))
+        assert lx.extract_links(response) == [
+            Link(
+                url="http://other.example:8080/base/item/1.html",
+                text="item",
+                fragment="",
+                nofollow=False,
+            )
+        ]
+
+        lx = LxmlLinkExtractor(allow_origins="http://example.com")
+        assert lx.extract_links(response) == [
+            Link(
+                url="http://example.com/direct.html",
+                text="direct",
+                fragment="",
+                nofollow=False,
+            )
+        ]
+
+    def test_combined_with_domain_and_regex_filters(self) -> None:
+        body = b"""
+        <a href="http://example.com/keep">keep</a>
+        <a href="http://example.com/drop">drop</a>
+        <a href="http://sub.example.com/keep">sub keep</a>
+        <a href="http://example.com:8080/keep">other port</a>
+        """
+        response = self._response(body)
+
+        # allow restricts the path, allow_origins the origin: both must pass.
+        lx = LxmlLinkExtractor(allow="keep", allow_origins="http://example.com")
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/keep"
+        ]
+
+        # allow_domains suffix matching and exact origins combine: only
+        # links passing both filters remain. The subdomain passes the domain
+        # rule but not the exact origin rule.
+        lx = LxmlLinkExtractor(
+            allow_domains="example.com",
+            allow_origins=("http://example.com", "http://sub.example.com"),
+        )
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/keep",
+            "http://example.com/drop",
+            "http://sub.example.com/keep",
+        ]
+        # The non-default port is rejected by the exact origin rule.
+        lx = LxmlLinkExtractor(
+            allow_domains="example.com",
+            allow_origins="http://example.com",
+        )
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/keep",
+            "http://example.com/drop",
+        ]
+        # Without origin restrictions, allow_domains alone also accepts the
+        # subdomain. The non-default port keeps the netloc from matching the
+        # domain suffix, so it stays excluded either way.
+        lx = LxmlLinkExtractor(allow_domains="example.com")
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/keep",
+            "http://example.com/drop",
+            "http://sub.example.com/keep",
+        ]
+
+        # deny_domains takes precedence over the origin allowance. Its
+        # suffix matching catches every example.com origin in the body.
+        lx = LxmlLinkExtractor(
+            allow_origins=(
+                "http://example.com",
+                "http://sub.example.com",
+            ),
+            deny_domains="example.com",
+        )
+        assert lx.extract_links(response) == []
+
+        # deny takes precedence over the origin allowance.
+        lx = LxmlLinkExtractor(allow_origins="http://example.com", deny="keep")
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/drop"
+        ]
+
+    def test_non_http_schemes_excluded_and_opted_in(self) -> None:
+        body = b"""
+        <a href="http://example.com/a">a</a>
+        <a href="mailto:someone@example.com">mail</a>
+        <a href="ftp://example.com/file">ftp default port</a>
+        """
+        response = self._response(body)
+
+        # The default scheme filter removes mailto before the origin check;
+        # the ftp link matches the ftp origin once its scheme is allowed.
+        lx = LxmlLinkExtractor(
+            allow_origins=("http://example.com", "ftp://example.com"),
+            schemes=("http", "https", "ftp"),
+        )
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/a",
+            "ftp://example.com/file",
+        ]
+
+        # With every scheme permitted, mailto still has no origin and is
+        # rejected by the origin rule rather than slipping through.
+        lx = LxmlLinkExtractor(allow_origins="http://example.com", schemes=())
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/a"
+        ]
+
+    def test_encoded_host_separators_cannot_bypass(self) -> None:
+        # safe_url_string rejects the percent-encoded host separator, but if
+        # such a URL reached the filter, its host would be the whole encoded
+        # string rather than the prefix before it.
+        body = b'<a href="http://example.com%40notexample.com/p">x</a>'
+        response = self._response(body)
+        lx = LxmlLinkExtractor(allow_origins="http://example.com", schemes=())
+        assert lx.extract_links(response) == []
+        assert not lx.matches("http://example.com%40notexample.com/p")
+
+    def test_query_and_fragment_are_preserved(self) -> None:
+        body = b"""<a href="http://example.com/page?b=2&a=1#frag">text</a>"""
+        response = self._response(body)
+        lx = LxmlLinkExtractor(allow_origins="http://example.com")
+        assert lx.extract_links(response) == [
+            Link(
+                url="http://example.com/page?b=2&a=1#frag",
+                text="text",
+                fragment="",
+                nofollow=False,
+            )
+        ]
+
+    def test_duplicates_and_dedup_isolation(self) -> None:
+        body = b"""
+        <a href="http://example.com/page">first</a>
+        <a href="http://example.com/page">second</a>
+        """
+        response = self._response(body)
+
+        lx = LxmlLinkExtractor(allow_origins="http://example.com", unique=False)
+        links = lx.extract_links(response)
+        assert [link.text for link in links] == ["first", "second"]
+
+        # A second extraction on another instance must see both links again:
+        # neither the rule sets nor the dedup state are shared.
+        other = LxmlLinkExtractor(allow_origins="http://example.com", unique=False)
+        other_links = other.extract_links(response)
+        assert other_links == links
+
+        lx_unique = LxmlLinkExtractor(allow_origins="http://example.com")
+        assert [link.text for link in lx_unique.extract_links(response)] == ["first"]
+
+    def test_instances_are_isolated(self) -> None:
+        body = b"""
+        <a href="http://example.com/a">a</a>
+        <a href="http://other.example/b">b</a>
+        """
+        response = self._response(body)
+
+        first = LxmlLinkExtractor(allow_origins="http://example.com")
+        second = LxmlLinkExtractor(allow_origins="http://other.example")
+        assert first.allow_origins != second.allow_origins
+        assert [link.url for link in first.extract_links(response)] == [
+            "http://example.com/a"
+        ]
+        assert [link.url for link in second.extract_links(response)] == [
+            "http://other.example/b"
+        ]
+        # Repeated extractions with each instance keep returning the same
+        # result instead of remembering links seen by the other instance.
+        assert [link.url for link in first.extract_links(response)] == [
+            "http://example.com/a"
+        ]
+
+    def test_process_value_runs_before_origin_check(self) -> None:
+        body = (
+            b"<a href=\"javascript:goToPage('http://example.com/page.html')\">text</a>"
+        )
+        response = self._response(body)
+
+        def process_value(value):
+            match = re.search(r"javascript:goToPage\('(.*?)'\)", value)
+            return match.group(1) if match else None
+
+        lx = LxmlLinkExtractor(
+            allow_origins="http://example.com", process_value=process_value
+        )
+        assert lx.extract_links(response) == [
+            Link(
+                url="http://example.com/page.html",
+                text="text",
+                fragment="",
+                nofollow=False,
+            )
+        ]
+
+        lx = LxmlLinkExtractor(
+            allow_origins="http://other.example", process_value=process_value
+        )
+        assert lx.extract_links(response) == []
+
+    def test_idna_origin(self) -> None:
+        body = (
+            b'<a href="http://xn--bcher-kva.example/page">b</a>'
+            b'<a href="http://xn--bcher-kva.example.:8080/p2">b2</a>'
+        )
+        response = self._response(body)
+
+        lx = LxmlLinkExtractor(
+            allow_origins=(
+                "http://xn--bcher-kva.example",
+                "http://xn--bcher-kva.example:8080",
+            )
+        )
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://xn--bcher-kva.example/page",
+            "http://xn--bcher-kva.example.:8080/p2",
+        ]
+
+    def test_origin_normalization_helper(self) -> None:
+        assert lxmlhtml._origin_of("HTTP://Example.COM.:80/path?q=1#f") == (
+            "http",
+            "example.com",
+            None,
+        )
+        assert lxmlhtml._origin_of("http://xn--bcher-kva.example:8080/") == (
+            "http",
+            "xn--bcher-kva.example",
+            8080,
+        )
+        assert lxmlhtml._origin_of("http://[2001:DB8::1]:443/") == (
+            "http",
+            "2001:db8::1",
+            443,
+        )
+        assert lxmlhtml._origin_of("https://[2001:DB8::1]:443/") == (
+            "https",
+            "2001:db8::1",
+            None,
+        )
+        assert lxmlhtml._origin_of("ftp://user@example.com:21/") == (
+            "ftp",
+            "example.com",
+            None,
+        )
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            "example.com",
+            "//example.com",
+            "/path",
+            "http://",
+            "http://[::1",
+            "http://example.com:99999",
+            "http://example..com/",
+            "mailto:someone@example.com",
+        ],
+    )
+    def test_origin_normalization_helper_rejects(self, value: str) -> None:
+        with pytest.raises(ValueError, match=r"Origin|Invalid IPv6|Port out of range"):
+            lxmlhtml._origin_of(value)
+
+    @pytest.mark.parametrize(
+        "url",
+        ["", "not a url", "/relative/only", "mailto:someone@example.com"],
+    )
+    def test_matches_fails_closed_without_origin(self, url: str) -> None:
+        lx = LxmlLinkExtractor(allow_origins="http://example.com")
+        assert lx.matches(url) is False
+
+    def test_link_without_host_is_rejected_end_to_end(self) -> None:
+        body = (
+            b'<a href="mailto:someone@example.com">mail</a>'
+            b'<a href="http://example.com/page">page</a>'
+        )
+        response = self._response(body)
+        lx = LxmlLinkExtractor(allow_origins="http://example.com", schemes=())
+        assert lx.extract_links(response) == [
+            Link(
+                url="http://example.com/page",
+                text="page",
+                fragment="",
+                nofollow=False,
+            )
+        ]

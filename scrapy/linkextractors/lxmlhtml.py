@@ -4,13 +4,14 @@ Link extractor based on lxml.html
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import operator
 import re
 from collections.abc import Callable, Iterable
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from lxml import etree
 from parsel.csstranslator import HTMLTranslator
@@ -79,6 +80,48 @@ def _name_matches(allowed: set[str], denied: set[str], name: str) -> bool:
     if name in denied:
         return False
     return "*" in allowed or name in allowed
+
+
+# Ports that are implied by the scheme, so they are not part of the origin.
+_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443, "ftp": 21}
+
+# A normalized origin: a lowercased scheme, an ASCII host (an IP address in
+# its canonical form or an IDNA-encoded domain name) and the port, or None
+# for the scheme's default port.
+_Origin: TypeAlias = tuple[str, str, int | None]
+
+
+def _origin_of(value: str) -> _Origin:
+    """Return the normalized origin of the URL-like string *value*.
+
+    The origin is the tuple of the scheme, the host and the port. The scheme
+    is lowercased and default ports (80 for HTTP, 443 for HTTPS, 21 for FTP)
+    are dropped. Domain names are stripped of a single trailing dot and
+    IDNA-encoded, so Unicode and punycode spellings of the same domain match.
+    IP addresses are normalized through :mod:`ipaddress`, which also
+    canonicalizes IPv6 notation. Userinfo, percent-encoded separators and any
+    host prefix stay out of the result because the ``hostname`` attribute of
+    :func:`urllib.parse.urlsplit` returns only the host. Raises ValueError
+    when *value* has no scheme or host, or its host or port cannot be parsed.
+    """
+    parsed = urlsplit(value)
+    if not parsed.scheme:
+        raise ValueError(f"Origin {value!r} has no scheme")
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"Origin {value!r} has no host")
+    host = host.rstrip(".")
+    try:
+        host = str(ipaddress.ip_address(host))
+    except ValueError:
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ValueError(f"Origin {value!r} has an invalid host") from exc
+    port = parsed.port
+    if port == _DEFAULT_PORTS.get(parsed.scheme):
+        port = None
+    return parsed.scheme.lower(), host, port
 
 
 class LxmlParserLinkExtractor:
@@ -208,6 +251,25 @@ class LxmlLinkExtractor:
         domains that won't be considered for extracting the links.
     :type deny_domains: str or list
 
+    :param allow_origins: a single value or a list of strings containing
+        origins, each given as ``scheme://host`` or ``scheme://host:port``,
+        that links must have to be extracted. Unlike ``allow_domains``, which
+        matches any subdomain of the given domains and ignores the scheme and
+        port, origins match exactly. Domain names are IDNA-encoded and
+        compared case-insensitively, trailing dots are ignored, IP addresses
+        and IPv6 notation are normalized, and the default ports of the
+        ``http``, ``https`` and ``ftp`` schemes are ignored. Userinfo and
+        percent-encoded host separators cannot extend a match, only the host
+        itself is compared. If not given (or empty), origin is not checked and
+        the ``allow_domains`` behavior is unchanged. When given, the check is
+        combined with the other filters: every allow condition
+        (``allow``, ``allow_domains`` and ``allow_origins``) must pass, and
+        every deny condition (``deny`` and ``deny_domains``), which takes
+        precedence, must not match.
+
+        .. versionadded:: 2.20.0
+    :type allow_origins: str or list
+
     :param deny_extensions: a single value or list of strings containing
         extensions that should be ignored when extracting links.
         If not given, it will default to
@@ -328,6 +390,7 @@ class LxmlLinkExtractor:
         deny: _RegexOrSeveral = (),
         allow_domains: str | Iterable[str] = (),
         deny_domains: str | Iterable[str] = (),
+        allow_origins: str | Iterable[str] = (),
         restrict_xpaths: str | Iterable[str] = (),
         tags: str | Iterable[str] | None = ("a", "area"),
         attrs: str | Iterable[str] | None = ("href",),
@@ -360,6 +423,11 @@ class LxmlLinkExtractor:
 
         self.allow_domains: set[str] = set(arg_to_iter(allow_domains))
         self.deny_domains: set[str] = set(arg_to_iter(deny_domains))
+        # Origins are normalized at construction time, so a malformed origin
+        # is reported immediately and link filtering only does set lookups.
+        self.allow_origins: frozenset[_Origin] = frozenset(
+            _origin_of(origin) for origin in arg_to_iter(allow_origins)
+        )
 
         self.restrict_xpaths: tuple[str, ...] = tuple(arg_to_iter(restrict_xpaths))
         self.restrict_xpaths += tuple(
@@ -394,6 +462,14 @@ class LxmlLinkExtractor:
             parsed_url, self.allow_domains
         ):
             return False
+        if self.allow_origins:
+            try:
+                if _origin_of(link.url) not in self.allow_origins:
+                    return False
+            except ValueError:
+                # A link without a parseable scheme, host or port cannot
+                # match any configured origin.
+                return False
         if self.deny_domains and url_is_from_any_domain(parsed_url, self.deny_domains):
             return False
         if self.deny_extensions and _has_extension(
@@ -405,6 +481,12 @@ class LxmlLinkExtractor:
     def matches(self, url: str) -> bool:
         if self.allow_domains and not url_is_from_any_domain(url, self.allow_domains):
             return False
+        if self.allow_origins:
+            try:
+                if _origin_of(url) not in self.allow_origins:
+                    return False
+            except ValueError:
+                return False
         if self.deny_domains and url_is_from_any_domain(url, self.deny_domains):
             return False
 
