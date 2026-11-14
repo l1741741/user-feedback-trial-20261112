@@ -14,7 +14,9 @@ import sys
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator
+from copy import deepcopy
 from datetime import UTC, datetime
+from inspect import isawaitable, iscoroutine
 from pathlib import Path, PureWindowsPath
 from tempfile import NamedTemporaryFile
 from typing import IO, TYPE_CHECKING, Any, Protocol, Self, TypeAlias, cast
@@ -691,6 +693,13 @@ class FeedExporter:
         # overlapping item export calls, which item exporters, being stateful,
         # cannot handle.
         self._export_lock = DeferredLock()
+        # When FEED_EXPORT_FILTER_STRICT is set, item filter results are
+        # validated: anything that is not a bool (including unawaited
+        # coroutines) is rejected with a TypeError instead of being
+        # interpreted by truthiness.
+        self._strict_filters: bool = self.settings.getbool(
+            "FEED_EXPORT_FILTER_STRICT"
+        )
 
         if not self.settings["FEEDS"] and not self.settings["FEED_URI"]:
             raise NotConfigured
@@ -974,50 +983,127 @@ class FeedExporter:
 
     async def _export_item(self, item: Any, spider: Spider) -> None:
         slots = []
+        # When an item goes into multiple feeds, each feed gets its own
+        # deep copy, so that filters, item processors and serializers of
+        # one feed cannot affect other feeds through in-place changes to
+        # shared mutable values.
+        copy_item = len(self.slots) > 1
         for slot in self.slots:
-            if not slot.filter.accepts(item):
-                slots.append(
-                    slot
-                )  # if slot doesn't accept item, continue with next slot
+            feed_item = deepcopy(item) if copy_item else item
+            # The filter of each feed decides first whether the item is
+            # accepted; only accepted items reach the item processor and
+            # the serializer of that feed.
+            try:
+                accepted = self._filter_accepts(slot, feed_item)
+            except Exception:
+                if self._strict_filters:
+                    raise
+                logger.exception(
+                    "Item filter of feed %r raised; the item is skipped "
+                    "for that feed only.",
+                    slot.uri_template,
+                    extra={"spider": spider},
+                )
+                slots.append(slot)
                 continue
-
-            processor = self.processors[slot.uri_template]
-            for exported_item in processor(item) if processor else (item,):
-                if not slot._skipped:
-                    try:
-                        await slot.start_exporting()
-                    except FileExistsError:
-                        self._skip(slot)
-                if not slot._skipped:
-                    assert slot.exporter
-                    try:
-                        await _maybe_coroutine(slot.exporter.export_item, exported_item)
-                    except Exception as e:
-                        e.add_note(f"Item: {exported_item!r}")
-                        raise
-                # Skipped items are counted, so that the following files of
-                # this feed still cover the same items as those of any other
-                # feed.
-                slot.itemcount += 1
-                # create new slot for each slot with itemcount == FEED_EXPORT_BATCH_ITEM_COUNT and close the old one
-                if (
-                    self.feeds[slot.uri_template]["batch_item_count"]
-                    and slot.itemcount
-                    >= self.feeds[slot.uri_template]["batch_item_count"]
-                ):
-                    uri_params = self._get_uri_params(
-                        spider, self.feeds[slot.uri_template]["uri_params"], slot
-                    )
-                    self._schedule_slot_close(slot, spider)
-                    slot = self._start_new_batch(  # noqa: PLW2901
-                        batch_id=slot.batch_id + 1,
-                        uri=apply_uri_params(slot.uri_template, uri_params),
-                        feed_options=self.feeds[slot.uri_template],
-                        spider=spider,
-                        uri_template=slot.uri_template,
-                    )
+            if not accepted:
+                slots.append(slot)
+                continue
+            slot = await self._export_item_to_slot(slot, feed_item, spider)
             slots.append(slot)
         self.slots = slots
+
+    def _filter_accepts(self, slot: FeedSlot, item: Any) -> bool:
+        """Return whether the filter of *slot* accepts *item*.
+
+        In the default mode, any truthy result means acceptance, for
+        backward compatibility with existing custom filter classes. In
+        strict mode (the :setting:`FEED_EXPORT_FILTER_STRICT` setting),
+        the result must be a bool: anything else, including an unawaited
+        coroutine or any other awaitable, raises :exc:`TypeError` instead
+        of being silently treated as ``True``.
+        """
+        result = slot.filter.accepts(item)
+        if isinstance(result, bool):
+            return result
+        if not self._strict_filters:
+            return bool(result)
+        if iscoroutine(result):
+            result.close()
+        if isawaitable(result) or isinstance(result, Deferred):
+            raise TypeError(
+                f"{type(slot.filter).__name__}.accepts() returned "
+                f"{type(result).__name__}, an awaitable; asynchronous item "
+                "filters are not supported, accepts() must return a bool."
+            )
+        raise TypeError(
+            f"{type(slot.filter).__name__}.accepts() must return a bool, "
+            f"got {result!r}."
+        )
+
+    async def _export_item_to_slot(
+        self, slot: FeedSlot, item: Any, spider: Spider
+    ) -> FeedSlot:
+        """Export *item* to *slot* and return the current slot of its feed
+        (a new one if the item completed a batch).
+
+        Exceptions raised by the item processor or the item exporter are
+        logged and only affect this feed: the item is skipped for this
+        feed, other feeds still get it.
+        """
+        processor = self.processors[slot.uri_template]
+        try:
+            exported_items = processor(item) if processor else (item,)
+            for exported_item in exported_items:
+                slot = await self._export_one(slot, exported_item, spider)
+        except Exception:
+            logger.exception(
+                "Error exporting item to feed %r; the item is skipped for "
+                "that feed only.",
+                slot.uri_template,
+                extra={"spider": spider},
+            )
+        return slot
+
+    async def _export_one(
+        self, slot: FeedSlot, exported_item: Any, spider: Spider
+    ) -> FeedSlot:
+        """Export a single *exported_item* to *slot* and return the current
+        slot of its feed (a new one if the item completed a batch)."""
+        if not slot._skipped:
+            try:
+                await slot.start_exporting()
+            except FileExistsError:
+                self._skip(slot)
+        if not slot._skipped:
+            assert slot.exporter
+            try:
+                await _maybe_coroutine(slot.exporter.export_item, exported_item)
+            except Exception as e:
+                e.add_note(f"Item: {exported_item!r}")
+                raise
+        # Skipped items are counted, so that the following files of
+        # this feed still cover the same items as those of any other
+        # feed.
+        slot.itemcount += 1
+        # create new slot for each slot with itemcount == FEED_EXPORT_BATCH_ITEM_COUNT and close the old one
+        if (
+            self.feeds[slot.uri_template]["batch_item_count"]
+            and slot.itemcount
+            >= self.feeds[slot.uri_template]["batch_item_count"]
+        ):
+            uri_params = self._get_uri_params(
+                spider, self.feeds[slot.uri_template]["uri_params"], slot
+            )
+            self._schedule_slot_close(slot, spider)
+            slot = self._start_new_batch(
+                batch_id=slot.batch_id + 1,
+                uri=apply_uri_params(slot.uri_template, uri_params),
+                feed_options=self.feeds[slot.uri_template],
+                spider=spider,
+                uri_template=slot.uri_template,
+            )
+        return slot
 
     def _load_components(self, setting_prefix: str) -> dict[str, Any]:
         conf = without_none_values(

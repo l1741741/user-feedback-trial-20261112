@@ -415,6 +415,40 @@ For instance:
 You can assign your custom filtering class to the ``item_filter`` :ref:`option of a feed <feed-options>`.
 See :setting:`FEEDS` for examples.
 
+.. _item-filter-contract:
+
+Filtering and serialization contract
+------------------------------------
+
+For every scraped item, each feed is processed independently and in order:
+
+1.  The ``accepts()`` method of the feed item filter decides whether the
+    item is accepted for that feed.
+
+2.  Only if the item is accepted, the :ref:`item processor
+    <item-processor>` (if any) and the item exporter (which applies field
+    serializers) run for that feed.
+
+A rejected item has no side effects on the feed: serializers are not
+called, the item count that drives
+:setting:`FEED_EXPORT_BATCH_ITEM_COUNT` is not increased, and no output
+file is created for it.
+
+When multiple feeds are defined, each feed receives its own deep copy of
+the item, so in-place changes made by a filter, item processor or
+serializer of one feed never leak into another feed. Likewise, an
+exception raised by the filter, item processor or serializer of one feed
+is logged and only skips the item for that feed; the remaining feeds
+still receive it.
+
+``accepts()`` must return a :class:`bool`. By default, any truthy value
+is interpreted as acceptance, for backward compatibility with existing
+custom filter classes. Set :setting:`FEED_EXPORT_FILTER_STRICT` to
+``True`` to instead enforce the contract: non-:class:`bool` results
+(including unawaited coroutines, which are never awaited nor treated as
+``True``) and exceptions raised by ``accepts()`` are then raised as
+errors instead of being interpreted or logged.
+
 ItemFilter
 ----------
 
@@ -522,6 +556,7 @@ These are the settings used for configuring the feed exports:
 -   :setting:`FEED_MODE`
 -   :setting:`FEED_STORE_EMPTY`
 -   :setting:`FEED_EXPORT_FIELDS`
+-   :setting:`FEED_EXPORT_FILTER_STRICT`
 -   :setting:`FEED_EXPORT_INDENT`
 -   :setting:`FEED_STORAGES`
 -   :setting:`FEED_STORAGE_FTP_ACTIVE`
@@ -652,6 +687,24 @@ Default: ``None``
 Use the ``FEED_EXPORT_FIELDS`` setting to define the fields to export, their
 order and their output names. See :attr:`BaseItemExporter.fields_to_export
 <scrapy.exporters.BaseItemExporter.fields_to_export>` for more information.
+
+.. setting:: FEED_EXPORT_FILTER_STRICT
+
+FEED_EXPORT_FILTER_STRICT
+-------------------------
+
+Default: ``False``
+
+If ``True``, the return value of the ``accepts()`` method of :ref:`item
+filters <item-filter>` is validated: it must be a :class:`bool`. Any
+other value, including an unawaited coroutine or any other awaitable
+(which is never awaited nor treated as ``True``), raises
+:exc:`TypeError`, and exceptions raised by ``accepts()`` are raised
+instead of being logged and treated as a rejection for that feed only.
+
+If ``False`` (the default), any truthy value is interpreted as
+acceptance, for backward compatibility with existing custom filter
+classes.
 
 .. setting:: FEED_EXPORT_INDENT
 
