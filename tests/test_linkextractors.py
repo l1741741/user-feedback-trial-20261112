@@ -968,3 +968,242 @@ class TestLxmlParserLinkExtractor:
             strip=False, process=reject_trailing_whitespace
         )
         assert lx_no_strip.extract_links(response) == []
+
+
+class TestDedupeKey:
+    """Tests for the ``dedupe_key`` parameter of LxmlLinkExtractor and
+    LxmlParserLinkExtractor.
+    """
+
+    def test_invalid_strategy_raises(self):
+        with pytest.raises(ValueError, match="dedupe_key"):
+            LxmlLinkExtractor(dedupe_key="canonicalize")
+        with pytest.raises(ValueError, match="dedupe_key"):
+            LxmlParserLinkExtractor(dedupe_key="fragment")
+
+    def test_url_strategy_matches_default(self):
+        """dedupe_key="url" is the default behavior: only byte-identical
+        URLs are duplicates."""
+        html = (
+            b'<a href="http://example.com/p?b=2&amp;a=1">1</a>'
+            b'<a href="http://example.com/p?a=1&amp;b=2">2</a>'
+            b'<a href="http://example.com/p?a=1&amp;b=2">3</a>'
+        )
+        response = HtmlResponse("http://example.com/", body=html)
+        default = LxmlLinkExtractor().extract_links(response)
+        explicit = LxmlLinkExtractor(dedupe_key="url").extract_links(response)
+        assert explicit == default == [
+            Link(url="http://example.com/p?b=2&a=1", text="1"),
+            Link(url="http://example.com/p?a=1&b=2", text="2"),
+        ]
+
+    def test_canonical_strategy_keeps_first_link_whole(self):
+        """Query parameter order collapses, fragments still distinguish, and
+        the first complete Link (text, nofollow) is kept without mixing
+        attributes from discarded duplicates."""
+        html = (
+            b'<a href="http://example.com/p?b=2&amp;a=1" rel="nofollow">first</a>'
+            b'<a href="http://example.com/p?a=1&amp;b=2">second</a>'
+            b'<a href="http://example.com/p?a=1&amp;b=2#frag">with fragment</a>'
+        )
+        response = HtmlResponse("http://example.com/", body=html)
+        links = LxmlLinkExtractor(dedupe_key="canonical").extract_links(response)
+        assert links == [
+            Link(
+                url="http://example.com/p?b=2&a=1",
+                text="first",
+                nofollow=True,
+            ),
+            Link(
+                url="http://example.com/p?a=1&b=2#frag",
+                text="with fragment",
+            ),
+        ]
+        # The kept URL is the original display URL, not the canonicalized key.
+        assert links[0].url == "http://example.com/p?b=2&a=1"
+
+    def test_no_fragment_strategy(self):
+        html = (
+            b'<a href="http://example.com/p#one">one</a>'
+            b'<a href="http://example.com/p#two">two</a>'
+            b'<a href="http://example.com/p">bare</a>'
+        )
+        response = HtmlResponse("http://example.com/", body=html)
+        links = LxmlLinkExtractor(dedupe_key="no_fragment").extract_links(response)
+        assert links == [Link(url="http://example.com/p#one", text="one")]
+        # With "canonical", fragments still make links distinct.
+        links = LxmlLinkExtractor(dedupe_key="canonical").extract_links(response)
+        assert links == [
+            Link(url="http://example.com/p#one", text="one"),
+            Link(url="http://example.com/p#two", text="two"),
+            Link(url="http://example.com/p", text="bare"),
+        ]
+
+    def test_empty_query(self):
+        html = (
+            b'<a href="http://example.com/p?">with empty query</a>'
+            b'<a href="http://example.com/p">without query</a>'
+        )
+        response = HtmlResponse("http://example.com/", body=html)
+        # Extraction normalizes the empty query away before dedupe, so both
+        # links collapse to the first one under any strategy.
+        for strategy in ("url", "canonical", "no_fragment"):
+            links = LxmlLinkExtractor(dedupe_key=strategy).extract_links(response)
+            assert links == [
+                Link(url="http://example.com/p", text="with empty query"),
+            ]
+        # With unique=False, both original links survive and keep their order.
+        links = LxmlLinkExtractor(dedupe_key="canonical", unique=False).extract_links(
+            response
+        )
+        assert links == [
+            Link(url="http://example.com/p", text="with empty query"),
+            Link(url="http://example.com/p", text="without query"),
+        ]
+
+    def test_duplicate_params(self):
+        html = (
+            b'<a href="http://example.com/p?a=1&amp;a=1">dup</a>'
+            b'<a href="http://example.com/p?a=1">single</a>'
+            b'<a href="http://example.com/p?a=1&amp;a=1">dup again</a>'
+        )
+        response = HtmlResponse("http://example.com/", body=html)
+        # canonicalize_url keeps repeated parameters, so ?a=1&a=1 and ?a=1
+        # remain distinct, but identical duplicates collapse.
+        links = LxmlLinkExtractor(dedupe_key="canonical").extract_links(response)
+        assert links == [
+            Link(url="http://example.com/p?a=1&a=1", text="dup"),
+            Link(url="http://example.com/p?a=1", text="single"),
+        ]
+
+    def test_percent_encoding(self):
+        html = (
+            b'<a href="http://example.com/p%7Ex">encoded</a>'
+            b'<a href="http://example.com/p~x">raw</a>'
+            b'<a href="http://example.com/p?a=%41">encoded param</a>'
+            b'<a href="http://example.com/p?a=A">raw param</a>'
+        )
+        response = HtmlResponse("http://example.com/", body=html)
+        links = LxmlLinkExtractor(dedupe_key="canonical").extract_links(response)
+        assert links == [
+            Link(url="http://example.com/p%7Ex", text="encoded"),
+            Link(url="http://example.com/p?a=%41", text="encoded param"),
+        ]
+        # With "url", differently-encoded URLs stay distinct.
+        links = LxmlLinkExtractor(dedupe_key="url").extract_links(response)
+        assert len(links) == 4
+
+    @pytest.mark.parametrize("encoding", ["utf-8", "latin-1"])
+    def test_different_encodings(self, encoding):
+        """Dedupe works the same regardless of the response encoding used to
+        decode non-ASCII hrefs."""
+        body = (
+            '<a href="http://example.com/café.html">raw</a>'
+            '<a href="http://example.com/caf%C3%A9.html">encoded</a>'
+        ).encode(encoding)
+        response = HtmlResponse(
+            "http://example.com/", body=body, encoding=encoding
+        )
+        links = LxmlLinkExtractor(dedupe_key="canonical").extract_links(response)
+        assert links == [
+            Link(url="http://example.com/caf%C3%A9.html", text="raw"),
+        ]
+        # The first link is kept whole: the returned URL is the original
+        # (percent-encoded) display URL, not a canonicalized rewrite of it.
+        assert links[0].text == "raw"
+        assert links[0].url == "http://example.com/caf%C3%A9.html"
+
+    def test_callable_strategy(self):
+        html = (
+            b'<a href="http://example.com/p?a=1">one</a>'
+            b'<a href="http://example.com/p?a=2">two</a>'
+        )
+        response = HtmlResponse("http://example.com/", body=html)
+        lx = LxmlLinkExtractor(
+            dedupe_key=lambda link: link.url.split("?", 1)[0]
+        )
+        assert lx.extract_links(response) == [
+            Link(url="http://example.com/p?a=1", text="one"),
+        ]
+
+    def test_repeated_extraction_is_deterministic(self):
+        """Calling extract_links (and hence _process_links) again on the
+        same response yields the same result; the strategy carries no state
+        between calls."""
+        html = (
+            b'<a href="http://example.com/p?b=2&amp;a=1#f1">1</a>'
+            b'<a href="http://example.com/p?a=1&amp;b=2#f2">2</a>'
+        )
+        response = HtmlResponse("http://example.com/", body=html)
+        lx = LxmlLinkExtractor(dedupe_key="no_fragment")
+        first = lx.extract_links(response)
+        second = lx.extract_links(response)
+        assert first == second == [
+            Link(url="http://example.com/p?b=2&a=1#f1", text="1"),
+        ]
+        # Applying the processing step to its own output is a no-op.
+        assert lx._process_links(first, {"http", "https"}) == first
+
+    def test_multiple_base_and_same_target_different_text(self):
+        """With several <base> tags the first one wins; duplicate targets
+        with different anchor texts keep the first occurrence and the
+        original (base-resolved) URL."""
+        html = b"""
+        <html><head>
+            <base href="http://example.com/sub/">
+            <base href="http://other.example/">
+        </head><body>
+            <a href="page.html">first text</a>
+            <a href="page.html">second text</a>
+            <a href="page.html#section">with fragment</a>
+        </body></html>
+        """
+        response = HtmlResponse("http://example.com/", body=html)
+        links = LxmlLinkExtractor(dedupe_key="no_fragment").extract_links(response)
+        assert links == [
+            Link(url="http://example.com/sub/page.html", text="first text"),
+        ]
+        # "url" drops the identical second occurrence but keeps the fragment
+        # variant; order and original URLs are preserved.
+        links = LxmlLinkExtractor(dedupe_key="url").extract_links(response)
+        assert links == [
+            Link(url="http://example.com/sub/page.html", text="first text"),
+            Link(url="http://example.com/sub/page.html#section", text="with fragment"),
+        ]
+        # With unique=False, all original links survive in document order.
+        links = LxmlLinkExtractor(dedupe_key="url", unique=False).extract_links(
+            response
+        )
+        assert links == [
+            Link(url="http://example.com/sub/page.html", text="first text"),
+            Link(url="http://example.com/sub/page.html", text="second text"),
+            Link(url="http://example.com/sub/page.html#section", text="with fragment"),
+        ]
+
+    def test_instance_isolation(self):
+        """Two extractors with different strategies on the same response do
+        not interfere with each other."""
+        html = (
+            b'<a href="http://example.com/p?b=2&amp;a=1">1</a>'
+            b'<a href="http://example.com/p?a=1&amp;b=2">2</a>'
+        )
+        response = HtmlResponse("http://example.com/", body=html)
+        raw = LxmlLinkExtractor(dedupe_key="url")
+        canonical = LxmlLinkExtractor(dedupe_key="canonical")
+        assert len(canonical.extract_links(response)) == 1
+        assert len(raw.extract_links(response)) == 2
+        # Re-extracting with the same instances gives the same results.
+        assert len(canonical.extract_links(response)) == 1
+        assert len(raw.extract_links(response)) == 2
+        assert raw.link_extractor.link_key is not canonical.link_extractor.link_key
+
+    def test_parser_link_extractor_dedupe_key(self):
+        html = (
+            b'<a href="http://example.com/p#one">one</a>'
+            b'<a href="http://example.com/p#two">two</a>'
+        )
+        response = HtmlResponse("http://example.com/", body=html)
+        lx = LxmlParserLinkExtractor(unique=True, dedupe_key="no_fragment")
+        assert lx.extract_links(response) == [
+            Link(url="http://example.com/p#one", text="one", nofollow=False),
+        ]

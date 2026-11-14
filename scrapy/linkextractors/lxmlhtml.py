@@ -57,6 +57,47 @@ def _canonicalize_link_url(link: Link) -> str:
     return canonicalize_url(link.url, keep_fragments=True)
 
 
+def _dedupe_key_url(link: Link) -> str:
+    """Deduplication key: the link URL as-is."""
+    return link.url
+
+
+def _dedupe_key_canonical(link: Link) -> str:
+    """Deduplication key: the canonicalized link URL, keeping the fragment."""
+    return canonicalize_url(link.url, keep_fragments=True)
+
+
+def _dedupe_key_no_fragment(link: Link) -> str:
+    """Deduplication key: the canonicalized link URL, ignoring the fragment."""
+    return canonicalize_url(link.url, keep_fragments=False)
+
+
+_DEDUPE_KEYS: dict[str, Callable[[Link], str]] = {
+    "url": _dedupe_key_url,
+    "canonical": _dedupe_key_canonical,
+    "no_fragment": _dedupe_key_no_fragment,
+}
+
+
+def _resolve_dedupe_key(
+    dedupe_key: str | Callable[[Link], str],
+) -> Callable[[Link], str]:
+    """Resolve a ``dedupe_key`` strategy name or callable into a callable.
+
+    The returned callable maps a :class:`~scrapy.link.Link` to the key used
+    for duplicate filtering. It never modifies the link itself.
+    """
+    if callable(dedupe_key):
+        return dedupe_key
+    try:
+        return _DEDUPE_KEYS[dedupe_key]
+    except KeyError:
+        raise ValueError(
+            f"Unknown dedupe_key strategy {dedupe_key!r}; "
+            f"expected one of {sorted(_DEDUPE_KEYS)} or a callable"
+        ) from None
+
+
 def _has_extension(path: str, extensions: set[str]) -> bool:
     """Return whether *path* ends with any of *extensions*, which all start
     with a dot and are lowercase, ignoring case.
@@ -90,6 +131,7 @@ class LxmlParserLinkExtractor:
         unique: bool = False,
         strip: bool = True,
         canonicalized: bool = False,
+        dedupe_key: str | Callable[[Link], str] | None = None,
     ):
         # mypy doesn't infer types for operator.* and also for partial()
         self.scan_tag: Callable[[str], bool] = (
@@ -107,11 +149,14 @@ class LxmlParserLinkExtractor:
         )
         self.unique: bool = unique
         self.strip: bool = strip
-        self.link_key: Callable[[Link], str] = (
-            cast("Callable[[Link], str]", operator.attrgetter("url"))
-            if canonicalized
-            else _canonicalize_link_url
-        )
+        if dedupe_key is not None:
+            self.link_key: Callable[[Link], str] = _resolve_dedupe_key(dedupe_key)
+        else:
+            self.link_key = (
+                cast("Callable[[Link], str]", operator.attrgetter("url"))
+                if canonicalized
+                else _canonicalize_link_url
+            )
 
     def _iter_links(
         self, document: HtmlElement
@@ -279,6 +324,32 @@ class LxmlLinkExtractor:
         links.
     :type unique: bool
 
+    :param dedupe_key: strategy used to compute the key that identifies
+        duplicate links when ``unique`` is ``True``. It can be one of:
+
+        -   ``"url"`` (default): the extracted URL as-is. Links are
+            considered duplicates only if their URLs are identical.
+        -   ``"canonical"``: the URL canonicalized with
+            :func:`w3lib.url.canonicalize_url`, keeping the fragment. Links
+            whose URLs only differ in things like query parameter order or
+            percent-encoding are considered duplicates.
+        -   ``"no_fragment"``: like ``"canonical"``, but also ignoring the
+            URL fragment.
+
+        It can also be a callable that receives a
+        :class:`~scrapy.link.Link` object and returns the key to use for
+        duplicate filtering.
+
+        The strategy only affects how duplicates are detected during this
+        extraction: the ``url`` attribute of the returned
+        :class:`~scrapy.link.Link` objects is never modified, and the first
+        link found for each key is kept whole (its text and ``nofollow``
+        attributes are not merged with those of discarded duplicates). It
+        does not affect request fingerprinting or any global cache.
+
+        .. versionadded:: 2.21.0
+    :type dedupe_key: str or collections.abc.Callable
+
     :param process_value: a function that receives each value extracted from
         the tag and attributes scanned and can modify the value and return a
         new one, or return ``None`` to ignore the link altogether. If not
@@ -341,6 +412,7 @@ class LxmlLinkExtractor:
         deny_tags: str | Iterable[str] = (),
         deny_attrs: str | Iterable[str] = (),
         schemes: str | Iterable[str] | None = None,
+        dedupe_key: str | Callable[[Link], str] | None = None,
     ):
         tags, attrs = set(arg_to_iter(tags)), set(arg_to_iter(attrs))
         deny_tags, deny_attrs = (
@@ -354,6 +426,7 @@ class LxmlLinkExtractor:
             process=process_value,
             strip=strip,
             canonicalized=True,
+            dedupe_key=dedupe_key,
         )
         self.allow_res: list[re.Pattern[str]] = self._compile_regexes(allow)
         self.deny_res: list[re.Pattern[str]] = self._compile_regexes(deny)
