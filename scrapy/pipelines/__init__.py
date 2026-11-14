@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import warnings
+from collections import deque
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from twisted.internet.defer import Deferred, DeferredList, FirstError
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from twisted.python.failure import Failure
 
     from scrapy import Spider
+    from scrapy.crawler import Crawler
     from scrapy.settings import Settings
 
 
@@ -47,6 +49,27 @@ class ItemProcessorProtocol(Protocol):
 
 class ItemPipelineManager(MiddlewareManager):
     component_name = "item pipeline"
+
+    def __init__(self, *middlewares: Any, crawler: Crawler | None = None) -> None:
+        super().__init__(*middlewares, crawler=crawler)
+        max_pending: int | None = None
+        if crawler is not None:
+            raw = crawler.settings.get("ITEM_PIPELINE_MAX_PENDING")
+            if raw is not None:
+                try:
+                    max_pending = int(raw)
+                except (TypeError, ValueError):
+                    max_pending = 0
+                if max_pending < 1:
+                    raise ValueError(
+                        "ITEM_PIPELINE_MAX_PENDING must be a positive integer,"
+                        f" got {raw!r}."
+                    )
+        self._max_pending = max_pending
+        self._pending_count = 0
+        self._pending_waiters: deque[asyncio.Future[None]] = deque()
+        self._drained: asyncio.Future[None] | None = None
+        self._closing = False
 
     @classmethod
     def _get_mwlist_from_settings(cls, settings: Settings) -> list[Any]:
@@ -75,9 +98,62 @@ class ItemPipelineManager(MiddlewareManager):
         return deferred_from_coro(self.process_item_async(item))
 
     async def process_item_async(self, item: Any) -> Any:
-        return await self._process_chain(
-            "process_item", item, add_spider=True, warn_deferred=True
-        )
+        if self._max_pending is None:
+            return await self._process_chain(
+                "process_item", item, add_spider=True, warn_deferred=True
+            )
+        await self._acquire_pending_slot()
+        try:
+            return await self._process_chain(
+                "process_item", item, add_spider=True, warn_deferred=True
+            )
+        finally:
+            self._release_pending_slot()
+
+    async def _acquire_pending_slot(self) -> None:
+        """Wait until fewer than :setting:`ITEM_PIPELINE_MAX_PENDING` items
+        are being processed, in FIFO order."""
+        assert self._max_pending is not None  # typing
+        if self._closing:
+            raise RuntimeError(
+                "The item pipeline is closed and cannot process more items."
+            )
+        if not self._pending_waiters and self._pending_count < self._max_pending:
+            self._pending_count += 1
+            return
+        waiter = asyncio.get_running_loop().create_future()
+        self._pending_waiters.append(waiter)
+        try:
+            await waiter
+        except BaseException:
+            if waiter.cancelled():
+                # Cancelled while queued, before a slot was granted.
+                try:
+                    self._pending_waiters.remove(waiter)
+                except ValueError:
+                    pass
+            elif waiter.exception() is not None:
+                # Failed by close_spider_async(), no slot was granted.
+                pass
+            else:
+                # A slot was granted but the waiting coroutine was cancelled
+                # before resuming: hand the slot to the next waiter.
+                self._release_pending_slot()
+            raise
+
+    def _release_pending_slot(self) -> None:
+        while self._pending_waiters:
+            waiter = self._pending_waiters.popleft()
+            if not waiter.done():
+                waiter.set_result(None)
+                return
+        self._pending_count -= 1
+        if (
+            self._pending_count == 0
+            and self._drained is not None
+            and not self._drained.done()
+        ):
+            self._drained.set_result(None)
 
     def _get_dfd(
         self,
@@ -144,6 +220,7 @@ class ItemPipelineManager(MiddlewareManager):
         return deferred_from_coro(self._process_parallel("open_spider"))
 
     async def open_spider_async(self) -> None:
+        self._closing = False
         await self._process_parallel("open_spider")
 
     def close_spider(self, spider: Spider) -> Deferred[list[None]]:
@@ -156,4 +233,21 @@ class ItemPipelineManager(MiddlewareManager):
         return deferred_from_coro(self._process_parallel("close_spider"))
 
     async def close_spider_async(self) -> None:
+        if self._max_pending is not None:
+            self._closing = True
+            # Items waiting for a slot must not enter the pipeline once it
+            # is closed.
+            while self._pending_waiters:
+                waiter = self._pending_waiters.popleft()
+                if not waiter.done():
+                    waiter.set_exception(
+                        RuntimeError(
+                            "The item pipeline was closed before this item"
+                            " could be processed."
+                        )
+                    )
+            # Items already in the pipeline finish processing first.
+            if self._pending_count:
+                self._drained = asyncio.get_running_loop().create_future()
+                await self._drained
         await self._process_parallel("close_spider")

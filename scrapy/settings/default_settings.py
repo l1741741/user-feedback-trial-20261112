@@ -143,6 +143,7 @@ __all__ = [
     "IMAGES_STORE_S3_ACL",
     "ITEM_PIPELINES",
     "ITEM_PIPELINES_BASE",
+    "ITEM_PIPELINE_MAX_PENDING",
     "ITEM_PROCESSOR",
     "JOBDIR",
     "JOBDIR_SYNC_EVERY",
@@ -482,6 +483,7 @@ IMAGES_STORE_S3_ACL = "private"
 
 ITEM_PIPELINES: dict[str, int] = {}
 ITEM_PIPELINES_BASE: dict[str, int] = {}
+ITEM_PIPELINE_MAX_PENDING = None
 
 ITEM_PROCESSOR = "scrapy.pipelines.ItemPipelineManager"
 

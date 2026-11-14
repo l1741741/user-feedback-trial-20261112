@@ -615,6 +615,10 @@ Default: ``100``
 Maximum number of concurrent items (per response) to process in parallel in
 :ref:`item pipelines <topics-item-pipeline>`.
 
+This setting does not bound the total number of items inside the item
+pipeline chain at a given moment, see :setting:`ITEM_PIPELINE_MAX_PENDING`
+for that.
+
 .. setting:: CONCURRENT_REQUESTS
 
 CONCURRENT_REQUESTS
@@ -1687,6 +1691,31 @@ Default: ``{}``
 
 A dict containing the pipelines enabled by default in Scrapy. You should never
 modify this setting in your project, modify :setting:`ITEM_PIPELINES` instead.
+
+.. setting:: ITEM_PIPELINE_MAX_PENDING
+
+ITEM_PIPELINE_MAX_PENDING
+-------------------------
+
+.. versionadded:: VERSION
+
+Default: ``None``
+
+Maximum number of items that may be inside the :ref:`item pipeline
+<topics-item-pipeline>` chain at the same time, per crawler. Once the limit
+is reached, additional items wait asynchronously, in FIFO order, for a
+pipeline slot to be released, without blocking the event loop. ``None``
+means no limit.
+
+This is different from :setting:`CONCURRENT_ITEMS`, which only limits how
+many items from a single response are processed in parallel and does not
+bound the total number of items waiting on slow pipelines. An item pipeline
+whose :meth:`process_item` waits on a slow external write can otherwise
+accumulate an unbounded number of in-flight items; setting
+``ITEM_PIPELINE_MAX_PENDING`` bounds that number.
+
+When the spider is closed, items already inside the pipeline finish
+processing, while items still waiting for a slot never enter the pipeline.
 
 .. setting:: ITEM_PROCESSOR
 

@@ -7,7 +7,7 @@ import pytest
 from twisted.internet.defer import Deferred, fail, succeed
 
 from scrapy import Request, Spider, signals
-from scrapy.exceptions import ScrapyDeprecationWarning
+from scrapy.exceptions import DropItem, ScrapyDeprecationWarning
 from scrapy.pipelines import ItemPipelineManager
 from scrapy.utils.asyncio import call_later
 from scrapy.utils.conf import build_component_list
@@ -415,6 +415,344 @@ class TestCustomPipelineManager:
             await crawler.crawl_async(mockserver=mockserver)
 
         assert len(items) == 1
+
+
+class GatedPipeline:
+    """Blocks each item on a future that the test fires explicitly."""
+
+    def __init__(self) -> None:
+        self.entered: list[Any] = []
+        self.gates: dict[Any, asyncio.Future[None]] = {}
+        self.closed = False
+
+    async def process_item(self, item):
+        self.entered.append(item)
+        gate: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self.gates[item] = gate
+        await gate
+        return item
+
+    def close_spider(self):
+        self.closed = True
+
+
+class SyncRaisePipeline:
+    def process_item(self, item):
+        if item == "bad":
+            raise ValueError("process_item error")
+        return item
+
+
+class AsyncRaisePipeline:
+    async def process_item(self, item):
+        if item == "bad":
+            raise ValueError("process_item error")
+        return item
+
+
+class DeferredFailPipeline:
+    def process_item(self, item):
+        if item == "bad":
+            return fail(ValueError("process_item error"))
+        return item
+
+
+class DropItemPipeline:
+    def process_item(self, item):
+        if item == "bad":
+            raise DropItem("dropped")
+        return item
+
+
+class CloseRaisePipeline(GatedPipeline):
+    def close_spider(self):
+        super().close_spider()
+        raise ValueError("close_spider error")
+
+
+async def _tick(times: int = 5) -> None:
+    for _ in range(times):
+        await asyncio.sleep(0)
+
+
+class TestItemPipelineMaxPending:
+    def _build_manager(
+        self,
+        pipelines: dict[Any, int],
+        max_pending: Any = None,
+    ) -> ItemPipelineManager:
+        settings: dict[str, Any] = {"ITEM_PIPELINES": pipelines}
+        if max_pending is not None:
+            settings["ITEM_PIPELINE_MAX_PENDING"] = max_pending
+        crawler = get_crawler(DefaultSpider, settings)
+        crawler.spider = crawler._create_spider()
+        return build_from_crawler(ItemPipelineManager, crawler)
+
+    @coroutine_test
+    async def test_limit_and_fifo(self) -> None:
+        manager = self._build_manager({GatedPipeline: 1}, max_pending=2)
+        pipeline = manager.middlewares[0]
+        assert isinstance(pipeline, GatedPipeline)
+        tasks = [
+            asyncio.ensure_future(manager.process_item_async(i)) for i in range(4)
+        ]
+        await _tick()
+        assert pipeline.entered == [0, 1]
+        pipeline.gates[0].set_result(None)
+        await _tick()
+        assert pipeline.entered == [0, 1, 2]
+        pipeline.gates[1].set_result(None)
+        await _tick()
+        assert pipeline.entered == [0, 1, 2, 3]
+        pipeline.gates[2].set_result(None)
+        pipeline.gates[3].set_result(None)
+        assert await asyncio.gather(*tasks) == [0, 1, 2, 3]
+
+    @coroutine_test
+    async def test_unlimited_by_default(self) -> None:
+        manager = self._build_manager({GatedPipeline: 1})
+        pipeline = manager.middlewares[0]
+        assert isinstance(pipeline, GatedPipeline)
+        tasks = [
+            asyncio.ensure_future(manager.process_item_async(i)) for i in range(5)
+        ]
+        await _tick()
+        assert pipeline.entered == [0, 1, 2, 3, 4]
+        for gate in pipeline.gates.values():
+            gate.set_result(None)
+        await asyncio.gather(*tasks)
+
+    @coroutine_test
+    async def test_waiter_cancelled(self) -> None:
+        """Cancelling a queued item removes only that item and frees no slot."""
+        manager = self._build_manager({GatedPipeline: 1}, max_pending=1)
+        pipeline = manager.middlewares[0]
+        assert isinstance(pipeline, GatedPipeline)
+        tasks = [
+            asyncio.ensure_future(manager.process_item_async(i)) for i in range(3)
+        ]
+        await _tick()
+        assert pipeline.entered == [0]
+        tasks[2].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await tasks[2]
+        pipeline.gates[0].set_result(None)
+        await _tick()
+        assert pipeline.entered == [0, 1]
+        pipeline.gates[1].set_result(None)
+        assert await tasks[0] == 0
+        assert await tasks[1] == 1
+        # no slot leaked: a new item is processed immediately
+        task = asyncio.ensure_future(manager.process_item_async(3))
+        await _tick()
+        assert pipeline.entered == [0, 1, 3]
+        pipeline.gates[3].set_result(None)
+        assert await task == 3
+
+    @coroutine_test
+    async def test_waiter_cancelled_before_release(self) -> None:
+        """A waiter cancelled before a release runs is skipped by it."""
+        manager = self._build_manager({GatedPipeline: 1}, max_pending=1)
+        pipeline = manager.middlewares[0]
+        assert isinstance(pipeline, GatedPipeline)
+        tasks = [
+            asyncio.ensure_future(manager.process_item_async(i)) for i in range(3)
+        ]
+        await _tick()
+        assert pipeline.entered == [0]
+        pipeline.gates[0].set_result(None)
+        tasks[1].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await tasks[1]
+        await _tick()
+        assert pipeline.entered == [0, 2]
+        pipeline.gates[2].set_result(None)
+        assert await tasks[0] == 0
+        assert await tasks[2] == 2
+
+    @coroutine_test
+    async def test_granted_waiter_cancelled(self) -> None:
+        """Cancelling a queued item right as its slot is granted hands the
+        slot to the next waiter instead of losing it."""
+        manager = self._build_manager({GatedPipeline: 1}, max_pending=1)
+        pipeline = manager.middlewares[0]
+        assert isinstance(pipeline, GatedPipeline)
+        task0 = asyncio.ensure_future(manager.process_item_async(0))
+        task1 = asyncio.ensure_future(manager.process_item_async(1))
+        await _tick()
+        assert pipeline.entered == [0]
+        pipeline.gates[0].set_result(None)
+        # let item 0 finish and grant its slot to the queued item 1, then
+        # cancel item 1 before its coroutine resumes
+        await asyncio.sleep(0)
+        task1.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task1
+        assert await task0 == 0
+        assert pipeline.entered == [0]
+        # the granted slot was released: a new item is processed immediately
+        task2 = asyncio.ensure_future(manager.process_item_async(2))
+        await _tick()
+        assert pipeline.entered == [0, 2]
+        pipeline.gates[2].set_result(None)
+        assert await task2 == 2
+
+    @coroutine_test
+    async def test_item_cancelled_in_chain(self) -> None:
+        """Cancelling an item inside the pipeline releases its slot."""
+        manager = self._build_manager({GatedPipeline: 1}, max_pending=1)
+        pipeline = manager.middlewares[0]
+        assert isinstance(pipeline, GatedPipeline)
+        task0 = asyncio.ensure_future(manager.process_item_async(0))
+        await _tick()
+        assert pipeline.entered == [0]
+        task0.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task0
+        task1 = asyncio.ensure_future(manager.process_item_async(1))
+        await _tick()
+        assert pipeline.entered == [0, 1]
+        pipeline.gates[1].set_result(None)
+        assert await task1 == 1
+
+    @pytest.mark.parametrize(
+        ("pipeline_class", "exception"),
+        [
+            (SyncRaisePipeline, ValueError),
+            (AsyncRaisePipeline, ValueError),
+            pytest.param(
+                DeferredFailPipeline,
+                ValueError,
+                marks=pytest.mark.filterwarnings(
+                    "ignore::scrapy.exceptions.ScrapyDeprecationWarning"
+                ),
+            ),
+            (DropItemPipeline, DropItem),
+        ],
+    )
+    @coroutine_test
+    async def test_exception_releases_exactly_one_slot(
+        self, pipeline_class: type, exception: type[Exception]
+    ) -> None:
+        """A pipeline step failing, synchronously or asynchronously, releases
+        the item's slot exactly once."""
+        manager = self._build_manager(
+            {pipeline_class: 1, GatedPipeline: 2}, max_pending=1
+        )
+        gated = manager.middlewares[1]
+        assert isinstance(gated, GatedPipeline)
+        with pytest.raises(exception):
+            await manager.process_item_async("bad")
+        tasks = [
+            asyncio.ensure_future(manager.process_item_async("good1")),
+            asyncio.ensure_future(manager.process_item_async("good2")),
+        ]
+        await _tick()
+        # had the slot been released twice, both items would have entered
+        assert gated.entered == ["good1"]
+        gated.gates["good1"].set_result(None)
+        await _tick()
+        assert gated.entered == ["good1", "good2"]
+        gated.gates["good2"].set_result(None)
+        assert await asyncio.gather(*tasks) == ["good1", "good2"]
+
+    @coroutine_test
+    async def test_deferred_pipeline(self) -> None:
+        """Deferred-returning pipeline steps work under the limit."""
+        manager = self._build_manager({DeferredPipeline: 1}, max_pending=1)
+        with pytest.warns(
+            ScrapyDeprecationWarning,
+            match="DeferredPipeline.process_item returned a Deferred",
+        ):
+            for _ in range(2):
+                item = await manager.process_item_async({})
+                assert item["pipeline_passed"]
+
+    @coroutine_test
+    async def test_close(self) -> None:
+        """Closing fails queued items without running them, waits for items
+        in the pipeline and prevents new items from entering."""
+        manager = self._build_manager({GatedPipeline: 1}, max_pending=1)
+        pipeline = manager.middlewares[0]
+        assert isinstance(pipeline, GatedPipeline)
+        tasks = [
+            asyncio.ensure_future(manager.process_item_async(i)) for i in range(3)
+        ]
+        await _tick()
+        assert pipeline.entered == [0]
+        close_task = asyncio.ensure_future(manager.close_spider_async())
+        await _tick()
+        for task in tasks[1:]:
+            with pytest.raises(RuntimeError, match="closed before this item"):
+                await task
+        assert pipeline.entered == [0]
+        assert not close_task.done()
+        pipeline.gates[0].set_result(None)
+        assert await tasks[0] == 0
+        await close_task
+        assert pipeline.closed
+        with pytest.raises(RuntimeError, match="cannot process more items"):
+            await manager.process_item_async(3)
+
+    @coroutine_test
+    async def test_close_propagates_pipeline_exception(self) -> None:
+        """Closing waits for items in the pipeline and does not swallow
+        exceptions raised by pipeline close_spider() methods."""
+        manager = self._build_manager({CloseRaisePipeline: 1}, max_pending=1)
+        pipeline = manager.middlewares[0]
+        assert isinstance(pipeline, CloseRaisePipeline)
+        task = asyncio.ensure_future(manager.process_item_async(0))
+        await _tick()
+        close_task = asyncio.ensure_future(manager.close_spider_async())
+        await _tick()
+        assert not close_task.done()
+        pipeline.gates[0].set_result(None)
+        assert await task == 0
+        with pytest.raises(ValueError, match="close_spider error"):
+            await close_task
+
+    @coroutine_test
+    async def test_crawlers_do_not_share_limit(self) -> None:
+        managers = [
+            self._build_manager({GatedPipeline: 1}, max_pending=1)
+            for _ in range(2)
+        ]
+        pipelines = [m.middlewares[0] for m in managers]
+        tasks = [
+            asyncio.ensure_future(m.process_item_async(i))
+            for i, m in enumerate(managers)
+        ]
+        await _tick()
+        for i, pipeline in enumerate(pipelines):
+            assert isinstance(pipeline, GatedPipeline)
+            assert pipeline.entered == [i]
+            pipeline.gates[i].set_result(None)
+        assert await asyncio.gather(*tasks) == [0, 1]
+
+    @pytest.mark.parametrize("value", [0, -1, "foo", []])
+    @coroutine_test
+    async def test_invalid_setting(self, value: Any) -> None:
+        with pytest.raises(ValueError, match="ITEM_PIPELINE_MAX_PENDING"):
+            self._build_manager({GatedPipeline: 1}, max_pending=value)
+
+    @coroutine_test
+    async def test_integration(self, mockserver: MockServer) -> None:
+        crawler = get_crawler(
+            ItemSpider,
+            {
+                "ITEM_PIPELINES": {SimplePipeline: 1},
+                "ITEM_PIPELINE_MAX_PENDING": 1,
+            },
+        )
+        items: list[Any] = []
+
+        def _on_item_scraped(item: dict[str, Any]) -> None:
+            items.append(item)
+
+        crawler.signals.connect(_on_item_scraped, signals.item_scraped)
+        await crawler.crawl_async(mockserver=mockserver)
+        assert len(items) == 1
+        assert items[0].get("pipeline_passed")
 
 
 class TestMiddlewareManagerSpider:
