@@ -362,6 +362,20 @@ one per actual value of the placeholder.
 
     Set by :class:`~scrapy.downloadermiddlewares.httpcache.HttpCacheMiddleware`.
 
+.. stat:: httpcache/stale_if_error
+
+``httpcache/stale_if_error``
+    Number of times that a stale cached response was served because the
+    download failed (a network exception or an allowed 5xx status) while the
+    response was still inside its ``stale-if-error`` window, when
+    :setting:`HTTPCACHE_STALE_IF_ERROR` is enabled. Those responses carry a
+    ``stale`` flag and are not counted in :stat:`httpcache/store`, so they can
+    be distinguished from freshly collected responses.
+
+    .. versionadded:: 2.21.0
+
+    Set by :class:`~scrapy.downloadermiddlewares.httpcache.HttpCacheMiddleware`.
+
 .. stat:: httpcache/firsthand
 
 ``httpcache/firsthand``

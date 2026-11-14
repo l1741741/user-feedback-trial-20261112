@@ -68,6 +68,13 @@ class DummyPolicy:
     ) -> bool:
         return True
 
+    def is_cached_response_stale_if_error(
+        self, cachedresponse: Response, request: Request
+    ) -> bool:
+        # The dummy policy never lets cached responses expire, so nothing is
+        # ever served as stale by it.
+        return False
+
 
 class RFC2616Policy:
     MAXAGE = 3600 * 24 * 365  # one year
@@ -82,6 +89,13 @@ class RFC2616Policy:
             cc.encode()
             for cc in settings.getlist("HTTPCACHE_IGNORE_RESPONSE_CACHE_CONTROLS")
         ]
+        # When None the system clock (the time module) is used. The cache
+        # middleware assigns one shared clock here, and on its storage, so
+        # that age and window math use a single time source.
+        self._clock: Callable[[], float] | None = None
+
+    def _now(self) -> float:
+        return self._clock() if self._clock is not None else time()
 
     def _parse_cachecontrol(self, r: Request | Response) -> dict[bytes, bytes | None]:
         if r not in self._cc_parsed:
@@ -137,7 +151,7 @@ class RFC2616Policy:
         if b"no-cache" in cc or b"no-cache" in ccreq:
             return False
 
-        now = time()
+        now = self._now()
         freshnesslifetime = self._compute_freshness_lifetime(
             cachedresponse, request, now
         )
@@ -184,6 +198,32 @@ class RFC2616Policy:
 
         # Use the cached response if the server says it hasn't changed.
         return response.status == 304
+
+    def is_cached_response_stale_if_error(
+        self, cachedresponse: Response, request: Request
+    ) -> bool:
+        # RFC 5861, section 2: a stale response may be used on an error only
+        # within the window given by the stale-if-error Cache-Control
+        # directive, measured from the moment the response went stale.
+        cc = self._parse_cachecontrol(cachedresponse)
+        if b"stale-if-error" not in cc:
+            return False
+        # must-revalidate forbids serving stale content under any
+        # circumstance, and private responses must not be reused by a shared
+        # cache after they expire.
+        if b"must-revalidate" in cc or b"private" in cc:
+            return False
+        try:
+            stale_window = max(0, int(cc[b"stale-if-error"]))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return False
+
+        now = self._now()
+        freshnesslifetime = self._compute_freshness_lifetime(
+            cachedresponse, request, now
+        )
+        currentage = self._compute_current_age(cachedresponse, request, now)
+        return currentage < freshnesslifetime + stale_window
 
     def _set_conditional_validators(
         self, request: Request, cachedresponse: Response
@@ -264,6 +304,13 @@ class DbmCacheStorage:
         self.dbmodule: ModuleType = import_module(settings["HTTPCACHE_DBM_MODULE"])
         self.db: Any = None  # the real type is private
         self._scope = _get_scope(settings, ("spider", "none"))
+        # When None the system clock (the time module) is used. The cache
+        # middleware assigns one shared clock here, and on its policy, so
+        # that entry age math uses a single time source.
+        self._clock: Callable[[], float] | None = None
+
+    def _now(self) -> float:
+        return self._clock() if self._clock is not None else time()
 
     def open_spider(self, spider: Spider) -> None:
         name = spider.name if self._scope == "spider" else "httpcache"
@@ -296,7 +343,7 @@ class DbmCacheStorage:
     ) -> None:
         key = self._fingerprinter.fingerprint(request).hex()
         self.db[f"{key}_data"] = pickle.dumps(response.to_dict(), protocol=4)
-        self.db[f"{key}_time"] = str(time())
+        self.db[f"{key}_time"] = str(self._now())
 
     def _read_data(
         self, spider: Spider, request: Request
@@ -308,7 +355,7 @@ class DbmCacheStorage:
             return None  # not found
 
         ts = float(db[tkey])
-        if 0 < self.expiration_secs < time() - ts:
+        if 0 < self.expiration_secs < self._now() - ts:
             return None  # expired
 
         data = cast("dict[str, Any]", pickle.loads(db[f"{key}_data"]))  # noqa: S301
@@ -327,6 +374,13 @@ class FilesystemCacheStorage:
         ] = (
             gzip.open if self.use_gzip else open  # type: ignore[assignment]
         )
+        # When None the system clock (the time module) is used. The cache
+        # middleware assigns one shared clock here, and on its policy, so
+        # that entry age math uses a single time source.
+        self._clock: Callable[[], float] | None = None
+
+    def _now(self) -> float:
+        return self._clock() if self._clock is not None else time()
 
     def open_spider(self, spider: Spider) -> None:
         logger.debug(
@@ -375,7 +429,7 @@ class FilesystemCacheStorage:
             "method": request.method,
             "status": response.status,
             "response_url": response.url,
-            "timestamp": time(),
+            "timestamp": self._now(),
         }
         with self._open(rpath / "meta", "wb") as f:
             f.write(repr(metadata).encode())
@@ -417,7 +471,7 @@ class FilesystemCacheStorage:
         if not metapath.exists():
             return None  # not found
         mtime = metapath.stat().st_mtime
-        if 0 < self.expiration_secs < time() - mtime:
+        if 0 < self.expiration_secs < self._now() - mtime:
             return None  # expired
         with self._open(metapath, "rb") as f:
             return cast("dict[str, Any]", pickle.load(f))  # noqa: S301

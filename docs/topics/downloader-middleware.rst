@@ -780,6 +780,51 @@ We assume that the spider will not issue Cache-Control directives
 in requests unless it actually needs them, so directives in requests are
 not filtered.
 
+.. setting:: HTTPCACHE_STALE_IF_ERROR
+
+HTTPCACHE_STALE_IF_ERROR
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 2.21.0
+
+Default: ``False``
+
+Whether a failed download may fall back to a cached response that has gone
+stale, within the window declared by that response's
+``Cache-Control: stale-if-error`` directive (RFC 5861).
+
+When enabled, if re-downloading a resource raises a network error (see the
+download exceptions of :class:`~scrapy.downloadermiddlewares.httpcache.HttpCacheMiddleware`)
+or returns a status listed in :setting:`HTTPCACHE_STALE_IF_ERROR_HTTP_CODES`,
+the cached response is reused while its current age is below its freshness
+lifetime plus the ``stale-if-error`` value in seconds. Once that window has
+closed, or the cached response carries ``no-store``, ``must-revalidate`` or
+``private``, the real failure is kept instead. The request's
+:reqmeta:`dont_cache` meta key and ``Cache-Control: no-store`` requests are
+respected as usual.
+
+A response served this way is never a new download: the failed response is
+not stored, the cached object is not rewritten, and the reused response gets
+a ``stale`` flag in its :attr:`~scrapy.http.Response.flags` in addition to the
+usual ``cached`` flag. It is counted in the :stat:`httpcache/stale_if_error`
+stat rather than in :stat:`httpcache/store`, so data consumers can tell a
+stale fallback apart from a freshly collected response.
+
+.. setting:: HTTPCACHE_STALE_IF_ERROR_HTTP_CODES
+
+HTTPCACHE_STALE_IF_ERROR_HTTP_CODES
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 2.21.0
+
+Default: ``[500, 502, 503, 504]``
+
+Response status codes that, while :setting:`HTTPCACHE_STALE_IF_ERROR` is
+enabled and the cached response is inside its ``stale-if-error`` window,
+allow serving that stale cached response instead of the error response.
+Status codes outside this list, including 401, 403 and 404, always reach the
+spider as the real response.
+
 .. currentmodule:: None
 
 .. _http-compression:

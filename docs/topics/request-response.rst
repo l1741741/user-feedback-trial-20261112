@@ -1367,9 +1367,17 @@ Response objects
     .. attribute:: Response.flags
 
         A list that contains flags for this response. Flags are labels used for
-        tagging Responses. For example: ``'cached'``, ``'redirected'``', etc. And
-        they're shown on the string representation of the Response (``__str__()``
-        method) which is used by the engine for logging.
+        tagging Responses. For example: ``'cached'``, ``'stale'``,
+        ``'redirected'``', etc. And they're shown on the string representation
+        of the Response (``__str__()`` method) which is used by the engine for
+        logging.
+
+        A ``'cached'`` flag marks a response read from the HTTP cache rather
+        than downloaded. A response additionally flagged ``'stale'`` is a
+        stale cached response reused after a failed download within its
+        ``stale-if-error`` window (see
+        :setting:`HTTPCACHE_STALE_IF_ERROR`); its body is the previously
+        collected data, not the result of the current request.
 
     .. attribute:: Response.certificate
 

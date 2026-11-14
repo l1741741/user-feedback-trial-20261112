@@ -21,6 +21,8 @@ from scrapy.utils.defer import maybe_deferred_to_future
 from scrapy.utils.misc import load_object
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from scrapy.crawler import Crawler
     from scrapy.http.request import Request
     from scrapy.http.response import Response
@@ -53,8 +55,22 @@ class HttpCacheMiddleware:
         self.policy = load_object(settings["HTTPCACHE_POLICY"])(settings)
         self.storage = load_object(settings["HTTPCACHE_STORAGE"])(settings)
         self.ignore_missing = settings.getbool("HTTPCACHE_IGNORE_MISSING")
+        self.stale_if_error = settings.getbool("HTTPCACHE_STALE_IF_ERROR")
+        self.stale_if_error_http_codes = {
+            int(code)
+            for code in settings.getlist("HTTPCACHE_STALE_IF_ERROR_HTTP_CODES")
+        }
         self.stats = stats
         self._downloading: dict[bytes, list[Deferred[None]]] = {}
+
+    def _set_clock(self, clock: Callable[[], float]) -> None:
+        # Drive the policy and the storage from one injectable clock, so that
+        # the age of a cached entry and its stale-if-error window are computed
+        # against the same time source. Third-party components need not accept
+        # one; the bundled ones hold the clock in a nullable _clock attribute.
+        for component in (self.policy, self.storage):
+            if hasattr(component, "_clock"):
+                component._clock = clock  # type: ignore[attr-defined]
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
@@ -206,6 +222,19 @@ class HttpCacheMiddleware:
             self._cache_response(response, request)
             return response
 
+        # Serve the stale cached response instead of the configured 5xx
+        # response while its stale-if-error window is still open. The error
+        # response itself is never stored, so it cannot count as a fresh
+        # crawl result.
+        if (
+            self.stale_if_error
+            and response.status in self.stale_if_error_http_codes
+            and self.policy.is_cached_response_stale_if_error(
+                cachedresponse, request
+            )
+        ):
+            return self._serve_stale(cachedresponse)
+
         if self.policy.is_cached_response_valid(cachedresponse, response, request):
             self.stats.inc_value("httpcache/revalidate")
             if response.status == 304:
@@ -224,12 +253,24 @@ class HttpCacheMiddleware:
     ) -> Request | Response | None:
         self._downloaded(request)
         cachedresponse: Response | None = request.meta.pop("cached_response", None)
-        if cachedresponse is not None and isinstance(
+        if cachedresponse is None or not isinstance(
             exception, self.DOWNLOAD_EXCEPTIONS
         ):
-            self.stats.inc_value("httpcache/errorrecovery")
-            return cachedresponse
-        return None
+            return None
+        if self.stale_if_error and self.policy.is_cached_response_stale_if_error(
+            cachedresponse, request
+        ):
+            return self._serve_stale(cachedresponse)
+        self.stats.inc_value("httpcache/errorrecovery")
+        return cachedresponse
+
+    def _serve_stale(self, cachedresponse: Response) -> Response:
+        # Mark the in-memory copy only: the stored cache object is neither
+        # rewritten nor re-timestamped, so later requests still read it with
+        # its original age.
+        cachedresponse.flags.append("stale")
+        self.stats.inc_value("httpcache/stale_if_error")
+        return cachedresponse
 
     def _freshen_cached_response(
         self, cachedresponse: Response, response: Response

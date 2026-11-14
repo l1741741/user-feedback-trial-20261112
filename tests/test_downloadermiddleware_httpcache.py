@@ -14,6 +14,7 @@ from unittest import mock
 
 import pytest
 from twisted.internet.defer import Deferred
+from twisted.internet.error import ConnectionLost
 
 from scrapy import signals
 from scrapy.core.downloader.middleware import DownloaderMiddlewareManager
@@ -946,6 +947,759 @@ class TestFilesystemStorageGzipWithDummyPolicy(TestFilesystemStorageWithDummyPol
         # A spider killed while writing a gzip file leaves it truncated.
         body_path = Path(storage._get_request_path(spider, request), "response_body")
         body_path.write_bytes(body_path.read_bytes()[:-5])
+
+
+class _ControlledClock:
+    """Clock whose current time tests move explicitly."""
+
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _HeaderAwareFingerprinter:
+    """Fingerprinter that includes the X-Shop header, so requests differing
+    only by that header get distinct cache entries."""
+
+    def __init__(self, crawler: Crawler | None = None) -> None:
+        self._crawler = crawler
+
+    @classmethod
+    def from_crawler(cls, crawler: Crawler) -> _HeaderAwareFingerprinter:
+        return cls(crawler)
+
+    def fingerprint(self, request: Request) -> bytes:
+        from scrapy.utils.request import fingerprint
+
+        return fingerprint(request, include_headers=["X-Shop"])
+
+
+class _FakeCacheStorage:
+    """In-memory cache storage that hands back a fresh copy of every stored
+    response, like the real storages do, and never forgets an entry on its
+    own: expiration is entirely the policy's responsibility."""
+
+    def __init__(self, settings: Any) -> None:
+        self.entries: dict[bytes, Response] = {}
+        self.store_calls = 0
+        self._fingerprinter: Any = None
+        # Matches the bundled storages: None until the middleware injects its
+        # shared clock.
+        self._clock: Callable[[], float] | None = None
+
+    def open_spider(self, spider: Spider) -> None:
+        self._fingerprinter = spider.crawler.request_fingerprinter
+
+    def close_spider(self, spider: Spider) -> None:
+        pass
+
+    def store_response(
+        self, spider: Spider, request: Request, response: Response
+    ) -> None:
+        self.store_calls += 1
+        self.entries[self._fingerprinter.fingerprint(request)] = response
+
+    def retrieve_response(self, spider: Spider, request: Request) -> Response | None:
+        response = self.entries.get(self._fingerprinter.fingerprint(request))
+        if response is None:
+            return None
+        # The real storages rebuild the response from disk, so flags added to
+        # a returned copy never reach the stored object.
+        request.meta["cache_timestamp"] = 0.0
+        return response.replace()
+
+
+class TestStaleIfError:
+    """Serving a cached response within its stale-if-error window when the
+    download fails, based on RFC 5861 with a controllable clock."""
+
+    url = "http://www.example.com/price"
+    # The response is stored at t=1000 and is fresh for 100 seconds, with a
+    # 50-second stale-if-error window. Window math therefore happens at fixed
+    # points on the fake clock.
+    store_time = 1000.0
+    max_age = 100
+    stale_window = 50
+
+    def _settings(self, **new_settings: Any) -> dict[str, Any]:
+        settings = {
+            "HTTPCACHE_ENABLED": True,
+            "HTTPCACHE_POLICY": "scrapy.extensions.httpcache.RFC2616Policy",
+            "HTTPCACHE_STORAGE": (
+                "tests.test_downloadermiddleware_httpcache._FakeCacheStorage"
+            ),
+        }
+        settings.update(new_settings)
+        return settings
+
+    @contextmanager
+    def _middleware(self, **new_settings: Any):
+        settings = self._settings(**new_settings)
+        crawler = get_crawler(Spider, settings)
+        crawler.spider = crawler._create_spider("example.com")
+        crawler.stats.open_spider()
+        try:
+            mw = build_from_crawler(HttpCacheMiddleware, crawler)
+            mw.spider_opened(crawler.spider)
+            clock = _ControlledClock(self.store_time)
+            mw._set_clock(clock)
+            try:
+                yield mw, clock
+            finally:
+                mw.spider_closed(crawler.spider)
+        finally:
+            crawler.stats.close_spider()
+
+    def _cached_response(
+        self,
+        cache_control: str = f"max-age={max_age}, stale-if-error={stale_window}",
+        *,
+        status: int = 200,
+        body: bytes = b"old price",
+        headers: dict[str, Any] | None = None,
+    ) -> Response:
+        response_headers = {
+            "Date": email.utils.formatdate(
+                self.store_time, usegmt=True
+            ),
+            "Cache-Control": cache_control,
+        }
+        if headers:
+            response_headers.update(headers)
+        return Response(self.url, status=status, headers=response_headers, body=body)
+
+    async def _prime_cache(
+        self, mw: HttpCacheMiddleware, response: Response | None = None
+    ) -> Request:
+        """Run one successful 200 collection so the cache holds a response."""
+        request = Request(self.url)
+        assert await mw.process_request(request) is None
+        mw.process_response(request, response or self._cached_response())
+        return request
+
+    async def _failed_download(
+        self,
+        mw: HttpCacheMiddleware,
+        status: int | None = None,
+        exception: Exception | None = None,
+    ) -> Response:
+        """Re-request the primed URL and simulate a failed download."""
+        request = Request(self.url)
+        assert await mw.process_request(request) is None
+        if exception is not None:
+            result = mw.process_exception(request, exception)
+            assert result is not None
+            assert isinstance(result, Response)
+            return result
+        assert status is not None
+        result = mw.process_response(
+            request, Response(self.url, status=status, body=b"error page")
+        )
+        assert isinstance(result, Response)
+        return result
+
+    @coroutine_test
+    async def test_disabled_by_default_keeps_legacy_5xx_behavior(self):
+        # With the option off, a 5xx still goes through the pre-existing
+        # policy recovery: the cached response comes back flagged "cached"
+        # and no stale stat is recorded.
+        with self._middleware() as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + self.max_age + 10
+
+            response = await self._failed_download(mw, status=503)
+            assert response.status == 200
+            assert response.body == b"old price"
+            assert "cached" in response.flags
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+            assert mw.stats.get_value("httpcache/errorrecovery") is None
+            assert mw.stats.get_value("httpcache/revalidate") == 1
+
+    @coroutine_test
+    async def test_disabled_by_default_network_exception_keeps_legacy_behavior(self):
+        with self._middleware() as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + self.max_age + 10
+
+            response = await self._failed_download(
+                mw, exception=ConnectionLost("down")
+            )
+            assert response.status == 200
+            assert response.flags == ["cached"]
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+            assert mw.stats.get_value("httpcache/errorrecovery") == 1
+
+    @coroutine_test
+    async def test_503_within_window_returns_stale_cached_response(self):
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + self.max_age + 10
+
+            response = await self._failed_download(mw, status=503)
+            assert response.status == 200
+            assert response.body == b"old price"
+            assert response.flags == ["cached", "stale"]
+            assert mw.stats.get_value("httpcache/stale_if_error") == 1
+
+    @pytest.mark.parametrize("status", [500, 502, 503, 504])
+    @coroutine_test
+    async def test_configured_5xx_codes_fall_back(self, status: int):
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + self.max_age + 10
+
+            response = await self._failed_download(mw, status=status)
+            assert response.status == 200
+            assert "stale" in response.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") == 1
+
+    @pytest.mark.parametrize("status", [401, 403, 404])
+    @coroutine_test
+    async def test_4xx_responses_are_real_failures(self, status: int):
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + self.max_age + 10
+
+            response = await self._failed_download(mw, status=status)
+            assert response.status == status
+            assert response.body == b"error page"
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+
+    @coroutine_test
+    async def test_5xx_not_in_allowed_codes_is_not_marked_stale(self):
+        with self._middleware(
+            HTTPCACHE_STALE_IF_ERROR=True,
+            HTTPCACHE_STALE_IF_ERROR_HTTP_CODES=[503],
+        ) as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + self.max_age + 10
+
+            # 500 is outside the configured codes, so the stale-if-error
+            # window is not consulted. The pre-existing RFC2616 recovery may
+            # still serve the cached response, but it is not marked stale.
+            response = await self._failed_download(mw, status=500)
+            assert response.status == 200
+            assert response.flags == ["cached"]
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+            assert mw.stats.get_value("httpcache/revalidate") == 1
+
+            # The configured 503 uses the window and gets the stale marker.
+            allowed = await self._failed_download(mw, status=503)
+            assert allowed.status == 200
+            assert "stale" in allowed.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") == 1
+
+    @pytest.mark.parametrize(
+        ("offset", "expected_stale"),
+        [
+            # One second stale, well inside the window.
+            (max_age + 1, True),
+            # Last second inside the window: age 149 < 100 + 50.
+            (max_age + stale_window - 1, True),
+            # Exactly at the window boundary, age == lifetime + window:
+            # the window is closed.
+            (max_age + stale_window, False),
+            # Well past the window.
+            (max_age + stale_window + 100, False),
+        ],
+    )
+    @coroutine_test
+    async def test_precise_window_boundaries(
+        self, offset: int, expected_stale: bool
+    ):
+        # The policy method gives the exact boolean the middleware branches
+        # on, so the boundary can be asserted without the pre-existing 5xx
+        # recovery path interfering.
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + offset
+            request = Request(self.url)
+            cached = mw.storage.retrieve_response(mw.crawler.spider, request)
+            assert cached is not None
+            assert (
+                mw.policy.is_cached_response_stale_if_error(cached, request)
+                is expected_stale
+            )
+
+            # End-to-end: inside the window the 503 is replaced by the stale
+            # cached response; outside it no stale-if-error stat is recorded.
+            response = await self._failed_download(mw, status=503)
+            if expected_stale:
+                assert response.status == 200
+                assert "stale" in response.flags
+                assert mw.stats.get_value("httpcache/stale_if_error") == 1
+            else:
+                assert "stale" not in response.flags
+                assert mw.stats.get_value("httpcache/stale_if_error") is None
+
+    @coroutine_test
+    async def test_fresh_response_is_a_cache_hit_without_downloading(self):
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + self.max_age - 1
+
+            request = Request(self.url)
+            response = await mw.process_request(request)
+            assert isinstance(response, Response)
+            assert response.status == 200
+            assert response.flags == ["cached"]
+            assert mw.stats.get_value("httpcache/hit") == 1
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+
+    @coroutine_test
+    async def test_past_window_keeps_the_real_5xx_with_must_revalidate(self):
+        # must-revalidate disables the pre-existing RFC2616 5xx recovery, so
+        # once the stale-if-error window closes the 503 reaches the spider.
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(
+                mw,
+                self._cached_response(
+                    "max-age=100, stale-if-error=50, must-revalidate"
+                ),
+            )
+            clock.now = self.store_time + self.max_age + self.stale_window
+
+            response = await self._failed_download(mw, status=503)
+            assert response.status == 503
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+
+    @coroutine_test
+    async def test_missing_stale_if_error_directive_never_falls_back(self):
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(
+                mw,
+                self._cached_response(
+                    "max-age=100, must-revalidate"
+                ),
+            )
+            clock.now = self.store_time + 110
+
+            response = await self._failed_download(mw, status=503)
+            assert response.status == 503
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+
+    @pytest.mark.parametrize(
+        "directive",
+        [
+            "max-age=100, stale-if-error=50, must-revalidate",
+            "max-age=100, stale-if-error=50, private",
+        ],
+    )
+    @coroutine_test
+    async def test_revalidation_directives_block_stale_fallback(
+        self, directive: str
+    ):
+        # Both responses are stored, but their directive forbids reusing them
+        # once stale. must-revalidate also disables the ordinary 5xx recovery,
+        # so the failure reaches the spider; for private the ordinary recovery
+        # may still apply, but the stale marker never does.
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(mw, self._cached_response(directive))
+            clock.now = self.store_time + 110
+
+            request = Request(self.url)
+            cached = mw.storage.retrieve_response(mw.crawler.spider, request)
+            assert cached is not None
+            assert not mw.policy.is_cached_response_stale_if_error(
+                cached, request
+            )
+
+            response = await self._failed_download(mw, status=503)
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+            if "must-revalidate" in directive:
+                assert response.status == 503
+
+    @coroutine_test
+    async def test_no_store_response_is_never_cached_or_served_stale(self):
+        directive = "max-age=100, stale-if-error=50, no-store"
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            # no-store responses are never cached in the first place, so the
+            # failed download has nothing to fall back to.
+            request = Request(self.url)
+            assert await mw.process_request(request) is None
+            mw.process_response(request, self._cached_response(directive))
+            assert mw.storage.retrieve_response(mw.crawler.spider, request) is None
+            clock.now = self.store_time + 110
+            response = mw.process_response(
+                request, Response(self.url, status=503)
+            )
+            assert response.status == 503
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+
+    @coroutine_test
+    async def test_request_no_store_does_not_cache_and_does_not_fall_back(self):
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            request = Request(self.url, headers={"Cache-Control": "no-store"})
+            assert await mw.process_request(request) is None
+            mw.process_response(request, self._cached_response())
+            assert mw.storage.retrieve_response(mw.crawler.spider, request) is None
+
+            clock.now = self.store_time + 110
+            assert await mw.process_request(request) is None
+            response = mw.process_response(request, Response(self.url, status=503))
+            assert response.status == 503
+            assert "stale" not in response.flags
+
+    @coroutine_test
+    async def test_dont_cache_request_never_falls_back(self):
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + 110
+
+            request = Request(self.url, meta={"dont_cache": True})
+            assert await mw.process_request(request) is None
+            response = mw.process_response(
+                request, Response(self.url, status=503)
+            )
+            assert response.status == 503
+            assert "stale" not in response.flags
+            assert mw.process_exception(request, ConnectionLost("down")) is None
+
+    @coroutine_test
+    async def test_network_exception_within_window_returns_stale(self):
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + self.max_age + 10
+
+            response = await self._failed_download(
+                mw, exception=ConnectionLost("connection lost")
+            )
+            assert response.status == 200
+            assert response.body == b"old price"
+            assert response.flags == ["cached", "stale"]
+            assert mw.stats.get_value("httpcache/stale_if_error") == 1
+            # The legacy error-recovery counter must not double-count it.
+            assert mw.stats.get_value("httpcache/errorrecovery") is None
+
+    @coroutine_test
+    async def test_unhandled_exception_is_a_real_failure(self):
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + self.max_age + 10
+
+            request = Request(self.url)
+            assert await mw.process_request(request) is None
+            assert (
+                mw.process_exception(request, ValueError("not a download error"))
+                is None
+            )
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+
+    @coroutine_test
+    async def test_consecutive_failures_keep_original_age(self):
+        # Repeated failures must not refresh the stored entry's age: every
+        # attempt is judged against the original freshness lifetime, so once
+        # the window closes, further failures stop being masked.
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(mw)
+
+            clock.now = self.store_time + self.max_age + 10
+            first = await self._failed_download(mw, status=503)
+            assert "stale" in first.flags
+
+            # A second failure later, still presented as within a window that
+            # would reopen if the age had been reset.
+            clock.now = self.store_time + self.max_age + 40
+            second = await self._failed_download(mw, status=503)
+            assert "stale" in second.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") == 2
+
+            # No fallback stored a new entry: the storage still holds exactly
+            # one object, with its original body and no stale flag.
+            assert len(mw.storage.entries) == 1
+            stored = next(iter(mw.storage.entries.values()))
+            assert stored.body == b"old price"
+            assert stored.flags == []
+            assert mw.storage.store_calls == 1
+
+            # Past the original window, a third failure is no longer covered
+            # by stale-if-error; the ordinary recovery may still answer, but
+            # the stale marker and counter stay unchanged.
+            clock.now = self.store_time + self.max_age + self.stale_window + 1
+            third = await self._failed_download(mw, status=503)
+            assert "stale" not in third.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") == 2
+            assert mw.storage.store_calls == 1
+
+    @coroutine_test
+    async def test_5xx_response_is_not_stored_as_a_new_success(self):
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + self.max_age + 10
+
+            await self._failed_download(mw, status=503)
+            assert mw.storage.store_calls == 1
+            stored = next(iter(mw.storage.entries.values()))
+            assert stored.status == 200
+            assert stored.body == b"old price"
+            assert mw.stats.get_value("httpcache/store") == 1
+            assert mw.stats.get_value("httpcache/uncacheable") is None
+
+    @coroutine_test
+    async def test_returning_stale_does_not_mutate_the_stored_object(self):
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + self.max_age + 10
+
+            response = await self._failed_download(mw, status=503)
+            assert "stale" in response.flags
+
+            # A different request for the same resource reads a clean copy.
+            other = Request(self.url)
+            retrieved = mw.storage.retrieve_response(mw.crawler.spider, other)
+            assert retrieved is not None
+            assert retrieved.flags == []
+            assert retrieved.body == response.body
+
+    @coroutine_test
+    async def test_304_revalidation_follows_the_normal_cache_flow(self):
+        # A successful conditional revalidation inside the stale period keeps
+        # the cached response through the regular revalidation path, with no
+        # stale marking.
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(
+                mw,
+                self._cached_response(
+                    headers={"Last-Modified": email.utils.formatdate(0, usegmt=True)}
+                ),
+            )
+            clock.now = self.store_time + self.max_age + 10
+
+            request = Request(self.url)
+            assert await mw.process_request(request) is None
+            # The policy attached a conditional validator.
+            assert b"If-Modified-Since" in request.headers
+            not_modified = Response(
+                self.url,
+                status=304,
+                headers={"Date": request.headers.get(b"Date")},
+            )
+            response = mw.process_response(request, not_modified)
+            assert response.status == 200
+            assert "cached" in response.flags
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/revalidate") == 1
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+
+    @coroutine_test
+    async def test_normal_200_replaces_stale_cache_entry(self):
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + self.max_age + 10
+
+            request = Request(self.url)
+            assert await mw.process_request(request) is None
+            fresh = Response(
+                self.url,
+                status=200,
+                headers={
+                    "Date": email.utils.formatdate(clock.now, usegmt=True),
+                    "Cache-Control": "max-age=100, stale-if-error=50",
+                },
+                body=b"new price",
+            )
+            response = mw.process_response(request, fresh)
+            assert response is fresh
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/invalidate") == 1
+            stored = next(iter(mw.storage.entries.values()))
+            assert stored.body == b"new price"
+
+    @coroutine_test
+    async def test_different_request_fingerprints_do_not_share_stale_data(self):
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + self.max_age + 10
+
+            # A different URL has no cache entry and therefore nothing to
+            # fall back to.
+            other = Request("http://www.example.com/other-price")
+            assert await mw.process_request(other) is None
+            response = mw.process_response(
+                other, Response(other.url, status=503)
+            )
+            assert response.status == 503
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+
+    @coroutine_test
+    async def test_different_request_headers_do_not_share_stale_data(self):
+        with self._middleware(
+            HTTPCACHE_STALE_IF_ERROR=True,
+            REQUEST_FINGERPRINTER_CLASS=(
+                "tests.test_downloadermiddleware_httpcache._HeaderAwareFingerprinter"
+            ),
+        ) as (mw, clock):
+            keyed = Request(self.url, headers={"X-Shop": "own"})
+            assert await mw.process_request(keyed) is None
+            mw.process_response(keyed, self._cached_response())
+            clock.now = self.store_time + self.max_age + 10
+
+            # The same URL with another header value has its own fingerprint
+            # and therefore no cache entry to fall back to.
+            competitor = Request(self.url, headers={"X-Shop": "competitor"})
+            assert (
+                mw._fingerprinter.fingerprint(competitor)
+                != mw._fingerprinter.fingerprint(keyed)
+            )
+            assert await mw.process_request(competitor) is None
+            response = mw.process_response(
+                competitor, Response(self.url, status=503)
+            )
+            assert response.status == 503
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+
+    @coroutine_test
+    async def test_age_header_extends_computed_age(self):
+        # The Age header pins the computed age to 120 while the Date-based age
+        # is lower. The window ends when current age reaches lifetime + window
+        # (150), which happens once the Date-based age passes 150, at
+        # t = 1000 + 150.
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(
+                mw,
+                self._cached_response(
+                    headers={"Age": "120"},
+                ),
+            )
+            clock.now = self.store_time + 40
+            response = await self._failed_download(mw, status=503)
+            assert "stale" in response.flags  # age max(40, 120) = 120 < 150
+
+            clock.now = self.store_time + 150
+            request = Request(self.url)
+            cached = mw.storage.retrieve_response(mw.crawler.spider, request)
+            assert cached is not None
+            assert not mw.policy.is_cached_response_stale_if_error(
+                cached, request
+            )  # age 150 == lifetime + window
+            response = await self._failed_download(mw, status=503)
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") == 1
+
+    @coroutine_test
+    async def test_invalid_stale_if_error_value_is_ignored(self):
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(
+                mw,
+                self._cached_response(
+                    "max-age=100, stale-if-error=soon, must-revalidate"
+                ),
+            )
+            clock.now = self.store_time + 110
+            response = await self._failed_download(mw, status=503)
+            assert response.status == 503
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+
+    @coroutine_test
+    async def test_unparsable_stale_if_error_value_closes_the_window(self):
+        # Without must-revalidate the ordinary 5xx recovery may still answer,
+        # but a stale-if-error value that is not an integer must never open
+        # the window, so the response is not branded stale.
+        with self._middleware(HTTPCACHE_STALE_IF_ERROR=True) as (mw, clock):
+            await self._prime_cache(
+                mw,
+                self._cached_response("max-age=100, stale-if-error=soon"),
+            )
+            clock.now = self.store_time + 110
+            request = Request(self.url)
+            cached = mw.storage.retrieve_response(mw.crawler.spider, request)
+            assert cached is not None
+            assert not mw.policy.is_cached_response_stale_if_error(
+                cached, request
+            )
+            response = await self._failed_download(mw, status=503)
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+
+    @coroutine_test
+    async def test_dummy_policy_never_serves_stale(self):
+        # The default DummyPolicy considers every cached response forever
+        # fresh, so enabling the option cannot produce a stale fallback: the
+        # entry is a plain cache hit before any download is attempted.
+        with self._middleware(
+            HTTPCACHE_STALE_IF_ERROR=True,
+            HTTPCACHE_POLICY="scrapy.extensions.httpcache.DummyPolicy",
+        ) as (mw, clock):
+            await self._prime_cache(mw)
+            clock.now = self.store_time + 10**6
+
+            request = Request(self.url)
+            response = await mw.process_request(request)
+            assert isinstance(response, Response)
+            assert response.flags == ["cached"]
+            assert "stale" not in response.flags
+            assert mw.stats.get_value("httpcache/stale_if_error") is None
+
+    @coroutine_test
+    async def test_set_clock_drives_policy_and_storage_together(self):
+        # The injected clock must reach both components that compute age, and
+        # a component without a _clock attribute (DummyPolicy) is skipped.
+        with self._middleware(
+            HTTPCACHE_POLICY="scrapy.extensions.httpcache.DummyPolicy"
+        ) as (mw, clock):
+            assert not hasattr(mw.policy, "_clock")
+            mw._set_clock(clock)  # must not raise on the clockless policy
+            assert mw.storage._clock is clock
+            await self._prime_cache(mw)
+            assert mw.storage.retrieve_response(
+                mw.crawler.spider, Request(self.url)
+            ) is not None
+
+    @coroutine_test
+    async def test_real_filesystem_storage_uses_the_controlled_clock(self):
+        # End-to-end through the bundled filesystem storage: a controlled
+        # clock drives both the storage's own expiration and the policy's
+        # stale-if-error window with no real time passing.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as cachedir:
+            settings = self._settings(
+                HTTPCACHE_STALE_IF_ERROR=True,
+                HTTPCACHE_STORAGE=(
+                    "scrapy.extensions.httpcache.FilesystemCacheStorage"
+                ),
+                HTTPCACHE_DIR=cachedir,
+            )
+            crawler = get_crawler(Spider, settings)
+            crawler.spider = crawler._create_spider("example.com")
+            crawler.stats.open_spider()
+            try:
+                mw = build_from_crawler(HttpCacheMiddleware, crawler)
+                mw.spider_opened(crawler.spider)
+                clock = _ControlledClock(self.store_time)
+                mw._set_clock(clock)
+                try:
+                    await self._prime_cache(mw)
+
+                    # Inside the window: the stale entry is still on disk and
+                    # a 503 falls back to it.
+                    clock.now = self.store_time + self.max_age + 10
+                    response = await self._failed_download(mw, status=503)
+                    assert response.status == 200
+                    assert "stale" in response.flags
+
+                    # The storage keeps the original timestamp, so a later
+                    # request reads the same entry and the window stays
+                    # anchored to the original freshness lifetime.
+                    clock.now = self.store_time + self.max_age + self.stale_window
+                    later = await self._failed_download(mw, status=503)
+                    assert "stale" not in later.flags
+                finally:
+                    mw.spider_closed(crawler.spider)
+            finally:
+                crawler.stats.close_spider()
 
 
 class _LateMiddleware:
