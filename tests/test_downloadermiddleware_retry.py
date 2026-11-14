@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlencode
 
 import pytest
+from twisted.internet.defer import CancelledError
 from twisted.internet.error import ConnectError, ConnectionDone, ConnectionLost
 
 from scrapy.core.scheduler import Scheduler
@@ -299,6 +300,237 @@ class TestMaxRetryTimes:
 
         # discard it
         assert middleware.process_exception(req, exception) is None
+
+
+class TestIdempotentRetry:
+    """RetryMiddleware in idempotent-only mode (RETRY_IDEMPOTENT_ONLY)."""
+
+    def get_middleware(
+        self, settings: dict[str, Any] | None = None
+    ) -> tuple[RetryMiddleware, Any]:
+        crawler = get_crawler(
+            DefaultSpider, {"RETRY_IDEMPOTENT_ONLY": True, **(settings or {})}
+        )
+        crawler.spider = crawler._create_spider()
+        return build_from_crawler(RetryMiddleware, crawler), crawler
+
+    def test_default_mode_retries_post_without_key(self):
+        crawler = get_crawler(DefaultSpider)
+        crawler.spider = crawler._create_spider()
+        mw = build_from_crawler(RetryMiddleware, crawler)
+        req = Request("http://example.com/submit", method="POST", body=b"a=1")
+        rsp = Response("http://example.com/submit", body=b"", status=503)
+        req2 = mw.process_response(req, rsp)
+        assert isinstance(req2, Request)
+        assert req2.meta["retry_times"] == 1
+
+    def test_post_without_key_rejected_on_response(self):
+        mw, crawler = self.get_middleware()
+        req = Request("http://example.com/submit", method="POST", body=b"a=1")
+        rsp = Response("http://example.com/submit", body=b"", status=503)
+        assert mw.process_response(req, rsp) is rsp
+        assert crawler.stats.get_value("retry/idempotency_rejected") == 1
+        assert crawler.stats.get_value("retry/count") is None
+
+    def test_post_without_key_rejected_on_exception(self):
+        mw, crawler = self.get_middleware()
+        req = Request("http://example.com/submit", method="POST", body=b"a=1")
+        assert mw.process_exception(req, ConnectionLost("foo")) is None
+        assert crawler.stats.get_value("retry/idempotency_rejected") == 1
+        assert crawler.stats.get_value("retry/count") is None
+
+    def test_post_with_key_retried(self):
+        mw, crawler = self.get_middleware()
+
+        def parse(response: Response) -> None:
+            pass
+
+        meta = {"business": {"order": [1, 2]}}
+        req = Request(
+            "http://example.com/submit",
+            method="POST",
+            body=b"a=1",
+            headers={"Idempotency-Key": "abc"},
+            callback=parse,
+            cb_kwargs={"item_id": 7},
+            meta=meta,
+        )
+        rsp = Response("http://example.com/submit", body=b"", status=503)
+        req2 = mw.process_response(req, rsp)
+        assert isinstance(req2, Request)
+        assert req2.meta["retry_times"] == 1
+        # the retry copy keeps the payload, the callbacks and the business key
+        assert req2.body == b"a=1"
+        assert req2.callback is parse
+        assert req2.cb_kwargs == {"item_id": 7}
+        assert req2.headers["Idempotency-Key"] == b"abc"
+        assert req2.meta["business"] == {"order": [1, 2]}
+        # the original request is not modified and policy state is not shared
+        assert "retry_times" not in req.meta
+        assert req2.meta is not req.meta
+        assert req.meta["business"] == {"order": [1, 2]}
+        assert crawler.stats.get_value("retry/count") == 1
+
+    def test_idempotent_method_without_key_retried(self):
+        mw, crawler = self.get_middleware()
+        req = Request("http://example.com/search", method="GET")
+        rsp = Response("http://example.com/search", body=b"", status=503)
+        assert isinstance(mw.process_response(req, rsp), Request)
+
+    def test_unknown_method_rejected(self):
+        mw, crawler = self.get_middleware()
+        req = Request("http://example.com/search", method="SEARCH")
+        rsp = Response("http://example.com/search", body=b"", status=503)
+        assert mw.process_response(req, rsp) is rsp
+        assert crawler.stats.get_value("retry/idempotency_rejected") == 1
+
+    def test_meta_true_allows_post_without_key(self):
+        mw, crawler = self.get_middleware()
+        req = Request(
+            "http://example.com/submit",
+            method="POST",
+            meta={"idempotent": True},
+        )
+        rsp = Response("http://example.com/submit", body=b"", status=503)
+        assert isinstance(mw.process_response(req, rsp), Request)
+
+    def test_meta_false_overrides_key(self):
+        mw, crawler = self.get_middleware()
+        req = Request(
+            "http://example.com/submit",
+            method="POST",
+            headers={"Idempotency-Key": "abc"},
+            meta={"idempotent": False},
+        )
+        rsp = Response("http://example.com/submit", body=b"", status=503)
+        assert mw.process_response(req, rsp) is rsp
+        assert crawler.stats.get_value("retry/idempotency_rejected") == 1
+
+    def test_meta_invalid_raises(self):
+        mw, crawler = self.get_middleware()
+        req = Request(
+            "http://example.com/submit",
+            method="POST",
+            meta={"idempotent": "yes"},
+        )
+        rsp = Response("http://example.com/submit", body=b"", status=503)
+        with pytest.raises(ValueError, match="must be a bool"):
+            mw.process_response(req, rsp)
+
+    def test_invalid_method_setting_raises(self):
+        with pytest.raises(ValueError, match="RETRY_IDEMPOTENT_METHODS"):
+            self.get_middleware({"RETRY_IDEMPOTENT_METHODS": ["GET", "GE T"]})
+
+    def test_invalid_header_setting_raises(self):
+        with pytest.raises(ValueError, match="RETRY_IDEMPOTENCY_KEY_HEADER"):
+            self.get_middleware({"RETRY_IDEMPOTENCY_KEY_HEADER": "Bad Header"})
+
+    def test_custom_key_header(self):
+        mw, crawler = self.get_middleware(
+            {"RETRY_IDEMPOTENCY_KEY_HEADER": "X-Idempotency-Token"}
+        )
+        req = Request(
+            "http://example.com/submit",
+            method="POST",
+            headers={"X-Idempotency-Token": "abc"},
+        )
+        rsp = Response("http://example.com/submit", body=b"", status=503)
+        assert isinstance(mw.process_response(req, rsp), Request)
+        # the default header name no longer counts
+        req = Request(
+            "http://example.com/submit",
+            method="POST",
+            headers={"Idempotency-Key": "abc"},
+        )
+        assert mw.process_response(req, rsp) is rsp
+
+    def test_key_does_not_bypass_exception_whitelist(self):
+        mw, crawler = self.get_middleware()
+        req = Request(
+            "http://example.com/submit",
+            method="POST",
+            headers={"Idempotency-Key": "abc"},
+        )
+        assert mw.process_exception(req, ValueError("foo")) is None
+        assert crawler.stats.get_value("retry/count") is None
+
+    def test_key_does_not_bypass_status_whitelist(self):
+        mw, crawler = self.get_middleware()
+        req = Request(
+            "http://example.com/submit",
+            method="POST",
+            headers={"Idempotency-Key": "abc"},
+        )
+        rsp = Response("http://example.com/submit", body=b"", status=400)
+        assert mw.process_response(req, rsp) is rsp
+        assert crawler.stats.get_value("retry/count") is None
+
+    def test_key_max_retries_enforced(self):
+        mw, crawler = self.get_middleware({"RETRY_TIMES": 2})
+        req = Request(
+            "http://example.com/submit",
+            method="POST",
+            headers={"Idempotency-Key": "abc"},
+        )
+        rsp = Response("http://example.com/submit", body=b"", status=503)
+        req = cast("Request", mw.process_response(req, rsp))
+        assert req.meta["retry_times"] == 1
+        req = cast("Request", mw.process_response(req, rsp))
+        assert req.meta["retry_times"] == 2
+        assert mw.process_response(req, rsp) is rsp
+        assert crawler.stats.get_value("retry/count") == 2
+        assert crawler.stats.get_value("retry/max_reached") == 1
+
+    def test_shared_key_budget_interleaved(self):
+        mw, crawler = self.get_middleware({"RETRY_TIMES": 2})
+        url = "http://example.com/submit"
+        rsp = Response(url, body=b"", status=503)
+        req_a = Request(url, method="POST", headers={"Idempotency-Key": "same"})
+        req_b = Request(url, method="POST", headers={"Idempotency-Key": "same"})
+
+        # the two requests share the retry budget of their common key
+        req_a2 = mw.process_response(req_a, rsp)
+        assert isinstance(req_a2, Request)
+        req_b2 = mw.process_response(req_b, rsp)
+        assert isinstance(req_b2, Request)
+        assert mw.process_response(req_a2, rsp) is rsp
+        assert mw.process_response(req_b2, rsp) is rsp
+        assert crawler.stats.get_value("retry/count") == 2
+        assert crawler.stats.get_value("retry/max_reached") == 2
+
+        # a different key gets its own budget
+        req_c = Request(url, method="POST", headers={"Idempotency-Key": "other"})
+        req_c2 = mw.process_response(req_c, rsp)
+        assert isinstance(req_c2, Request)
+        req_c3 = mw.process_response(req_c2, rsp)
+        assert isinstance(req_c3, Request)
+        assert mw.process_response(req_c3, rsp) is rsp
+        assert crawler.stats.get_value("retry/count") == 4
+
+    def test_cancelled_not_retried(self):
+        mw, crawler = self.get_middleware(
+            {"RETRY_EXCEPTIONS": [*RETRY_EXCEPTIONS, CancelledError]}
+        )
+        req = Request(
+            "http://example.com/submit",
+            method="POST",
+            headers={"Idempotency-Key": "abc"},
+        )
+        assert mw.process_exception(req, CancelledError()) is None
+        assert crawler.stats.get_value("retry/idempotency_rejected") == 1
+        assert crawler.stats.get_value("retry/count") is None
+
+    def test_dont_retry_meta_still_applies(self):
+        mw, crawler = self.get_middleware()
+        req = Request(
+            "http://example.com/submit",
+            method="POST",
+            headers={"Idempotency-Key": "abc"},
+            meta={"dont_retry": True},
+        )
+        rsp = Response("http://example.com/submit", body=b"", status=503)
+        assert mw.process_response(req, rsp) is rsp
+        assert crawler.stats.get_value("retry/count") is None
 
 
 class TestGetRetryRequest:

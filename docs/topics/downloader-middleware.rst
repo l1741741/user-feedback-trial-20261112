@@ -1169,6 +1169,16 @@ number of retries allowed for that request.
 The ``priority_adjust`` :attr:`Request.meta <scrapy.Request.meta>` key
 overrides :setting:`RETRY_PRIORITY_ADJUST` for a request.
 
+.. reqmeta:: idempotent
+
+.. versionadded:: VERSION
+
+When :setting:`RETRY_IDEMPOTENT_ONLY` is ``True``, the ``idempotent``
+:attr:`Request.meta <scrapy.Request.meta>` key explicitly declares whether a
+request may be retried. It must be a bool, and it takes precedence over the
+idempotency key header (see :setting:`RETRY_IDEMPOTENCY_KEY_HEADER`) and
+:setting:`RETRY_IDEMPOTENT_METHODS`.
+
 To retry requests from a spider callback, you can use the
 :func:`get_retry_request` function:
 
@@ -1282,6 +1292,62 @@ Adjust retry request priority relative to original request:
 - **a negative priority adjust (default) means lower priority.**
 
 See also: :reqmeta:`priority_adjust`.
+
+.. setting:: RETRY_IDEMPOTENT_ONLY
+
+RETRY_IDEMPOTENT_ONLY
+^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: VERSION
+
+Default: ``False``
+
+Whether to only retry requests that are known to be idempotent, so that a
+retry cannot trigger a non-idempotent server-side action (e.g. a form
+submission) a second time.
+
+When ``True``, a request is only retried if the :reqmeta:`idempotent` meta
+key allows it, or it carries an idempotency key header (see
+:setting:`RETRY_IDEMPOTENCY_KEY_HEADER`), or its method is in
+:setting:`RETRY_IDEMPOTENT_METHODS`. Requests with any other method and no
+idempotency key are not retried.
+
+Rejected retries are counted in the ``retry/idempotency_rejected``
+:ref:`stat <topics-stats>` and the original response or exception is
+returned. Retries that do happen are still subject to
+:setting:`RETRY_HTTP_CODES`, :setting:`RETRY_EXCEPTIONS` and
+:setting:`RETRY_TIMES`. Requests cancelled by the client are never retried.
+
+Requests that share an idempotency key also share a retry budget: the
+combined number of retries of all requests carrying the same key cannot
+exceed :setting:`RETRY_TIMES` (or :reqmeta:`max_retry_times`). Keys are kept
+in memory for the duration of the crawl.
+
+.. setting:: RETRY_IDEMPOTENT_METHODS
+
+RETRY_IDEMPOTENT_METHODS
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: VERSION
+
+Default: ``["DELETE", "GET", "HEAD", "OPTIONS", "PUT", "TRACE"]``
+
+HTTP methods considered idempotent when :setting:`RETRY_IDEMPOTENT_ONLY` is
+``True``. Entries must be valid HTTP method tokens; matching is
+case-insensitive.
+
+.. setting:: RETRY_IDEMPOTENCY_KEY_HEADER
+
+RETRY_IDEMPOTENCY_KEY_HEADER
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: VERSION
+
+Default: ``"Idempotency-Key"``
+
+Name of the request header whose presence marks a request as idempotent when
+:setting:`RETRY_IDEMPOTENT_ONLY` is ``True``. Must be a valid HTTP header
+name.
 
 
 .. currentmodule:: None

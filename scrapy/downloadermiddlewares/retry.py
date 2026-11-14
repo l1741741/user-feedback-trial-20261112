@@ -9,8 +9,11 @@ RETRY_HTTP_CODES - which HTTP response codes to retry
 
 from __future__ import annotations
 
+import re
 from logging import Logger, getLevelNamesMapping, getLogger
 from typing import TYPE_CHECKING, Self
+
+from twisted.internet.defer import CancelledError
 
 from scrapy.exceptions import NotConfigured
 from scrapy.utils.decorators import _warn_spider_arg
@@ -27,6 +30,9 @@ if TYPE_CHECKING:
 
 
 retry_logger = getLogger(__name__)
+
+# https://www.rfc-editor.org/rfc/rfc9110.html#name-tokens
+_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 
 def get_retry_request(
@@ -147,6 +153,30 @@ class RetryMiddleware:
         self.priority_adjust = settings.getint("RETRY_PRIORITY_ADJUST")
         self.give_up_log_level = settings["RETRY_GIVE_UP_LOG_LEVEL"]
         self.exceptions_to_retry = _load_objects(settings.getlist("RETRY_EXCEPTIONS"))
+        self.idempotent_only = settings.getbool("RETRY_IDEMPOTENT_ONLY")
+        self.idempotency_key_header: str | None = None
+        self.idempotent_methods: frozenset[str] = frozenset()
+        # Retry attempts already spent per idempotency key, shared by all
+        # requests carrying that key so that re-generated requests cannot
+        # exceed the retry budget of the same logical operation.
+        self._idempotency_attempts: dict[bytes, int] = {}
+        if self.idempotent_only:
+            header_name = settings["RETRY_IDEMPOTENCY_KEY_HEADER"]
+            if not isinstance(header_name, str) or not _TOKEN_RE.match(header_name):
+                raise ValueError(
+                    f"RETRY_IDEMPOTENCY_KEY_HEADER must be a valid HTTP header "
+                    f"name, got {header_name!r}"
+                )
+            self.idempotency_key_header = header_name
+            methods = set()
+            for method in settings.getlist("RETRY_IDEMPOTENT_METHODS"):
+                if not isinstance(method, str) or not _TOKEN_RE.match(method):
+                    raise ValueError(
+                        f"RETRY_IDEMPOTENT_METHODS entries must be valid HTTP "
+                        f"method tokens, got {method!r}"
+                    )
+                methods.add(method.upper())
+            self.idempotent_methods = frozenset(methods)
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
@@ -190,6 +220,38 @@ class RetryMiddleware:
             "give_up_log_level", self.give_up_log_level
         )
         assert self.crawler.spider
+        if self.idempotent_only:
+            if isinstance(reason, CancelledError) or not self._idempotency_allows(
+                request
+            ):
+                self.crawler.stats.inc_value("retry/idempotency_rejected")
+                retry_logger.debug(
+                    f"Not retrying {request} ({reason}): the request is not "
+                    f"known to be idempotent",
+                    extra={"spider": self.crawler.spider},
+                )
+                return None
+            key = self._idempotency_key(request)
+            if key is not None:
+                # Check and increment the per-key budget in a single step so
+                # that interleaved requests sharing a key cannot both spend
+                # the same retry slot.
+                budget = (
+                    max_retry_times
+                    if max_retry_times is not None
+                    else self.max_retry_times
+                )
+                attempts = self._idempotency_attempts.get(key, 0)
+                if attempts >= budget:
+                    return get_retry_request(
+                        request,
+                        reason=reason,
+                        spider=self.crawler.spider,
+                        max_retry_times=0,
+                        priority_adjust=priority_adjust,
+                        give_up_log_level=give_up_log_level,
+                    )
+                self._idempotency_attempts[key] = attempts + 1
         return get_retry_request(
             request,
             reason=reason,
@@ -198,3 +260,28 @@ class RetryMiddleware:
             priority_adjust=priority_adjust,
             give_up_log_level=give_up_log_level,
         )
+
+    def _idempotency_key(self, request: Request) -> bytes | None:
+        """Return the idempotency key of *request*, or ``None``."""
+        if self.idempotency_key_header is None:
+            return None
+        return request.headers.get(self.idempotency_key_header)
+
+    def _idempotency_allows(self, request: Request) -> bool:
+        """Return whether *request* may be retried in idempotent-only mode.
+
+        The :reqmeta:`idempotent` meta key wins over the idempotency key
+        header, which wins over the method list. Requests with a method
+        outside :setting:`RETRY_IDEMPOTENT_METHODS` and no key are rejected.
+        """
+        explicit = request.meta.get("idempotent")
+        if explicit is not None:
+            if not isinstance(explicit, bool):
+                raise ValueError(
+                    f"The 'idempotent' request meta key must be a bool, "
+                    f"got {explicit!r}"
+                )
+            return explicit
+        if self._idempotency_key(request) is not None:
+            return True
+        return request.method.upper() in self.idempotent_methods

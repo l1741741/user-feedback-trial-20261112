@@ -834,6 +834,7 @@ Those are:
 * :reqmeta:`http_auth_domain`
 * :reqmeta:`http_pass`
 * :reqmeta:`http_user`
+* :reqmeta:`idempotent`
 * :reqmeta:`is_start_request`
 * :reqmeta:`link_text`
 * :reqmeta:`max_retry_times`
