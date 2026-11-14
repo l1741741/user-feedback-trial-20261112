@@ -6,6 +6,7 @@ import warnings
 
 # Iterable is needed at the run time for the SitemapSpider._parse_sitemap() annotation
 from collections.abc import AsyncIterator, Iterable, Sequence  # noqa: TC003
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any, Literal, Self, cast
 from urllib.parse import urljoin
 
@@ -28,6 +29,18 @@ if TYPE_CHECKING:
     from scrapy.robotstxt import RobotParser
 
 logger = logging.getLogger(__name__)
+
+# Lastmod values carry an explicit UTC offset or are dates; the only naive
+# values accepted are interpreted as UTC, so the local time zone never matters.
+_LastmodCutoffInput = str | date | datetime
+_LastmodMissingPolicy = Literal["include", "exclude"]
+_LastmodInvalidPolicy = Literal["include", "exclude"]
+_LastmodNaivePolicy = Literal["utc", "reject"]
+_LastmodBoundaryPolicy = Literal["include", "exclude"]
+_LASTMOD_POLICIES = ("include", "exclude")
+_LASTMOD_NAIVE_POLICIES = ("utc", "reject")
+# A W3C date is exactly four-digit year, two-digit month and two-digit day.
+_W3C_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 class SitemapSpider(Spider):
@@ -108,9 +121,73 @@ class SitemapSpider(Spider):
     URLs regardless of their scheme.
     """
 
+    sitemap_lastmod_cutoff: _LastmodCutoffInput | None = None
+    """Only process sitemap entries whose ``lastmod`` is after this point in
+    time.
+
+    .. versionadded:: VERSION
+
+    It accepts a :class:`datetime.datetime` (use a timezone-aware value), a
+    :class:`datetime.date`, or a string in one of the `W3C Datetime
+    <https://www.w3.org/TR/NOTE-datetime>`_ forms allowed for ``lastmod``:
+    a date (``YYYY-MM-DD``) or a date and time, with an explicit time zone
+    offset (``YYYY-MM-DDThh:mm:ss+TZD``, where ``TZD`` is ``Z`` or an offset
+    such as ``+02:00``). Dates are compared as midnight UTC, and every other
+    value is converted to UTC before comparing, so the local time zone is
+    never used.
+
+    When ``None``, the default, every entry is processed regardless of its
+    ``lastmod``.
+
+    The ``lastmod`` of a sitemap index entry only decides whether that
+    sub-sitemap is traversed; it is not applied to the URLs inside it.
+
+    Entries that lack a usable ``lastmod``, and entries whose ``lastmod``
+    equals the cutoff, are handled by :attr:`sitemap_lastmod_missing`,
+    :attr:`sitemap_lastmod_invalid`, :attr:`sitemap_lastmod_naive` and
+    :attr:`sitemap_lastmod_boundary`.
+    """
+
+    sitemap_lastmod_missing: _LastmodMissingPolicy = "include"
+    """What to do with entries that have no ``lastmod`` tag, or an empty one,
+    when :attr:`sitemap_lastmod_cutoff` is set: ``"include"`` (the default)
+    processes them, ``"exclude"`` skips them.
+
+    .. versionadded:: VERSION
+    """
+
+    sitemap_lastmod_invalid: _LastmodInvalidPolicy = "include"
+    """What to do with entries whose ``lastmod`` cannot be parsed when
+    :attr:`sitemap_lastmod_cutoff` is set: ``"include"`` (the default)
+    processes them, ``"exclude"`` skips them.
+
+    .. versionadded:: VERSION
+    """
+
+    sitemap_lastmod_naive: _LastmodNaivePolicy = "utc"
+    """How to read a ``lastmod`` without a time zone offset (other than a bare
+    date) when :attr:`sitemap_lastmod_cutoff` is set: ``"utc"`` (the default)
+    reads it as UTC, ``"reject"`` treats it like an invalid value and applies
+    :attr:`sitemap_lastmod_invalid`.
+
+    .. versionadded:: VERSION
+
+    A bare date (``YYYY-MM-DD``) is always read as midnight UTC.
+    """
+
+    sitemap_lastmod_boundary: _LastmodBoundaryPolicy = "exclude"
+    """What to do with entries whose ``lastmod`` equals
+    :attr:`sitemap_lastmod_cutoff`: ``"exclude"`` (the default) only processes
+    entries strictly after the cutoff, ``"include"`` also processes entries at
+    the cutoff.
+
+    .. versionadded:: VERSION
+    """
+
     _max_size: int
     _warn_size: int
     _obey_robotstxt: bool
+    _lastmod_cutoff: datetime | None
 
     @classmethod
     def from_crawler(cls, crawler: Crawler, *args: Any, **kwargs: Any) -> Self:
@@ -136,6 +213,36 @@ class SitemapSpider(Spider):
         self._follow: list[re.Pattern[str]] = [regex(x) for x in self.sitemap_follow]
         self._robots_sitemaps: dict[str, list[str]] = {}
         self._signal_only_netlocs: set[str] = set()
+        self._lastmod_cutoff = self._build_lastmod_cutoff()
+
+    def _build_lastmod_cutoff(self) -> datetime | None:
+        """Validate the lastmod policy attributes and return the cutoff as a
+        timezone-aware UTC datetime, or ``None`` when no cutoff is set."""
+        for attr, choices in (
+            ("sitemap_lastmod_missing", _LASTMOD_POLICIES),
+            ("sitemap_lastmod_invalid", _LASTMOD_POLICIES),
+            ("sitemap_lastmod_naive", _LASTMOD_NAIVE_POLICIES),
+            ("sitemap_lastmod_boundary", _LASTMOD_POLICIES),
+        ):
+            value = getattr(self, attr)
+            if value not in choices:
+                msg = f"{attr} must be one of {', '.join(choices)!r}, got {value!r}."
+                raise ValueError(msg)
+
+        cutoff = self.sitemap_lastmod_cutoff
+        if cutoff is None:
+            return None
+        try:
+            parsed = _parse_lastmod_value(
+                cutoff, naive_policy=self.sitemap_lastmod_naive
+            )
+        except (TypeError, ValueError) as exc:
+            msg = f"Invalid sitemap_lastmod_cutoff value {cutoff!r}: {exc}"
+            raise ValueError(msg) from exc
+        if parsed is None:
+            msg = f"Invalid sitemap_lastmod_cutoff value {cutoff!r}."
+            raise ValueError(msg)
+        return parsed
 
     def _robots_parsed(
         self, robotparser: RobotParser, request: Request, response: Response
@@ -238,6 +345,43 @@ class SitemapSpider(Spider):
         """
         yield from entries
 
+    def _filter_lastmod(
+        self, entries: Iterable[dict[str, Any]]
+    ) -> Iterable[dict[str, Any]]:
+        """Yield the entries from *entries* accepted by the
+        :attr:`sitemap_lastmod_cutoff` policy.
+
+        Runs after :meth:`sitemap_filter` so an overriding filter keeps
+        precedence, and only reads entries: neither the entry dicts nor the
+        sitemap document are modified.
+        """
+        cutoff = self._lastmod_cutoff
+        if cutoff is None:
+            yield from entries
+            return
+
+        for entry in entries:
+            lastmod = entry.get("lastmod")
+            if not lastmod:
+                if self.sitemap_lastmod_missing == "include":
+                    yield entry
+                continue
+
+            parsed = _parse_lastmod_value(
+                lastmod, naive_policy=self.sitemap_lastmod_naive
+            )
+            if parsed is None:
+                if self.sitemap_lastmod_invalid == "include":
+                    yield entry
+                continue
+
+            if self.sitemap_lastmod_boundary == "include":
+                accepted = parsed >= cutoff
+            else:
+                accepted = parsed > cutoff
+            if accepted:
+                yield entry
+
     def sitemap_request(
         self,
         loc: str,
@@ -310,7 +454,9 @@ class SitemapSpider(Spider):
 
         if s.type == "sitemapindex":
             index_entries = list(
-                self._get_urls_from_sitemapindex(self.sitemap_filter(s), response.url)
+                self._get_urls_from_sitemapindex(
+                    self._filter_lastmod(self.sitemap_filter(s)), response.url
+                )
             )
             return (
                 self.sitemap_request(
@@ -326,7 +472,7 @@ class SitemapSpider(Spider):
         if s.type == "urlset":
             urlset_entries = list(
                 self._get_urls_and_callbacks_from_urlset(
-                    self.sitemap_filter(s), response.url
+                    self._filter_lastmod(self.sitemap_filter(s)), response.url
                 )
             )
             return (
@@ -421,6 +567,44 @@ def regex(x: re.Pattern[str] | str) -> re.Pattern[str]:
     if isinstance(x, str):
         return re.compile(x)
     return x
+
+
+def _parse_lastmod_value(
+    value: _LastmodCutoffInput, *, naive_policy: _LastmodNaivePolicy
+) -> datetime | None:
+    """Parse a ``lastmod`` value, or a configured cutoff, into a
+    timezone-aware UTC :class:`~datetime.datetime`.
+
+    Return ``None`` when *value* is a string that is not a valid W3C date or
+    timezone-aware datetime. Raise :exc:`TypeError` or :exc:`ValueError` for
+    other unsupported inputs, so that a bad cutoff fails while a bad entry can
+    be handled by :attr:`SitemapSpider.sitemap_lastmod_invalid`.
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, date):
+        # A date covers a whole day and is read as its start in UTC.
+        return datetime(value.year, value.month, value.day, tzinfo=UTC)
+    elif isinstance(value, str):
+        if _W3C_DATE_RE.fullmatch(value):
+            try:
+                day = date.fromisoformat(value)
+            except ValueError:
+                return None
+            return datetime(day.year, day.month, day.day, tzinfo=UTC)
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    else:
+        msg = f"expected a str, date or datetime, got {type(value).__name__}"
+        raise TypeError(msg)
+
+    if parsed.tzinfo is None:
+        if naive_policy == "reject":
+            return None
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def iterloc(it: Iterable[dict[str, Any]], alt: bool = False) -> Iterable[str]:

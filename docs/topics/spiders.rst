@@ -547,6 +547,29 @@ whose url contains ``/sitemap_shop``:
         def parse_shop(self, response):
             pass  # ... scrape shop here ...
 
+Only process pages modified after a given point in time, for daily
+incremental crawls. Set
+:attr:`~scrapy.spiders.SitemapSpider.sitemap_lastmod_cutoff`
+to the cutoff: every ``lastmod`` is read as a date or a time with a time zone
+offset, converted to UTC and compared against it. Entries without a usable
+``lastmod`` are kept by default; change that with the related
+``sitemap_lastmod_*`` attributes:
+
+.. code-block:: python
+
+    from scrapy.spiders import SitemapSpider
+
+
+    class MySpider(SitemapSpider):
+        sitemap_urls = ["http://www.example.com/sitemap.xml"]
+        # Skip every entry whose lastmod is not strictly after this instant.
+        sitemap_lastmod_cutoff = "2026-11-13T00:00:00Z"
+        # Skip entries that carry no lastmod instead of processing them.
+        sitemap_lastmod_missing = "exclude"
+
+        def parse(self, response):
+            pass  # ... scrape item here ...
+
 Combine SitemapSpider with other sources of urls:
 
 .. code-block:: python

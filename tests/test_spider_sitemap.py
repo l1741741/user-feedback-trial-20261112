@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import gzip
 import re
-from datetime import UTC, datetime
+import time
+from datetime import UTC, date, datetime, timedelta, timezone
 from io import BytesIO
 from logging import WARNING
 from pathlib import Path
@@ -15,7 +16,7 @@ from scrapy import signals
 from scrapy.exceptions import ScrapyDeprecationWarning
 from scrapy.http import HtmlResponse, Request, Response, TextResponse, XmlResponse
 from scrapy.spiders import SitemapSpider
-from scrapy.spiders.sitemap import iterloc
+from scrapy.spiders.sitemap import _parse_lastmod_value, iterloc
 from scrapy.utils.test import get_crawler
 from tests import tests_datadir
 from tests.spiders import RawResponseSpider
@@ -1050,3 +1051,696 @@ def test_iterloc_deprecated():
         locs = list(iterloc(entries))
 
     assert locs == ["http://www.example.com/"]
+
+
+URLSET_WITH_LASTMOD = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:xhtml="http://www.w3.org/1999/xhtml">
+    <url>
+        <loc>http://www.example.com/old/</loc>
+        <lastmod>2025-01-01T00:00:00Z</lastmod>
+    </url>
+    <url>
+        <loc>http://www.example.com/tokyo/</loc>
+        <lastmod>2025-06-01T09:00:00+09:00</lastmod>
+    </url>
+    <url>
+        <loc>http://www.example.com/utc-midnight/</loc>
+        <lastmod>2025-06-01T00:00:00Z</lastmod>
+    </url>
+    <url>
+        <loc>http://www.example.com/date-only/</loc>
+        <lastmod>2025-06-02</lastmod>
+    </url>
+    <url>
+        <loc>http://www.example.com/new/</loc>
+        <lastmod>2025-07-01T12:00:00+02:00</lastmod>
+    </url>
+    <url>
+        <loc>http://www.example.com/missing/</loc>
+    </url>
+    <url>
+        <loc>http://www.example.com/empty/</loc>
+        <lastmod></lastmod>
+    </url>
+    <url>
+        <loc>http://www.example.com/invalid/</loc>
+        <lastmod>not-a-date</lastmod>
+    </url>
+    <url>
+        <loc>http://www.example.com/impossible-date/</loc>
+        <lastmod>2025-02-30</lastmod>
+    </url>
+    <url>
+        <loc>http://www.example.com/naive/</loc>
+        <lastmod>2025-06-15T12:00:00</lastmod>
+    </url>
+    <url>
+        <loc>http://www.example.com/alternate/</loc>
+        <lastmod>2024-01-01T00:00:00Z</lastmod>
+        <xhtml:link rel="alternate" hreflang="de"
+            href="http://www.example.com/deutsch/"/>
+    </url>
+</urlset>"""
+
+SITEMAPINDEX_WITH_LASTMOD = b"""<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <sitemap>
+        <loc>http://www.example.com/old-sitemap.xml</loc>
+        <lastmod>2025-01-01T00:00:00Z</lastmod>
+    </sitemap>
+    <sitemap>
+        <loc>http://www.example.com/new-sitemap.xml</loc>
+        <lastmod>2025-07-01T00:00:00Z</lastmod>
+    </sitemap>
+    <sitemap>
+        <loc>http://www.example.com/missing-sitemap.xml</loc>
+    </sitemap>
+</sitemapindex>"""
+
+
+def _parse_urlset(
+    spider: SitemapSpider, body: bytes = URLSET_WITH_LASTMOD
+) -> list[str]:
+    response = TextResponse(url="http://www.example.com/sitemap.xml", body=body)
+    return [request.url for request in spider._parse_sitemap(response)]
+
+
+class TestSitemapSpiderLastmodCutoff:
+    def test_disabled_by_default_processes_every_entry(self):
+        spider = SitemapSpider("example.com")
+        assert spider._lastmod_cutoff is None
+
+        urls = _parse_urlset(spider)
+
+        assert urls == [
+            "http://www.example.com/old/",
+            "http://www.example.com/tokyo/",
+            "http://www.example.com/utc-midnight/",
+            "http://www.example.com/date-only/",
+            "http://www.example.com/new/",
+            "http://www.example.com/missing/",
+            "http://www.example.com/empty/",
+            "http://www.example.com/invalid/",
+            "http://www.example.com/impossible-date/",
+            "http://www.example.com/naive/",
+            "http://www.example.com/alternate/",
+        ]
+
+    @pytest.mark.parametrize(
+        "cutoff",
+        [
+            "2025-06-01T00:00:00Z",
+            datetime(2025, 6, 1, tzinfo=UTC),
+            datetime(2025, 6, 1, 2, 0, tzinfo=timezone(timedelta(hours=2))),
+            "2025-06-01",
+            date(2025, 6, 1),
+        ],
+        ids=["string-utc", "datetime-utc", "datetime-offset", "string-date", "date"],
+    )
+    def test_cutoff_inputs_are_normalized_to_utc(self, cutoff):
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = cutoff
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+        spider = _Spider("example.com")
+
+        assert spider._lastmod_cutoff == datetime(2025, 6, 1, tzinfo=UTC)
+        assert spider._lastmod_cutoff.tzinfo == UTC
+
+    def test_default_policies_include_missing_invalid_naive_and_exclude_boundary(self):
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+
+        urls = _parse_urlset(_Spider("example.com"))
+
+        # The boundary entry (2025-06-01T00:00:00Z) and older entries are out,
+        # the Tokyo entry is kept (09:00+09:00 == 00:00 UTC, so it is also the
+        # boundary), missing/empty/invalid/naive entries are included.
+        assert urls == [
+            "http://www.example.com/date-only/",
+            "http://www.example.com/new/",
+            "http://www.example.com/missing/",
+            "http://www.example.com/empty/",
+            "http://www.example.com/invalid/",
+            "http://www.example.com/impossible-date/",
+            "http://www.example.com/naive/",
+        ]
+
+    def test_boundary_include_keeps_entries_equal_to_cutoff(self):
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_boundary = "include"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+        urls = _parse_urlset(_Spider("example.com"))
+
+        assert urls == [
+            "http://www.example.com/tokyo/",
+            "http://www.example.com/utc-midnight/",
+            "http://www.example.com/date-only/",
+            "http://www.example.com/new/",
+            "http://www.example.com/naive/",
+        ]
+
+    def test_missing_policy_exclude_drops_entries_without_lastmod(self):
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+        urls = _parse_urlset(_Spider("example.com"))
+
+        assert urls == [
+            "http://www.example.com/date-only/",
+            "http://www.example.com/new/",
+            "http://www.example.com/naive/",
+        ]
+
+    def test_invalid_policy_exclude_drops_unparseable_entries(self):
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_invalid = "exclude"
+
+        urls = _parse_urlset(_Spider("example.com"))
+
+        assert "http://www.example.com/invalid/" not in urls
+        assert "http://www.example.com/impossible-date/" not in urls
+        # Missing entries are governed by the missing policy, still included.
+        assert "http://www.example.com/missing/" in urls
+        assert "http://www.example.com/empty/" in urls
+
+    def test_naive_policy_reject_routes_naive_entries_to_invalid_policy(self):
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_naive = "reject"
+            sitemap_lastmod_invalid = "exclude"
+            sitemap_lastmod_missing = "exclude"
+
+        urls = _parse_urlset(_Spider("example.com"))
+
+        assert "http://www.example.com/naive/" not in urls
+
+    def test_naive_policy_reject_with_invalid_include_keeps_naive_entries(self):
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_naive = "reject"
+            sitemap_lastmod_invalid = "include"
+            sitemap_lastmod_missing = "exclude"
+
+        urls = _parse_urlset(_Spider("example.com"))
+
+        assert "http://www.example.com/naive/" in urls
+
+    def test_naive_value_is_read_as_utc_not_local_time(self):
+        # A naive value has no offset to resolve; reading it as UTC gives the
+        # 12:00 UTC instant regardless of the host time zone, which a cutoff at
+        # 11:00 UTC must therefore accept.
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-15T11:00:00Z"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+        urls = _parse_urlset(_Spider("example.com"))
+
+        assert "http://www.example.com/naive/" in urls
+
+    @pytest.mark.skipif(
+        not hasattr(time, "tzset"), reason="time.tzset() is required to change TZ"
+    )
+    def test_results_do_not_depend_on_host_time_zone(self, monkeypatch):
+        def urls_in_time_zone(tz_name: str) -> list[str]:
+            monkeypatch.setenv("TZ", tz_name)
+            time.tzset()
+            try:
+
+                class _Spider(SitemapSpider):
+                    sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+                    sitemap_lastmod_missing = "exclude"
+                    sitemap_lastmod_invalid = "exclude"
+
+                return _parse_urlset(_Spider("example.com"))
+            finally:
+                monkeypatch.undo()
+                time.tzset()
+
+        expected = urls_in_time_zone("UTC")
+        assert expected
+        assert expected == urls_in_time_zone("America/Los_Angeles")
+        assert expected == urls_in_time_zone("Asia/Tokyo")
+
+    def test_offsets_are_compared_as_instants_across_time_zones(self):
+        # 2025-06-01T09:00:00+09:00 == 2025-06-01T00:00:00Z: the Tokyo entry
+        # sits exactly on the cutoff regardless of string ordering.
+        class _ExcludeBoundary(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+        tokyo = "http://www.example.com/tokyo/"
+        assert tokyo not in _parse_urlset(_ExcludeBoundary("example.com"))
+
+        class _IncludeBoundary(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_boundary = "include"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+        assert tokyo in _parse_urlset(_IncludeBoundary("example.com"))
+
+    def test_dst_spring_forward_offset_is_compared_correctly(self):
+        # US DST starts 2025-03-09: 03:30 in New York does not exist in local
+        # wall time, but with an explicit offset the instant is unambiguous.
+        # -05:00 (standard) 03:30 == 08:30 UTC; -04:00 (daylight) == 07:30 UTC.
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+        <loc>http://www.example.com/standard-time/</loc>
+        <lastmod>2025-03-09T03:30:00-05:00</lastmod>
+    </url>
+    <url>
+        <loc>http://www.example.com/daylight-time/</loc>
+        <lastmod>2025-03-09T03:30:00-04:00</lastmod>
+    </url>
+</urlset>"""
+
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-03-09T08:00:00Z"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+        urls = _parse_urlset(_Spider("example.com"), body=sitemap)
+
+        assert urls == ["http://www.example.com/standard-time/"]
+
+    def test_dst_fall_back_same_wall_time_different_instants(self):
+        # US DST ends 2025-11-02: 01:30 happens twice, distinguished only by
+        # the offset. The -04:00 reading is the earlier UTC instant.
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+        <loc>http://www.example.com/first-1-30/</loc>
+        <lastmod>2025-11-02T01:30:00-04:00</lastmod>
+    </url>
+    <url>
+        <loc>http://www.example.com/second-1-30/</loc>
+        <lastmod>2025-11-02T01:30:00-05:00</lastmod>
+    </url>
+</urlset>"""
+
+        # Cutoff at 06:00 UTC: first 01:30 (-04:00) is 05:30 UTC (before),
+        # second 01:30 (-05:00) is 06:30 UTC (after).
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-11-02T06:00:00Z"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+        urls = _parse_urlset(_Spider("example.com"), body=sitemap)
+
+        assert urls == ["http://www.example.com/second-1-30/"]
+
+    def test_date_only_entry_is_midnight_utc(self):
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+        <loc>http://www.example.com/day/</loc>
+        <lastmod>2025-06-02</lastmod>
+    </url>
+</urlset>"""
+
+        class _AtMidnight(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-02T00:00:00Z"
+            sitemap_lastmod_missing = "exclude"
+
+        assert _parse_urlset(_AtMidnight("example.com"), body=sitemap) == []
+
+        class _BeforeMidnight(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T23:59:59Z"
+            sitemap_lastmod_missing = "exclude"
+
+        assert _parse_urlset(_BeforeMidnight("example.com"), body=sitemap) == [
+            "http://www.example.com/day/"
+        ]
+
+    def test_alternate_links_are_gated_by_the_same_lastmod(self):
+        class _Spider(SitemapSpider):
+            sitemap_alternate_links = True
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+        urls = _parse_urlset(_Spider("example.com"))
+
+        assert "http://www.example.com/alternate/" not in urls
+        assert "http://www.example.com/deutsch/" not in urls
+
+    def test_sitemap_index_lastmod_only_gates_sub_sitemap_traversal(self):
+        response = TextResponse(
+            url="http://www.example.com/index.xml", body=SITEMAPINDEX_WITH_LASTMOD
+        )
+
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+        urls = [
+            request.url for request in _Spider("example.com")._parse_sitemap(response)
+        ]
+
+        assert urls == ["http://www.example.com/new-sitemap.xml"]
+
+    def test_sitemap_index_missing_policy_keeps_sub_sitemap_by_default(self):
+        response = TextResponse(
+            url="http://www.example.com/index.xml", body=SITEMAPINDEX_WITH_LASTMOD
+        )
+
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+
+        urls = [
+            request.url for request in _Spider("example.com")._parse_sitemap(response)
+        ]
+
+        assert "http://www.example.com/missing-sitemap.xml" in urls
+        assert "http://www.example.com/new-sitemap.xml" in urls
+        assert "http://www.example.com/old-sitemap.xml" not in urls
+
+    def test_sitemap_index_lastmod_is_not_applied_to_child_urls(self, monkeypatch):
+        # The index's fresh lastmod must not be inherited as the lastmod of
+        # the URLs inside the sub-sitemap it points to.
+        index = TextResponse(
+            url="http://www.example.com/index.xml",
+            body=b"""<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <sitemap>
+        <loc>http://www.example.com/child.xml</loc>
+        <lastmod>2025-07-01T00:00:00Z</lastmod>
+    </sitemap>
+</sitemapindex>""",
+        )
+        child = TextResponse(
+            url="http://www.example.com/child.xml",
+            body=b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+        <loc>http://www.example.com/old-page/</loc>
+        <lastmod>2025-01-01T00:00:00Z</lastmod>
+    </url>
+</urlset>""",
+        )
+
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+        spider = _Spider("example.com")
+        index_requests = list(spider._parse_sitemap(index))
+        assert [request.url for request in index_requests] == [
+            "http://www.example.com/child.xml"
+        ]
+        assert [request.url for request in spider._parse_sitemap(child)] == []
+
+    def test_cutoff_runs_after_sitemap_filter_and_keeps_its_order(self):
+        seen: list[str] = []
+
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+            def sitemap_filter(self, entries):
+                for entry in entries:
+                    seen.append(entry["loc"])
+                    # The user filter keeps an entry the cutoff would drop.
+                    if entry["loc"].endswith("/old/") or entry["loc"].endswith("/new/"):
+                        yield entry
+
+        urls = _parse_urlset(_Spider("example.com"))
+
+        # The user filter saw every entry first; its survivors then go through
+        # the cutoff, which still removes the old one.
+        assert seen[0] == "http://www.example.com/old/"
+        assert urls == ["http://www.example.com/new/"]
+
+    def test_sitemap_rules_still_apply_after_cutoff(self):
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+        <loc>http://www.example.com/product/new</loc>
+        <lastmod>2025-07-01T00:00:00Z</lastmod>
+    </url>
+    <url>
+        <loc>http://www.example.com/other/new</loc>
+        <lastmod>2025-07-01T00:00:00Z</lastmod>
+    </url>
+    <url>
+        <loc>http://www.example.com/product/old</loc>
+        <lastmod>2025-01-01T00:00:00Z</lastmod>
+    </url>
+</urlset>"""
+
+        class _Spider(SitemapSpider):
+            sitemap_rules = [("/product/", "parse")]
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+        response = TextResponse(url="http://www.example.com/sitemap.xml", body=sitemap)
+        spider = _Spider("example.com")
+        requests = list(spider._parse_sitemap(response))
+
+        assert [request.url for request in requests] == [
+            "http://www.example.com/product/new"
+        ]
+        assert requests[0].callback == spider.parse
+
+    def test_entries_and_xml_are_not_mutated(self):
+        body = URLSET_WITH_LASTMOD
+        response = TextResponse(url="http://www.example.com/sitemap.xml", body=body)
+
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+        list(_Spider("example.com")._parse_sitemap(response))
+
+        assert response.body == body
+
+    def test_spider_instances_do_not_share_cutoff_state(self):
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+        first = _Spider("example.com")
+        second = _Spider("example.com")
+
+        assert first._lastmod_cutoff is not second._lastmod_cutoff
+        assert first._lastmod_cutoff == second._lastmod_cutoff
+
+        second.sitemap_lastmod_cutoff = "2026-01-01T00:00:00Z"
+        second._lastmod_cutoff = _parse_lastmod_value(
+            second.sitemap_lastmod_cutoff, naive_policy="utc"
+        )
+
+        assert first._lastmod_cutoff == datetime(2025, 6, 1, tzinfo=UTC)
+        assert second._lastmod_cutoff == datetime(2026, 1, 1, tzinfo=UTC)
+
+    @pytest.mark.parametrize(
+        ("attributes", "match"),
+        [
+            ({"sitemap_lastmod_missing": "maybe"}, "sitemap_lastmod_missing"),
+            ({"sitemap_lastmod_invalid": "maybe"}, "sitemap_lastmod_invalid"),
+            ({"sitemap_lastmod_naive": "maybe"}, "sitemap_lastmod_naive"),
+            ({"sitemap_lastmod_boundary": "maybe"}, "sitemap_lastmod_boundary"),
+        ],
+    )
+    def test_invalid_policy_value_fails_at_initialization(self, attributes, match):
+        with pytest.raises(ValueError, match=match):
+            SitemapSpider("example.com", **attributes)
+
+    @pytest.mark.parametrize(
+        "cutoff",
+        [
+            "not-a-date",
+            "2025-02-30",
+            "2025-1-1",
+            "2025-06-01T00:00:00",  # naive string under the reject policy
+            123,
+        ],
+        ids=["garbage", "impossible-date", "non-padded-date", "naive-rejected", "int"],
+    )
+    def test_invalid_cutoff_fails_at_initialization(self, cutoff):
+        kwargs: dict[str, object] = {"sitemap_lastmod_cutoff": cutoff}
+        if cutoff == "2025-06-01T00:00:00":
+            kwargs["sitemap_lastmod_naive"] = "reject"
+        with pytest.raises(ValueError, match="sitemap_lastmod_cutoff"):
+            SitemapSpider("example.com", **kwargs)
+
+    def test_naive_cutoff_datetime_is_accepted_as_utc_by_default(self):
+        class _Spider(SitemapSpider):
+            sitemap_lastmod_cutoff = datetime(2025, 6, 1, 0, 0)
+
+        spider = _Spider("example.com")
+        assert spider._lastmod_cutoff == datetime(2025, 6, 1, tzinfo=UTC)
+
+    def test_naive_cutoff_datetime_fails_under_reject_policy(self):
+        with pytest.raises(ValueError, match="sitemap_lastmod_cutoff"):
+            SitemapSpider(
+                "example.com",
+                sitemap_lastmod_cutoff=datetime(2025, 6, 1),
+                sitemap_lastmod_naive="reject",
+            )
+
+    def test_cutoff_accepted_through_from_crawler(self):
+        crawler = get_crawler(
+            SitemapSpider,
+            settings_dict={},
+        )
+        spider = SitemapSpider.from_crawler(
+            crawler,
+            "example.com",
+            sitemap_lastmod_cutoff="2025-06-01T00:00:00Z",
+            sitemap_lastmod_missing="exclude",
+        )
+        assert spider._lastmod_cutoff == datetime(2025, 6, 1, tzinfo=UTC)
+
+    @coroutine_test
+    async def test_cutoff_through_full_crawl(self, mockserver: MockServer):
+        kept = mockserver.url("/kept")
+        dropped = mockserver.url("/dropped")
+
+        class _Spider(RawSitemapSpider, SitemapSpider):  # type: ignore[misc]
+            sitemap_lastmod_cutoff = "2025-06-01T00:00:00Z"
+            sitemap_lastmod_missing = "exclude"
+            sitemap_lastmod_invalid = "exclude"
+
+            def parse(self, response):
+                yield {"url": response.url}
+
+            def raw_body(self):
+                assert self.mockserver
+                return (
+                    '<?xml version="1.0" encoding="UTF-8"?>'
+                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                    f"<url><loc>{dropped}</loc>"
+                    "<lastmod>2025-01-01T00:00:00Z</lastmod></url>"
+                    f"<url><loc>{kept}</loc>"
+                    "<lastmod>2025-07-01T00:00:00Z</lastmod></url>"
+                    "</urlset>"
+                )
+
+        items, _ = await crawl_items(_Spider, mockserver)
+        assert items == [{"url": kept}]
+
+    @coroutine_test
+    async def test_cutoff_failure_stops_crawl_before_requests(
+        self, mockserver: MockServer
+    ):
+        class _Spider(RawSitemapSpider, SitemapSpider):  # type: ignore[misc]
+            sitemap_lastmod_cutoff = "not-a-date"
+
+            def parse(self, response):
+                yield {"url": response.url}
+
+            def raw_body(self):
+                return ""
+
+        crawler = get_crawler(_Spider)
+        with pytest.raises(ValueError, match="sitemap_lastmod_cutoff"):
+            await crawler.crawl_async(mockserver=mockserver)
+        assert crawler.stats.get_value("downloader/request_count", 0) == 0
+
+
+class TestParseLastmodValue:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("2025-06-01", datetime(2025, 6, 1, tzinfo=UTC)),
+            ("2025-06-01T00:00:00Z", datetime(2025, 6, 1, tzinfo=UTC)),
+            (
+                "2025-06-01T09:00:00+09:00",
+                datetime(2025, 6, 1, 0, 0, tzinfo=UTC),
+            ),
+            (
+                "2025-07-01T12:00:00+02:00",
+                datetime(2025, 7, 1, 10, 0, tzinfo=UTC),
+            ),
+            (
+                "2025-03-09T03:30:00-05:00",
+                datetime(2025, 3, 9, 8, 30, tzinfo=UTC),
+            ),
+            (
+                "2025-11-02T01:30:00-04:00",
+                datetime(2025, 11, 2, 5, 30, tzinfo=UTC),
+            ),
+            (date(2025, 6, 1), datetime(2025, 6, 1, tzinfo=UTC)),
+            (
+                datetime(2025, 6, 1, 9, tzinfo=timezone(timedelta(hours=9))),
+                datetime(2025, 6, 1, 0, 0, tzinfo=UTC),
+            ),
+        ],
+    )
+    def test_valid_values_convert_to_utc(self, value, expected):
+        parsed = _parse_lastmod_value(value, naive_policy="utc")
+        assert parsed is not None
+        assert parsed == expected
+        assert parsed.tzinfo == UTC
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "not-a-date",
+            "2025-02-30",
+            "2025-1-1",
+            "2025/06/01",
+            "01-06-2025",
+            "",
+        ],
+    )
+    def test_invalid_strings_return_none(self, value):
+        assert _parse_lastmod_value(value, naive_policy="utc") is None
+
+    def test_naive_string_read_as_utc_by_default(self):
+        parsed = _parse_lastmod_value("2025-06-15T12:00:00", naive_policy="utc")
+        assert parsed == datetime(2025, 6, 15, 12, tzinfo=UTC)
+
+    def test_naive_string_rejected(self):
+        assert (
+            _parse_lastmod_value("2025-06-15T12:00:00", naive_policy="reject") is None
+        )
+
+    def test_naive_datetime_read_as_utc_by_default(self):
+        parsed = _parse_lastmod_value(datetime(2025, 6, 15, 12), naive_policy="utc")
+        assert parsed == datetime(2025, 6, 15, 12, tzinfo=UTC)
+
+    def test_naive_datetime_rejected(self):
+        assert (
+            _parse_lastmod_value(datetime(2025, 6, 15, 12), naive_policy="reject")
+            is None
+        )
+
+    def test_bare_date_is_never_rejected_by_naive_policy(self):
+        assert _parse_lastmod_value("2025-06-15", naive_policy="reject") == datetime(
+            2025, 6, 15, tzinfo=UTC
+        )
+
+    def test_unsupported_type_raises(self):
+        with pytest.raises(TypeError, match="str, date or datetime"):
+            _parse_lastmod_value(123, naive_policy="utc")  # type: ignore[arg-type]
+
+    def test_datetime_subclass_of_date_is_treated_as_datetime(self):
+        value = datetime(2025, 6, 1, 0, 0, tzinfo=UTC)
+        assert isinstance(value, date)
+        assert _parse_lastmod_value(value, naive_policy="utc") == value
+
+    def test_repeated_parsing_is_stable(self):
+        value = "2025-11-02T01:30:00-05:00"
+        first = _parse_lastmod_value(value, naive_policy="utc")
+        for _ in range(5):
+            assert _parse_lastmod_value(value, naive_policy="utc") == first
