@@ -661,6 +661,54 @@ idle.
 
 Servers usually close idle connections earlier than this on their own.
 
+.. setting:: CRAWL_FAILURE_MANIFEST
+
+CRAWL_FAILURE_MANIFEST
+----------------------
+
+Default: ``None``
+
+Scope: ``scrapy.logformatter.LogFormatter``
+
+When enabled, terminal crawl failures are recorded into a local JSONL
+manifest so that missed URLs can be handed to the next crawl batch without
+grepping text logs. The following events are recorded, distinguished by a
+``stage`` field:
+
+*   ``download``: a download error that was not silenced by an errback
+    (intermediate retries are not recorded, only the final failure, with the
+    final ``retry_times`` value).
+*   ``parse``: an exception raised by a spider callback on a downloaded
+    response.
+*   ``item_dropped``: an item rejected by an item pipeline. This is *not* a
+    URL miss (the page was fetched), so such records never appear in replay
+    plans.
+
+Within one crawl batch, repeated terminal failures of the same request are
+merged by request fingerprint (see
+:func:`scrapy.utils.request.fingerprint`). Recording never changes the
+original requests, the log output, or the log levels, and a manifest write
+failure never interrupts the crawl.
+
+The setting accepts either a file path or a dict:
+
+.. code-block:: python
+
+    CRAWL_FAILURE_MANIFEST = {
+        "path": "failure_manifest.jsonl",
+        "batch_id": "batch-2026-11-14",  # optional; auto-generated if omitted
+    }
+
+Each record includes the batch, spider, URL, method, failure stage, exception
+class or HTTP status, final ``retry_times``, callback name and JSON-safe
+``cb_kwargs``. Context that cannot be faithfully restored (e.g.
+non-JSON-serializable ``cb_kwargs``) is marked with ``"replayable": false``
+and a ``non_replayable_reason`` instead of being faked.
+
+Use :func:`scrapy.failuremanifest.generate_replay_plan` to read a manifest
+and build a read-only next-batch URL plan with verifiable counts; see
+``extras/crawl_failure_manifest_example.py`` for a runnable example.
+
 .. setting:: DEFAULT_DROPITEM_LOG_LEVEL
 
 DEFAULT_DROPITEM_LOG_LEVEL

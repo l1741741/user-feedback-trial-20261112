@@ -8,6 +8,7 @@ from twisted.python.failure import Failure
 
 # working around https://github.com/sphinx-doc/sphinx/issues/10400
 from scrapy import Request, Spider  # noqa: TC001
+from scrapy.failuremanifest import FailureManifestRecorder
 from scrapy.http import Response  # noqa: TC001
 from scrapy.utils.python import global_object_name
 from scrapy.utils.request import referer_str
@@ -54,6 +55,12 @@ class LogFormatter:
     each action is logged or if they want to omit it entirely. In order to omit
     logging an action the method must return ``None``.
 
+    The optional :setting:`CRAWL_FAILURE_MANIFEST` setting is also honored
+    here: when enabled, ``download_error``, ``spider_error`` and ``dropped``
+    additionally record the terminal failure into a JSONL manifest (see
+    :mod:`scrapy.failuremanifest`). Recording never changes the returned log
+    dictionaries, the log levels, or the requests themselves.
+
     Here is an example on how to create a custom log formatter to lower the severity level of
     the log message when an item is dropped from the pipeline:
 
@@ -70,6 +77,9 @@ class LogFormatter:
                     },
                 }
     """
+
+    def __init__(self) -> None:
+        self._failure_manifest: FailureManifestRecorder | None = None
 
     def crawled(
         self, request: Request, response: Response, spider: Spider
@@ -119,6 +129,10 @@ class LogFormatter:
         spider: Spider,
     ) -> LogFormatterResult:
         """Logs a message when an item is dropped while it is passing through the item pipeline."""
+        if self._failure_manifest is not None:
+            self._failure_manifest.record_item_dropped(
+                item, exception, response, spider
+            )
         if (level := getattr(exception, "log_level", None)) is None:
             level = spider.crawler.settings["DEFAULT_DROPITEM_LOG_LEVEL"]
         if isinstance(level, str):
@@ -158,6 +172,10 @@ class LogFormatter:
         spider: Spider,
     ) -> LogFormatterResult:
         """Logs an error message from a spider."""
+        if self._failure_manifest is not None:
+            self._failure_manifest.record_spider_error(
+                failure, request, response, spider
+            )
         return {
             "level": logging.ERROR,
             "msg": SPIDERERRORMSG,
@@ -177,6 +195,8 @@ class LogFormatter:
         """Logs a download error message from a spider (typically coming from
         the engine).
         """
+        if self._failure_manifest is not None:
+            self._failure_manifest.record_download_error(failure, request, spider)
         args: dict[str, Any] = {"request": request}
         if errmsg:
             msg = DOWNLOADERRORMSG_LONG
@@ -191,4 +211,6 @@ class LogFormatter:
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
-        return cls()
+        formatter = cls()
+        formatter._failure_manifest = FailureManifestRecorder.from_crawler(crawler)
+        return formatter
