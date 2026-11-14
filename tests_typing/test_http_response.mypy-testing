@@ -57,3 +57,15 @@ def mypy_test_replace_subclass() -> None:
     kwargs: Dict[str, Any] = {}
     resp_copy3 = resp.replace(body=b"a", cls=TextResponse, **kwargs)
     reveal_type(resp_copy3)  # R: scrapy.http.response.text.TextResponse
+
+
+@pytest.mark.mypy_testing
+def mypy_test_json() -> None:
+    resp = TextResponse("data:,", body=b"{}")
+    reveal_type(resp.json())  # R: Any
+    reveal_type(resp.json(strict=True))  # R: Any
+    reveal_type(resp.json(strict=True, max_depth=10, max_nodes=100))  # R: Any
+    resp.json(strict=1)  # E: Argument "strict" to "json" of "TextResponse" has incompatible type "int"; expected "bool"
+    resp.json(max_depth="10")  # E: Argument "max_depth" to "json" of "TextResponse" has incompatible type "str"; expected "int | None"
+    resp.json(parse_int=int)  # R: Any
+    resp.json(1)  # E: Too many positional arguments for "json" of "TextResponse"

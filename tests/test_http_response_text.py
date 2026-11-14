@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import codecs
 import gc
+import json
 import weakref
 from typing import cast
 from unittest import mock
@@ -11,7 +12,12 @@ import pytest
 
 from scrapy.exceptions import ScrapyDeprecationWarning
 from scrapy.http import HtmlResponse, TextResponse, XmlResponse
-from scrapy.http.response.text import MetaRefresh
+from scrapy.http.response.text import (
+    DuplicateJSONKeyError,
+    JSONBudgetExceededError,
+    MetaRefresh,
+    StrictJSONError,
+)
 from scrapy.selector import Selector
 from tests.utils.bases.http_response import TestResponseBase
 
@@ -660,6 +666,306 @@ class TestTextResponse(TestResponseBase):
             for _ in range(2):
                 json_response.json()
             mock_json.assert_called_once_with(json_body)
+
+    def test_strict_json_basic(self) -> None:
+        response = self.response_class(
+            "http://www.example.com", body=b'{"ip": "109.187.217.200"}'
+        )
+        assert response.json(strict=True) == {"ip": "109.187.217.200"}
+
+    def test_strict_json_returns_builtin_containers(self) -> None:
+        body = b'{"a": {"b": 1}, "c": [{"d": 2}, 3]}'
+        response = self.response_class("http://www.example.com", body=body)
+        result = response.json(strict=True)
+        assert type(result) is dict
+        assert type(result["a"]) is dict
+        assert type(result["c"]) is list
+        assert type(result["c"][0]) is dict
+        assert result == {"a": {"b": 1}, "c": [{"d": 2}, 3]}
+
+    @pytest.mark.parametrize(
+        ("body", "path", "key"),
+        [
+            (b'{"price": 10, "price": 20}', "$", "price"),
+            (b'{"outer": {"cursor": 1, "cursor": 2}}', "$.outer", "cursor"),
+            (
+                b'{"data": [{"k": 1}, {"k": 2, "k": 3}]}',
+                "$.data[1]",
+                "k",
+            ),
+            (b'[{"a": [{"b": 1, "b": 2}]}]', "$[0].a[0]", "b"),
+        ],
+    )
+    def test_strict_json_duplicate_key_path(
+        self, body: bytes, path: str, key: str
+    ) -> None:
+        response = self.response_class("http://www.example.com", body=body)
+        with pytest.raises(DuplicateJSONKeyError) as exc_info:
+            response.json(strict=True)
+        assert exc_info.value.path == path
+        assert exc_info.value.key == key
+        assert path in str(exc_info.value)
+        assert key in str(exc_info.value)
+        assert isinstance(exc_info.value, StrictJSONError)
+
+    def test_strict_json_duplicate_key_default_mode_overrides(self) -> None:
+        # The default interface keeps json.loads' silent last-value-wins
+        # behavior even after a strict call failed on the same response.
+        body = b'{"price": 10, "price": 20}'
+        response = self.response_class("http://www.example.com", body=body)
+        with pytest.raises(DuplicateJSONKeyError):
+            response.json(strict=True)
+        assert response.json() == {"price": 20}
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b'[{"id": 1}, {"id": 2}]',
+            b'{"a": {"id": 1}, "b": {"id": 2}}',
+            b'[{"id": 1}, [{"id": 2}]]',
+        ],
+    )
+    def test_strict_json_same_key_distinct_objects(self, body: bytes) -> None:
+        response = self.response_class("http://www.example.com", body=body)
+        response.json(strict=True)  # must not raise
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b'{"a\\u0062": 1, "ab": 2}',
+            b'{"\\u0041": 1, "A": 2}',
+            b'{"\\u00fc": 1, "\\u00FC": 2}',
+        ],
+    )
+    def test_strict_json_escaped_equivalent_keys(self, body: bytes) -> None:
+        response = self.response_class("http://www.example.com", body=body)
+        with pytest.raises(DuplicateJSONKeyError) as exc_info:
+            response.json(strict=True)
+        # The reported key is the decoded string, not either raw escape.
+        assert "\\" not in exc_info.value.key
+
+    @pytest.mark.parametrize("body", [b"NaN", b"Infinity", b"-Infinity", b"[1, NaN]"])
+    def test_strict_json_rejects_constants(self, body: bytes) -> None:
+        response = self.response_class("http://www.example.com", body=body)
+        with pytest.raises(StrictJSONError):
+            response.json(strict=True)
+
+    @pytest.mark.parametrize("body", [b"NaN", b"Infinity", b"-Infinity"])
+    def test_json_constants_default_mode_unchanged(self, body: bytes) -> None:
+        response = self.response_class("http://www.example.com", body=body)
+        response.json()  # lenient default still accepts them
+
+    def test_strict_json_user_parse_constant_takes_precedence(self) -> None:
+        response = self.response_class("http://www.example.com", body=b"NaN")
+        assert response.json(strict=True, parse_constant=lambda value: None) is None
+
+    def test_strict_json_invalid_encoding_fails(self) -> None:
+        body = '{"message": "café"}'.encode("cp1252")
+        response = self.response_class(
+            "http://www.example.com",
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        # Default mode falls back to response.encoding, strict mode must not.
+        assert response.json() == {"message": "café"}
+        with pytest.raises(UnicodeDecodeError):
+            response.json(strict=True)
+
+    @pytest.mark.parametrize("encoding", ["utf-8", "utf-16", "utf-32"])
+    def test_strict_json_unicode_encodings(self, encoding: str) -> None:
+        body = '{"price": 10, "name": "café"}'.encode(encoding)
+        response = self.response_class("http://www.example.com", body=body)
+        assert response.json(strict=True) == {"price": 10, "name": "café"}
+
+    @pytest.mark.parametrize(
+        ("body", "max_depth", "path"),
+        [
+            (b'{"a": {"b": {"c": 1}}}', 2, "$.a.b"),
+            (b"[[[1]]]", 2, "$[0][0]"),
+            (b'{"a": 1}', 0, "$"),
+            (b"[1]", 0, "$"),
+        ],
+    )
+    def test_strict_json_depth_budget_exceeded(
+        self, body: bytes, max_depth: int, path: str
+    ) -> None:
+        response = self.response_class("http://www.example.com", body=body)
+        with pytest.raises(JSONBudgetExceededError) as exc_info:
+            response.json(strict=True, max_depth=max_depth)
+        assert exc_info.value.kind == "depth"
+        assert exc_info.value.budget == max_depth
+        assert exc_info.value.path == path
+
+    @pytest.mark.parametrize(
+        ("body", "max_depth"),
+        [
+            (b'{"a": {"b": {"c": 1}}}', 3),
+            (b"[[[1]]]", 3),
+            (b"1", 0),
+            (b"[1]", 1),
+            (b'{"a": 1}', 1),
+        ],
+    )
+    def test_strict_json_depth_budget_within_limit(
+        self, body: bytes, max_depth: int
+    ) -> None:
+        response = self.response_class("http://www.example.com", body=body)
+        response.json(strict=True, max_depth=max_depth)  # must not raise
+
+    @pytest.mark.parametrize(
+        ("body", "max_nodes"),
+        [
+            (b'{"a": 1, "b": 2}', 2),  # 1 object + 2 scalars = 3 nodes
+            (b"[1, 2, 3]", 3),
+        ],
+    )
+    def test_strict_json_node_budget_exceeded(
+        self, body: bytes, max_nodes: int
+    ) -> None:
+        response = self.response_class("http://www.example.com", body=body)
+        with pytest.raises(JSONBudgetExceededError) as exc_info:
+            response.json(strict=True, max_nodes=max_nodes)
+        assert exc_info.value.kind == "nodes"
+        assert exc_info.value.budget == max_nodes
+
+    @pytest.mark.parametrize(
+        ("body", "max_nodes"),
+        [
+            (b'{"a": 1, "b": 2}', 3),
+            (b"[1, 2, 3]", 4),
+            (b"null", 1),
+        ],
+    )
+    def test_strict_json_node_budget_within_limit(
+        self, body: bytes, max_nodes: int
+    ) -> None:
+        response = self.response_class("http://www.example.com", body=body)
+        response.json(strict=True, max_nodes=max_nodes)  # must not raise
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{"max_depth": -1}, {"max_nodes": 0}, {"max_depth": -1, "max_nodes": 1}],
+    )
+    def test_strict_json_invalid_budget_arguments(self, kwargs: dict) -> None:
+        response = self.response_class("http://www.example.com", body=b"{}")
+        with pytest.raises(ValueError, match=r"max_depth|max_nodes"):
+            response.json(strict=True, **kwargs)
+
+    @pytest.mark.parametrize(
+        "kwargs", [{"max_depth": 1}, {"max_nodes": 1}, {"max_depth": 1, "max_nodes": 1}]
+    )
+    def test_json_budget_without_strict_rejected(self, kwargs: dict) -> None:
+        response = self.response_class("http://www.example.com", body=b"{}")
+        with pytest.raises(ValueError, match="strict"):
+            response.json(**kwargs)
+
+    def test_strict_and_default_caches_are_separate(self) -> None:
+        response = self.response_class("http://www.example.com", body=b'{"x": 1}')
+        with mock.patch("json.loads", wraps=json.loads) as mock_loads:
+            for _ in range(2):
+                response.json()
+            for _ in range(2):
+                response.json(strict=True)
+        assert mock_loads.call_count == 2
+        assert response.json() == {"x": 1}
+        assert response.json(strict=True) == {"x": 1}
+        assert len(response._cached_strict_json) == 1
+
+    def test_strict_cache_keyed_by_arguments(self) -> None:
+        response = self.response_class("http://www.example.com", body=b'{"x": 1}')
+        response.json(strict=True)
+        response.json(strict=True, max_depth=5)
+        response.json(strict=True, parse_int=int)
+        assert len(response._cached_strict_json) == 3
+        # Repeating the exact same combination adds no entry.
+        response.json(strict=True)
+        assert len(response._cached_strict_json) == 3
+
+    def test_strict_failure_is_not_cached_as_success(self) -> None:
+        body = b'{"a": 1, "a": 2}'
+        response = self.response_class("http://www.example.com", body=body)
+        for _ in range(2):
+            with pytest.raises(DuplicateJSONKeyError):
+                response.json(strict=True)
+        assert response._cached_strict_json == {}
+
+    def test_json_cache_after_replace_reparses_new_body(self) -> None:
+        response = self.response_class("http://www.example.com", body=b'{"a": 1}')
+        assert response.json() == {"a": 1}
+        assert response.json(strict=True) == {"a": 1}
+        replaced = response.replace(body=b'{"b": 2}')
+        assert replaced.json() == {"b": 2}
+        assert replaced.json(strict=True) == {"b": 2}
+        # The original response keeps its own body and cached values.
+        assert response.body == b'{"a": 1}'
+        assert response.json() == {"a": 1}
+
+    def test_strict_json_does_not_modify_body_or_headers(self) -> None:
+        body = b'{"a": 1, "a": 2}'
+        response = self.response_class(
+            "http://www.example.com",
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        headers_before = dict(response.headers)
+        with pytest.raises(DuplicateJSONKeyError):
+            response.json(strict=True)
+        assert response.body == body
+        assert dict(response.headers) == headers_before
+
+    def test_strict_json_user_object_pairs_hook_runs_and_duplicates_detected(
+        self,
+    ) -> None:
+        def user_hook(pairs: list) -> dict:
+            return {"pairs": pairs}
+
+        response = self.response_class(
+            "http://www.example.com", body=b'{"k": 1, "k": 2}'
+        )
+        with pytest.raises(DuplicateJSONKeyError):
+            response.json(strict=True, object_pairs_hook=user_hook)
+
+        clean = self.response_class("http://www.example.com", body=b'{"k": 1}')
+        assert clean.json(strict=True, object_pairs_hook=user_hook) == {
+            "pairs": [("k", 1)]
+        }
+
+    def test_strict_json_user_object_hook_runs(self) -> None:
+        def user_hook(obj: dict) -> dict:
+            obj["hooked"] = True
+            return obj
+
+        response = self.response_class("http://www.example.com", body=b'{"k": 1}')
+        assert response.json(strict=True, object_hook=user_hook) == {
+            "k": 1,
+            "hooked": True,
+        }
+
+    def test_strict_json_duplicate_detected_when_hook_replaces_marker(
+        self,
+    ) -> None:
+        # The user hook turns every object into a list, so the offending
+        # object's path cannot be located; the key must still be reported.
+        def user_hook(obj: dict) -> list:
+            return list(obj.items())
+
+        response = self.response_class(
+            "http://www.example.com", body=b'{"k": 1, "k": 2}'
+        )
+        with pytest.raises(DuplicateJSONKeyError) as exc_info:
+            response.json(strict=True, object_hook=user_hook)
+        assert exc_info.value.key == "k"
+        assert exc_info.value.path == "$"
+
+    def test_strict_json_deep_nesting_does_not_recurse(self) -> None:
+        # A document far deeper than the interpreter limit is reported through
+        # the depth budget instead of crashing with RecursionError.
+        depth = 2000
+        body = b"[" * depth + b"1" + b"]" * depth
+        response = self.response_class("http://www.example.com", body=body)
+        with pytest.raises(JSONBudgetExceededError) as exc_info:
+            response.json(strict=True, max_depth=100)
+        assert exc_info.value.kind == "depth"
 
 
 class TestHtmlResponse(TestTextResponse):
