@@ -67,6 +67,11 @@ AutoThrottle algorithm adjusts download delays based on the following rules:
 5. download delay can't become less than :setting:`DOWNLOAD_DELAY` or greater
    than :setting:`AUTOTHROTTLE_MAX_DELAY`
 
+If :setting:`AUTOTHROTTLE_LATENCY_WINDOW` is set, ``latency`` above is instead
+the median of the latencies of the last responses of that download slot, so
+that a single unusually slow response does not move the delay. Every other rule
+still applies.
+
 .. note:: The AutoThrottle extension honours the standard Scrapy settings for
    concurrency and delay. This means that it will respect
    :setting:`CONCURRENT_REQUESTS_PER_DOMAIN` and
@@ -119,6 +124,7 @@ The settings used to control the AutoThrottle extension are:
 * :setting:`AUTOTHROTTLE_ENABLED`
 * :setting:`AUTOTHROTTLE_START_DELAY`
 * :setting:`AUTOTHROTTLE_MAX_DELAY`
+* :setting:`AUTOTHROTTLE_LATENCY_WINDOW`
 * :setting:`AUTOTHROTTLE_TARGET_CONCURRENCY`
 * :setting:`AUTOTHROTTLE_DEBUG`
 * :setting:`CONCURRENT_REQUESTS_PER_DOMAIN`
@@ -152,6 +158,29 @@ AUTOTHROTTLE_MAX_DELAY
 Default: ``60.0``
 
 The maximum download delay (in seconds) to be set in case of high latencies.
+
+.. setting:: AUTOTHROTTLE_LATENCY_WINDOW
+
+AUTOTHROTTLE_LATENCY_WINDOW
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Default: ``None``
+
+.. versionadded:: VERSION
+
+The number of recent response latencies of each download slot to keep, used to
+compute the target download delay from their median instead of from the latest
+latency alone. It must be a positive integer, or ``None`` to disable the
+window.
+
+This keeps an occasional latency spike from moving the download delay, while
+still letting a sustained change in latency do so. Only latencies of responses
+that take part in the adjustment are kept: non-numeric, negative, and
+non-finite latencies do not enter the window, and neither do the latencies of
+requests that set :reqmeta:`autothrottle_dont_adjust_delay`. A latency of
+``0`` is valid. A window is discarded when its download slot is removed or the
+spider closes, and a download slot that is created again with the same name
+starts with an empty window.
 
 .. setting:: AUTOTHROTTLE_TARGET_CONCURRENCY
 

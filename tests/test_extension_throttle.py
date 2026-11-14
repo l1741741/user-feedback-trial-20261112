@@ -1,3 +1,4 @@
+import gc
 from logging import INFO
 from typing import Any
 from unittest.mock import Mock
@@ -5,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from scrapy import Request, Spider
+from scrapy.core.downloader import Slot
 from scrapy.crawler import Crawler
 from scrapy.exceptions import NotConfigured
 from scrapy.extensions.throttle import AutoThrottle
@@ -35,6 +37,39 @@ def _mock_downloader(crawler: Crawler) -> Mock:
     downloader: Mock = crawler.engine.downloader
     downloader.slots = {}
     return downloader
+
+
+def _setup(settings: dict[str, Any] | None = None) -> tuple[AutoThrottle, Spider, Mock]:
+    crawler = get_crawler(settings)
+    at = build_from_crawler(AutoThrottle, crawler)
+    downloader = _mock_downloader(crawler)
+    spider = DefaultSpider.from_crawler(crawler)
+    at._spider_opened(spider)
+    return at, spider, downloader
+
+
+def _add_slot(downloader: Mock, key: str = "foo", delay: float = 1.0) -> Slot:
+    slot = Slot(concurrency=8, delay=delay, jitter=0)
+    downloader.slots[key] = slot
+    return slot
+
+
+def _download(
+    at: AutoThrottle,
+    spider: Spider,
+    *,
+    latency: Any = 1.0,
+    slot: str = "foo",
+    status: int = 200,
+    dont_adjust: bool = False,
+) -> None:
+    meta: dict[str, Any] = {"download_slot": slot}
+    if latency is not UNSET:
+        meta["download_latency"] = latency
+    if dont_adjust:
+        meta["autothrottle_dont_adjust_delay"] = True
+    request = Request("https://example.com", meta=meta)
+    at._response_downloaded(Response(request.url, status=status), request, spider)
 
 
 @pytest.mark.parametrize(
@@ -321,3 +356,322 @@ def test_debug_disabled(caplog):
         at._response_downloaded(response, request, spider)
 
     assert caplog.record_tuples == []
+
+
+def _window_setup(size: int, **settings: Any):
+    merged = {"AUTOTHROTTLE_LATENCY_WINDOW": size}
+    merged.setdefault("AUTOTHROTTLE_TARGET_CONCURRENCY", 2.0)
+    merged.update(settings)
+    return _setup(merged)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (UNSET, None),
+        (None, None),
+        (1, 1),
+        (7, 7),
+        ("5", 5),
+    ],
+)
+def test_latency_window_valid(value, expected):
+    settings = {}
+    if value is not UNSET:
+        settings["AUTOTHROTTLE_LATENCY_WINDOW"] = value
+    crawler = get_crawler(settings)
+    at = build_from_crawler(AutoThrottle, crawler)
+    assert at._latency_window == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        0,
+        -1,
+        True,
+        False,
+        1.0,
+        2.5,
+        "0",
+        "-3",
+        "1.5",
+        "abc",
+        "",
+    ],
+)
+def test_latency_window_invalid(value):
+    """Invalid values abort the crawler startup instead of disabling throttling."""
+    settings = {"AUTOTHROTTLE_LATENCY_WINDOW": value}
+    with pytest.raises(ValueError, match="AUTOTHROTTLE_LATENCY_WINDOW"):
+        get_crawler(settings)
+
+
+def test_latency_window_default_uses_last_latency():
+    """Without a window the latest latency alone drives the delay, as before."""
+    at, spider, downloader = _setup({"AUTOTHROTTLE_TARGET_CONCURRENCY": 2.0})
+    slot = _add_slot(downloader, delay=1.0)
+
+    _download(at, spider, latency=10.0)
+    assert slot.delay == 5.0
+    _download(at, spider, latency=1.0)
+    assert slot.delay == 2.75
+    assert len(at._latencies) == 0
+
+
+def test_latency_window_ignores_outlier():
+    """With a window, a single spike does not move the delay."""
+    at, spider, downloader = _window_setup(5)
+    slot = _add_slot(downloader, delay=0.0)
+
+    for _ in range(4):
+        _download(at, spider, latency=2.0)
+    assert slot.delay == 1.0
+    _download(at, spider, latency=100.0)
+    assert slot.delay == 1.0
+    # The spike stays in the window until the next response pushes it out.
+    assert list(at._latencies[slot]) == [2.0, 2.0, 2.0, 2.0, 100.0]
+    _download(at, spider, latency=2.0)
+    assert list(at._latencies[slot]) == [2.0, 2.0, 2.0, 100.0, 2.0]
+
+
+@pytest.mark.parametrize(
+    ("latencies", "expected_delays"),
+    [
+        # The delay is reset before each response, so it equals the target
+        # delay computed from the window median: the median / 2, unless the
+        # mean with the reset delay is higher.
+        ((2.0,), (1.0,)),
+        ((2.0, 4.0), (1.0, 1.5)),
+        ((6.0, 1.0, 2.0), (3.0, 1.75, 1.0)),
+        # median (2, 6) is 4, target 2, and the mean with the reset delay is 1
+        ((8.0, 6.0, 1.0, 2.0), (4.0, 3.5, 3.0, 2.0)),
+    ],
+)
+def test_latency_window_median(latencies, expected_delays):
+    """Odd and even windows both use the median latency."""
+    at, spider, downloader = _window_setup(max(len(latencies), 1))
+    slot = _add_slot(downloader, delay=0.0)
+
+    for latency, expected_delay in zip(latencies, expected_delays, strict=True):
+        slot.delay = 0.0
+        _download(at, spider, latency=latency)
+        assert slot.delay == expected_delay
+
+    assert list(at._latencies[slot]) == list(latencies)
+
+
+def test_latency_window_bounded():
+    """Only the most recent samples are kept."""
+    at, spider, downloader = _window_setup(2)
+    slot = _add_slot(downloader, delay=0.0)
+
+    for latency in (2.0, 4.0, 6.0, 8.0):
+        slot.delay = 0.0
+        _download(at, spider, latency=latency)
+        assert len(at._latencies[slot]) <= 2
+
+    assert list(at._latencies[slot]) == [6.0, 8.0]
+
+
+def test_latency_window_limits():
+    """The window median is still capped by the min and max delays."""
+    at, spider, downloader = _window_setup(
+        2, DOWNLOAD_DELAY=2.0, AUTOTHROTTLE_START_DELAY=2.0, AUTOTHROTTLE_MAX_DELAY=4.0
+    )
+    slot = _add_slot(downloader, delay=2.0)
+
+    _download(at, spider, latency=0.0)
+    assert slot.delay == 2.0
+    for _ in range(2):
+        _download(at, spider, latency=100.0)
+    assert slot.delay == 4.0
+
+
+def test_latency_window_bad_response():
+    """A non-200 response cannot lower the delay through the window."""
+    at, spider, downloader = _window_setup(3)
+    slot = _add_slot(downloader, delay=5.0)
+
+    _download(at, spider, latency=6.0)
+    _download(at, spider, latency=6.0)
+    assert slot.delay == 3.5
+    assert list(at._latencies[slot]) == [6.0, 6.0]
+
+    # Median 6 -> target 3 < 3.5, so the error response leaves the delay alone.
+    _download(at, spider, latency=100.0, status=400)
+    assert slot.delay == 3.5
+    assert list(at._latencies[slot]) == [6.0, 6.0, 100.0]
+
+    # A 200 response applies the median (6) again, and keeps lowering it.
+    _download(at, spider, latency=6.0)
+    assert slot.delay == 3.25
+
+    # Errors still raise the delay when the window median does.
+    for _ in range(5):
+        _download(at, spider, latency=100.0, status=500)
+    assert slot.delay == 50.0
+
+
+def test_latency_window_missing_latency():
+    """A response without a latency does not fill the window."""
+    at, spider, downloader = _window_setup(3)
+    slot = _add_slot(downloader, delay=0.0)
+    _download(at, spider, latency=2.0)
+
+    _download(at, spider, latency=UNSET)
+
+    assert list(at._latencies[slot]) == [2.0]
+    assert slot.delay == 1.0
+
+
+def test_latency_window_zero_latency():
+    """Zero is a valid latency and can lower the delay."""
+    at, spider, downloader = _window_setup(2)
+    slot = _add_slot(downloader, delay=2.0)
+
+    _download(at, spider, latency=0.0)
+    assert list(at._latencies[slot]) == [0.0]
+    assert slot.delay == 1.0
+    _download(at, spider, latency=0.0)
+    assert slot.delay == 0.5
+
+
+@pytest.mark.parametrize(
+    "latency",
+    [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        -1.0,
+        -0.001,
+        "1.0",
+        True,
+        [1.0],
+        UNSET,
+    ],
+)
+def test_latency_window_invalid_latency(latency):
+    """Invalid latencies neither fill the window nor change the delay."""
+    at, spider, downloader = _window_setup(3)
+    slot = _add_slot(downloader, delay=0.0)
+    _download(at, spider, latency=2.0)
+    assert list(at._latencies[slot]) == [2.0]
+    assert slot.delay == 1.0
+
+    _download(at, spider, latency=latency)
+
+    assert list(at._latencies[slot]) == [2.0]
+    assert slot.delay == 1.0
+
+
+def test_latency_window_dont_adjust():
+    """Requests that skip the adjustment do not fill the window either."""
+    at, spider, downloader = _window_setup(3)
+    slot = _add_slot(downloader, delay=0.0)
+    _download(at, spider, latency=2.0)
+    assert list(at._latencies[slot]) == [2.0]
+    assert slot.delay == 1.0
+
+    _download(at, spider, latency=100.0, dont_adjust=True)
+
+    assert list(at._latencies[slot]) == [2.0]
+    assert slot.delay == 1.0
+
+
+def test_latency_window_independent_slots():
+    """Each download slot has its own window and delay."""
+    at, spider, downloader = _window_setup(3)
+    foo = _add_slot(downloader, "foo", delay=0.0)
+    bar = _add_slot(downloader, "bar", delay=0.0)
+
+    _download(at, spider, latency=2.0, slot="foo")
+    _download(at, spider, latency=2.0, slot="foo")
+    _download(at, spider, latency=10.0, slot="bar")
+
+    assert list(at._latencies[foo]) == [2.0, 2.0]
+    assert list(at._latencies[bar]) == [10.0]
+    assert foo.delay == 1.0
+    assert bar.delay == 5.0
+
+
+def test_latency_window_spider_closed():
+    """Closing the spider drops every window."""
+    at, spider, downloader = _window_setup(3)
+    _add_slot(downloader, "foo", delay=0.0)
+    _add_slot(downloader, "bar", delay=0.0)
+    _download(at, spider, latency=2.0, slot="foo")
+    _download(at, spider, latency=2.0, slot="bar")
+    assert len(at._latencies) == 2
+
+    at._spider_closed(spider)
+
+    assert len(at._latencies) == 0
+
+
+def test_latency_window_slot_removed():
+    """A window goes away with its download slot."""
+    at, spider, downloader = _window_setup(3)
+    slot = _add_slot(downloader, delay=0.0)
+    _download(at, spider, latency=2.0)
+    assert len(at._latencies) == 1
+
+    del downloader.slots["foo"]
+    del slot
+    gc.collect()
+
+    assert len(at._latencies) == 0
+
+
+def test_latency_window_reused_slot_name():
+    """A new slot with the name of a removed one starts with an empty window."""
+    at, spider, downloader = _window_setup(3)
+    old = _add_slot(downloader, delay=0.0)
+    _download(at, spider, latency=2.0)
+    _download(at, spider, latency=2.0)
+    assert list(at._latencies[old]) == [2.0, 2.0]
+
+    new = _add_slot(downloader, delay=0.0)
+    assert new is not old
+    _download(at, spider, latency=8.0)
+
+    assert list(at._latencies[new]) == [8.0]
+    assert new.delay == 4.0
+    assert list(at._latencies[old]) == [2.0, 2.0]
+
+
+def test_latency_window_per_crawler():
+    """Windows are not shared between crawlers."""
+    at1, spider1, downloader1 = _window_setup(3)
+    at2, spider2, downloader2 = _window_setup(3)
+    slot1 = _add_slot(downloader1, delay=0.0)
+    slot2 = _add_slot(downloader2, delay=0.0)
+
+    _download(at1, spider1, latency=2.0)
+    _download(at1, spider1, latency=2.0)
+    _download(at2, spider2, latency=10.0)
+
+    assert at1._latencies is not at2._latencies
+    assert list(at1._latencies[slot1]) == [2.0, 2.0]
+    assert list(at2._latencies[slot2]) == [10.0]
+
+
+def test_latency_window_debug_logs_median(caplog):
+    """The debug line reports the median latency used for the adjustment."""
+    at, spider, downloader = _window_setup(3, AUTOTHROTTLE_DEBUG=True)
+    slot = _add_slot(downloader, delay=2.0)
+    slot.transferring = (None, None)
+
+    _download(at, spider, latency=2.0)
+    caplog.clear()
+    with caplog.at_level(INFO):
+        _download(at, spider, latency=100.0)
+
+    # Median of (2, 100) is 51 -> target 25.5, so the delay jumps to it.
+    assert caplog.record_tuples == [
+        (
+            "scrapy.extensions.throttle",
+            INFO,
+            "slot: foo | conc: 2 | delay:25500 ms (+24000) | latency:51000 ms | size:     0 bytes",
+        ),
+    ]

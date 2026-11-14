@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import logging
+from collections import deque
+from math import isfinite
+from statistics import median
 from typing import TYPE_CHECKING, Self
+from weakref import WeakKeyDictionary
 
 from scrapy import Request, Spider, signals
 from scrapy.exceptions import NotConfigured
@@ -11,9 +15,43 @@ if TYPE_CHECKING:
     from scrapy.core.downloader import Slot
     from scrapy.crawler import Crawler
     from scrapy.http import Response
+    from scrapy.settings import BaseSettings
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_valid_latency(latency: object) -> bool:
+    """Return whether *latency* can be used to compute a target delay."""
+    return (
+        isinstance(latency, (int, float))
+        and not isinstance(latency, bool)
+        and isfinite(latency)
+        and latency >= 0
+    )
+
+
+def _latency_window_size(settings: BaseSettings) -> int | None:
+    """Return :setting:`AUTOTHROTTLE_LATENCY_WINDOW` as a positive integer, or
+    ``None`` when the window is disabled."""
+    value = settings.get("AUTOTHROTTLE_LATENCY_WINDOW")
+    if value is None:
+        return None
+    size: int | None
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        size = None
+    else:
+        # A string is accepted because command-line and environment settings
+        # arrive as strings, as long as it spells a whole number.
+        try:
+            size = int(value)
+        except ValueError:
+            size = None
+    if size is None or size <= 0:
+        raise ValueError(
+            f"AUTOTHROTTLE_LATENCY_WINDOW ({value!r}) must be a positive integer."
+        )
+    return size
 
 
 class AutoThrottle:
@@ -31,7 +69,10 @@ class AutoThrottle:
                 f"AUTOTHROTTLE_TARGET_CONCURRENCY "
                 f"({self.target_concurrency!r}) must be higher than 0."
             )
+        self._latency_window: int | None = _latency_window_size(crawler.settings)
+        self._latencies: WeakKeyDictionary[Slot, deque[float]] = WeakKeyDictionary()
         crawler.signals.connect(self._spider_opened, signal=signals.spider_opened)
+        crawler.signals.connect(self._spider_closed, signal=signals.spider_closed)
         crawler.signals.connect(
             self._response_downloaded, signal=signals.response_downloaded
         )
@@ -44,6 +85,9 @@ class AutoThrottle:
         self.mindelay = self._min_delay()
         self.maxdelay = self._max_delay()
         self.crawler.engine.downloader._delay = self._start_delay()
+
+    def _spider_closed(self, spider: Spider) -> None:
+        self._latencies.clear()
 
     def _min_delay(self) -> float:
         return self.crawler.settings.getfloat("DOWNLOAD_DELAY")
@@ -67,9 +111,16 @@ class AutoThrottle:
             or request.meta.get("autothrottle_dont_adjust_delay", False) is True
         ):
             return
+        effective_latency = latency
+        if self._latency_window is not None:
+            if not _is_valid_latency(latency):
+                return
+            latencies = self._slot_latencies(slot)
+            latencies.append(latency)
+            effective_latency = median(latencies)
 
         olddelay = slot.delay
-        self._adjust_delay(slot, latency, response)
+        self._adjust_delay(slot, effective_latency, response)
         if self.debug:
             diff = slot.delay - olddelay
             size = _body_size(response)
@@ -83,7 +134,7 @@ class AutoThrottle:
                     "concurrency": conc,
                     "delay": slot.delay * 1000,
                     "delaydiff": diff * 1000,
-                    "latency": latency * 1000,
+                    "latency": effective_latency * 1000,
                     "size": size,
                 },
                 extra={"spider": spider},
@@ -96,6 +147,15 @@ class AutoThrottle:
         if key is None:
             return None, None
         return key, self.crawler.engine.downloader.slots.get(key)
+
+    def _slot_latencies(self, slot: Slot) -> deque[float]:
+        """Return the bounded latency window of *slot*, creating it if needed."""
+        assert self._latency_window is not None
+        latencies = self._latencies.get(slot)
+        if latencies is None:
+            latencies = deque(maxlen=self._latency_window)
+            self._latencies[slot] = latencies
+        return latencies
 
     def _adjust_delay(self, slot: Slot, latency: float, response: Response) -> None:
         """Define delay adjustment policy"""

@@ -82,7 +82,7 @@ def _examples(responses: Iterable[Response]) -> str:
     return examples
 
 
-@dataclass(slots=True, eq=False)
+@dataclass(slots=True, eq=False, weakref_slot=True)
 class Slot:
     """Downloader slot"""
 
