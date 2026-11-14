@@ -261,7 +261,10 @@ status codes are in the 200-300 range.
 If you still want to process response codes outside that range, you can
 specify which response codes the spider is able to handle using the
 ``handle_httpstatus_list`` spider attribute or
-:setting:`HTTPERROR_ALLOWED_CODES` setting.
+:setting:`HTTPERROR_ALLOWED_CODES` setting. To allow whole ranges of status
+codes instead of listing them individually, use the
+``handle_httpstatus_ranges`` spider attribute or the
+:setting:`HTTPERROR_ALLOWED_STATUS_RANGES` setting.
 
 For example, if you want your spider to handle 404 responses you can do
 this:
@@ -276,13 +279,24 @@ this:
 
 .. reqmeta:: handle_httpstatus_list
 
+.. reqmeta:: handle_httpstatus_ranges
+
 .. reqmeta:: handle_httpstatus_all
 
 The ``handle_httpstatus_list`` key of :attr:`Request.meta
 <scrapy.Request.meta>` can also be used to specify which response codes to
-allow on a per-request basis. You can also set the meta key ``handle_httpstatus_all``
-to ``True`` if you want to allow any response code for a request, and ``False`` to
-disable the effects of the ``handle_httpstatus_all`` key.
+allow on a per-request basis. The ``handle_httpstatus_ranges`` key works the
+same way, but takes a list of ``(start, end)`` pairs of status codes
+(inclusive), e.g. ``[(400, 499)]``. Overlapping or duplicate ranges are
+merged; every range must consist of integers between 100 and 599 with
+``start <= end``, otherwise :exc:`ValueError` is raised. You can also set
+the meta key ``handle_httpstatus_all`` to ``True`` if you want to allow any
+response code for a request, and ``False`` to disable the effects of the
+``handle_httpstatus_all`` key.
+
+When these meta keys are present, they replace the spider attributes and
+settings for that request entirely, so an explicitly empty list or range
+list allows no additional status codes.
 
 Keep in mind, however, that it's usually a bad idea to handle non-200
 responses, unless you really know what you're doing.
@@ -308,6 +322,22 @@ HTTPERROR_ALLOWED_CODES
 Default: ``[]``
 
 Pass all responses with non-200 status codes contained in this list.
+
+.. setting:: HTTPERROR_ALLOWED_STATUS_RANGES
+
+HTTPERROR_ALLOWED_STATUS_RANGES
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: VERSION
+
+Default: ``[]``
+
+Pass all responses with non-200 status codes contained in these ranges, as
+an alternative to listing every code in :setting:`HTTPERROR_ALLOWED_CODES`.
+The value is a list of ``(start, end)`` pairs of status codes (inclusive),
+e.g. ``[(400, 499)]``. Overlapping or duplicate ranges are merged; every
+range must consist of integers between 100 and 599 with ``start <= end``,
+otherwise :exc:`ValueError` is raised.
 
 .. setting:: HTTPERROR_ALLOW_ALL
 
