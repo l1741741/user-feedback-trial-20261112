@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import logging
+import math
+import re
 import warnings
+from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any, Self
+from urllib.parse import urljoin, urlsplit
 
 from w3lib.url import canonicalize_url
 
 from scrapy import signals
 from scrapy.exceptions import IgnoreRequest, NotConfigured, ScrapyDeprecationWarning
 from scrapy.http import HtmlResponse, Response
+from scrapy.http.response.text import MetaRefresh
 from scrapy.spidermiddlewares.referer import RefererMiddleware
 from scrapy.utils.decorators import _warn_spider_arg
 from scrapy.utils.httpobj import urlparse_cached
@@ -290,6 +295,136 @@ def _get_scripting(settings: BaseSettings) -> bool:
     return scripting
 
 
+# Maximum number of body bytes that strict meta refresh parsing scans.
+_STRICT_PREFIX_SIZE = 65536
+
+_DELAY_RE = re.compile(r"\s*([0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*")
+_URL_PREFIX_RE = re.compile(r"url\s*=\s*", re.IGNORECASE)
+
+
+def _parse_refresh_value(value: str) -> tuple[float, str] | None:
+    """Parse the value of a ``Refresh`` header or of the ``content``
+    attribute of a meta refresh tag.
+
+    Return a ``(delay, url)`` pair, where *url* may be empty, or ``None`` if
+    *value* is malformed. The delay must be a finite, non-negative number,
+    and a quoted URL must be closed and followed by whitespace only.
+    """
+    match = _DELAY_RE.match(value)
+    if match is None:
+        return None
+    delay = float(match.group(1))
+    if not math.isfinite(delay):
+        return None
+    rest = value[match.end() :]
+    if not rest:
+        return delay, ""
+    if not rest.startswith(";"):
+        return None
+    rest = rest[1:].lstrip()
+    url_match = _URL_PREFIX_RE.match(rest)
+    if url_match is not None:
+        rest = rest[url_match.end() :]
+    if not rest:
+        return delay, ""
+    if rest[0] in {"'", '"'}:
+        quote = rest[0]
+        end = rest.find(quote, 1)
+        if end == -1 or rest[end + 1 :].strip():
+            return None
+        return delay, rest[1:end]
+    return delay, rest.strip()
+
+
+class _StrictRefreshParser(HTMLParser):
+    """Collect meta refresh content values and the base URL from an HTML
+    document, skipping elements whose content web browsers do not render."""
+
+    def __init__(self, *, scripting: bool) -> None:
+        super().__init__(convert_charrefs=True)
+        self.refresh_values: list[str] = []
+        self.base_url: str | None = None
+        self._ignored_tags = {"script", "template"} | (
+            {"noscript"} if scripting else set()
+        )
+        self._ignored_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self._ignored_depth:
+            if tag in self._ignored_tags:
+                self._ignored_depth += 1
+            return
+        if tag in self._ignored_tags:
+            self._ignored_depth = 1
+            return
+        if tag == "base":
+            if self.base_url is None:
+                self.base_url = next(
+                    (value for name, value in attrs if name == "href" and value),
+                    None,
+                )
+        elif tag == "meta":
+            attributes: dict[str, str | None] = {}
+            for name, value in attrs:
+                attributes.setdefault(name, value)
+            http_equiv = attributes.get("http-equiv")
+            content = attributes.get("content")
+            if (
+                http_equiv is not None
+                and http_equiv.strip().lower() == "refresh"
+                and content is not None
+            ):
+                self.refresh_values.append(content)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._ignored_depth and tag in self._ignored_tags:
+            self._ignored_depth -= 1
+
+
+def _resolve_refresh_url(base: str, url: str) -> str:
+    """Return *url* resolved against *base*, or an empty string if *url* is
+    empty or too malformed to resolve."""
+    if not url:
+        return ""
+    try:
+        return urljoin(base, url)
+    except ValueError:
+        return ""
+
+
+def _strict_meta_refresh(
+    response: HtmlResponse, *, scripting: bool
+) -> MetaRefresh | None:
+    """Return the meta refresh of *response* as strict parsing sees it.
+
+    A well-formed ``Refresh`` header takes precedence over meta refresh tags,
+    which are only read from the first ``_STRICT_PREFIX_SIZE`` bytes of the
+    body; the first tag with a well-formed ``content`` value wins. The
+    returned URL is absolute: header URLs are resolved against the response
+    URL, tag URLs against its base URL.
+    """
+    header = response.headers.get(b"Refresh")
+    if header is not None:
+        parsed = _parse_refresh_value(header.decode("latin-1"))
+        if parsed is not None:
+            delay, url = parsed
+            return MetaRefresh(delay, _resolve_refresh_url(response.url, url))
+    parser = _StrictRefreshParser(scripting=scripting)
+    parser.feed(
+        response.body[:_STRICT_PREFIX_SIZE].decode(response.encoding, "replace")
+    )
+    parser.close()
+    base_url = response.url
+    if parser.base_url is not None:
+        base_url = _resolve_refresh_url(response.url, parser.base_url) or response.url
+    for value in parser.refresh_values:
+        parsed = _parse_refresh_value(value)
+        if parsed is not None:
+            delay, url = parsed
+            return MetaRefresh(delay, _resolve_refresh_url(base_url, url))
+    return None
+
+
 class MetaRefreshMiddleware(BaseRedirectMiddleware):
     """Handle redirection of requests based on meta-refresh html tag."""
 
@@ -299,6 +434,7 @@ class MetaRefreshMiddleware(BaseRedirectMiddleware):
         super().__init__(settings)
         self._scripting: bool = _get_scripting(settings)
         self._maxdelay: int = settings.getint("METAREFRESH_MAXDELAY")
+        self._strict: bool = settings.getbool("METAREFRESH_STRICT")
 
     @_warn_spider_arg
     def process_response(
@@ -312,10 +448,22 @@ class MetaRefreshMiddleware(BaseRedirectMiddleware):
         ):
             return response
 
-        meta_refresh = _get_meta_refresh(response, scripting=self._scripting)
+        if self._strict:
+            meta_refresh = _strict_meta_refresh(response, scripting=self._scripting)
+        else:
+            meta_refresh = _get_meta_refresh(response, scripting=self._scripting)
         if meta_refresh is None:
             return response
         url = meta_refresh.url
+        if self._strict:
+            # A refresh without a URL reloads the page, which the dupefilter
+            # would drop. Targets without a complete http(s) URL would make
+            # Request building raise ValueError, e.g. javascript: ones.
+            if not url:
+                return response
+            parsed_url = urlsplit(url)
+            if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+                return response
         # A refresh without a URL reloads the page, which the dupefilter would
         # drop.
         if canonicalize_url(url) == canonicalize_url(response.url):

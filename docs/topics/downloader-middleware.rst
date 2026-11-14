@@ -1100,6 +1100,7 @@ settings (see the settings documentation for more info):
 * :setting:`METAREFRESH_ENABLED`
 * :setting:`METAREFRESH_MAXDELAY`
 * :setting:`METAREFRESH_SCRIPTING`
+* :setting:`METAREFRESH_STRICT`
 
 This middleware obey :setting:`REDIRECT_MAX_TIMES` setting, :reqmeta:`dont_redirect`,
 :reqmeta:`redirect_urls` and :reqmeta:`redirect_reasons` request meta keys as described
@@ -1141,6 +1142,33 @@ Default: ``True``
 Whether to follow the meta refresh that a web browser would follow with
 JavaScript enabled (``True``), ignoring those within ``<noscript>``, or with
 JavaScript disabled (``False``).
+
+METAREFRESH_STRICT
+^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: VERSION
+
+.. setting:: METAREFRESH_STRICT
+
+Default: ``False``
+
+Whether to parse refreshes strictly.
+
+In strict mode, the ``Refresh`` response header is considered in addition to
+``<meta http-equiv="refresh">`` tags, and takes precedence over them: if the
+header is present and well-formed, it alone decides whether a redirect
+happens. Meta refresh tags are only read from the first 64 KiB of the
+response body, comments and elements whose content web browsers do not
+render (``script``, ``template`` and, depending on
+:setting:`METAREFRESH_SCRIPTING`, ``noscript``) are skipped, and the first
+tag with a well-formed ``content`` attribute wins.
+
+A refresh value is well-formed only if its delay is a finite, non-negative
+number of seconds and its URL, when quoted, is closed and followed by
+whitespace only. Relative URLs are resolved against the base URL of the
+response. The response is returned unchanged when the URL is empty, points
+to the response URL itself, has a scheme other than ``http`` or ``https``,
+or when the delay exceeds :setting:`METAREFRESH_MAXDELAY`.
 
 RetryMiddleware
 ---------------
