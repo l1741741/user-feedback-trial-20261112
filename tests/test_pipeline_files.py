@@ -4,8 +4,10 @@ import dataclasses
 import hashlib
 import logging
 import mimetypes
+import os
 import random
 import re
+import threading
 import time
 import warnings
 from abc import ABC, abstractmethod
@@ -528,6 +530,54 @@ class TestFilesPipeline:
         assert path.read_bytes() == b"data"
 
     @coroutine_test
+    async def test_file_created_with_safe_write(self) -> None:
+        pipeline = self._create_pipeline(
+            FilesPipeline, {"FILES_STORE_SAFE_WRITE": True}
+        )
+        assert pipeline.store.safe_write is True
+        item_url = "http://example.com/safe.pdf"
+        item = _create_item_with_files(item_url)
+        with mock.patch.object(
+            FilesPipeline,
+            "get_media_requests",
+            return_value=[_prepare_request_object(item_url, status=201)],
+        ):
+            result = await pipeline.process_item(item)
+        path = Path(self.tempdir) / result["files"][0]["path"]
+        assert path.read_bytes() == b"data"
+        assert not list(Path(self.tempdir).rglob("*.tmp"))
+
+    @coroutine_test
+    async def test_safe_write_cache_ignores_crashed_temp(self) -> None:
+        pipeline = self._create_pipeline(
+            FilesPipeline, {"FILES_STORE_SAFE_WRITE": True}
+        )
+        item_url = "http://example.com/crashed.pdf"
+        item = _create_item_with_files(item_url)
+        with mock.patch.object(
+            FilesPipeline,
+            "get_media_requests",
+            return_value=[_prepare_request_object(item_url, status=201)],
+        ):
+            result = await pipeline.process_item(item)
+        rel_path = result["files"][0]["path"]
+        target = Path(self.tempdir) / rel_path
+        assert target.read_bytes() == b"data"
+
+        # Simulate a process crash that left an uncommitted temporary file.
+        target.unlink()
+        tmp = target.with_name(f".{target.name}.999.1.tmp")
+        tmp.write_bytes(b"partial")
+        assert pipeline.store.stat_file(rel_path, DUMMY_SPIDER_INFO) == {}
+
+        # The next successful write to the same destination removes the
+        # residue and commits.
+        pipeline.store.persist_file(rel_path, BytesIO(b"recovered"), DUMMY_SPIDER_INFO)
+        assert target.read_bytes() == b"recovered"
+        assert not tmp.exists()
+        assert not list(Path(self.tempdir).rglob("*.tmp"))
+
+    @coroutine_test
     async def test_file_created_empty(self, caplog: pytest.LogCaptureFixture) -> None:
         """A 201 response without a body is an empty download, e.g. because its
         Location header was not followed, 201 not being in REDIRECT_HTTP_CODES."""
@@ -1048,6 +1098,34 @@ class TestMediaStorages:
             pipeline = build_from_crawler(FilesPipeline, crawler)
         assert isinstance(pipeline.store, SimpleStore)
 
+    def test_safe_write_setting_enables_safe_store(self, tmp_path: Path) -> None:
+        crawler = get_crawler(
+            DefaultSpider,
+            {"FILES_STORE": str(tmp_path), "FILES_STORE_SAFE_WRITE": True},
+        )
+        pipeline = build_from_crawler(FilesPipeline, crawler)
+        assert isinstance(pipeline.store, FSFilesStore)
+        assert pipeline.store.safe_write is True
+
+    def test_safe_write_setting_defaults_to_legacy_store(self, tmp_path: Path) -> None:
+        crawler = get_crawler(DefaultSpider, {"FILES_STORE": str(tmp_path)})
+        pipeline = build_from_crawler(FilesPipeline, crawler)
+        assert isinstance(pipeline.store, FSFilesStore)
+        assert pipeline.store.safe_write is False
+
+    def test_safe_write_setting_ignored_for_remote_scheme(self, tmp_path: Path) -> None:
+        crawler = get_crawler(
+            None,
+            {
+                "FILES_STORE": "mystore://example.com/",
+                "FILES_STORE_SAFE_WRITE": True,
+                "MEDIA_STORAGES": {"mystore": "tests.test_pipeline_files.SimpleStore"},
+            },
+        )
+        store = build_from_crawler(FilesPipeline, crawler).store
+        assert isinstance(store, SimpleStore)
+        assert not hasattr(store, "safe_write")
+
     def test_store_schemes_read_deprecated(self) -> None:
         with pytest.warns(ScrapyDeprecationWarning, match="STORE_SCHEMES"):
             assert FilesPipeline.STORE_SCHEMES["s3"] is S3FilesStore
@@ -1152,6 +1230,392 @@ class TestFSFilesStore:
     def test_stat_missing_file(self, tmp_path: Path) -> None:
         store = FSFilesStore(tmp_path)
         assert store.stat_file("full/filename", DUMMY_SPIDER_INFO) == {}
+
+
+class TestFSFilesStoreSafeWrite:
+    def _store(self, tmp_path: Path) -> FSFilesStore:
+        return FSFilesStore(tmp_path, safe_write=True)
+
+    def test_safe_write_disabled_by_default(self, tmp_path: Path) -> None:
+        assert FSFilesStore(tmp_path).safe_write is False
+
+    def test_from_crawler_reads_setting(self, tmp_path: Path) -> None:
+        crawler = get_crawler(DefaultSpider, {"FILES_STORE_SAFE_WRITE": True})
+        store = FSFilesStore.from_crawler(
+            crawler, str(tmp_path), get_setting_name=lambda name: f"FILES_STORE_{name}"
+        )
+        assert store.safe_write is True
+
+    def test_from_crawler_default_setting(self, tmp_path: Path) -> None:
+        crawler = get_crawler(DefaultSpider)
+        store = FSFilesStore.from_crawler(
+            crawler, str(tmp_path), get_setting_name=lambda name: f"FILES_STORE_{name}"
+        )
+        assert store.safe_write is False
+
+    def test_persist_commits_final_bytes(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        data = b"x" * 100_000
+        store.persist_file("full/filename", BytesIO(data), DUMMY_SPIDER_INFO)
+        target = tmp_path / "full" / "filename"
+        assert target.read_bytes() == data
+        assert not list(tmp_path.rglob("*.tmp"))
+
+    def test_stat_only_sees_committed_file(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        data = b"safe data"
+        store.persist_file("full/filename", BytesIO(data), DUMMY_SPIDER_INFO)
+        stat = store.stat_file("full/filename", DUMMY_SPIDER_INFO)
+        assert stat["checksum"] == hashlib.md5(data).hexdigest()
+        assert stat["last_modified"] == pytest.approx(time.time(), abs=60)
+
+    def test_stat_missing_file(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        assert store.stat_file("full/filename", DUMMY_SPIDER_INFO) == {}
+
+    def test_short_write_aborts_and_keeps_previous_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = self._store(tmp_path)
+        store.persist_file("full/filename", BytesIO(b"previous"), DUMMY_SPIDER_INFO)
+        target = tmp_path / "full" / "filename"
+
+        real_write = os.write
+        written_total = 0
+
+        def short_write(fd: int, data: bytes) -> int:
+            nonlocal written_total
+            # Report only half of the first chunk, then fail the fsync check
+            # path by stopping further progress through a length mismatch.
+            chunk = real_write(fd, data[: max(1, len(data) // 2)])
+            written_total += chunk
+            if written_total >= 3:
+                raise OSError("simulated short write failure")
+            return chunk
+
+        monkeypatch.setattr(os, "write", short_write)
+        with pytest.raises(OSError, match="simulated short write"):
+            store.persist_file(
+                "full/filename", BytesIO(b"new content"), DUMMY_SPIDER_INFO
+            )
+        assert target.read_bytes() == b"previous"
+        assert not list(tmp_path.rglob("*.tmp"))
+
+    def test_length_mismatch_aborts_and_keeps_previous_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = self._store(tmp_path)
+        store.persist_file("full/filename", BytesIO(b"previous"), DUMMY_SPIDER_INFO)
+        target = tmp_path / "full" / "filename"
+
+        real_fstat = os.fstat
+
+        def wrong_fstat(fd: int) -> Any:
+            result = real_fstat(fd)
+            return mock.Mock(st_size=result.st_size - 1)
+
+        monkeypatch.setattr(os, "fstat", wrong_fstat)
+        with pytest.raises(OSError, match="length does not match"):
+            store.persist_file(
+                "full/filename", BytesIO(b"new content"), DUMMY_SPIDER_INFO
+            )
+        assert target.read_bytes() == b"previous"
+        assert not list(tmp_path.rglob("*.tmp"))
+
+    def test_fsync_failure_aborts_and_keeps_previous_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = self._store(tmp_path)
+        store.persist_file("full/filename", BytesIO(b"previous"), DUMMY_SPIDER_INFO)
+        target = tmp_path / "full" / "filename"
+
+        def failing_fsync(fd: int) -> None:
+            raise OSError("simulated fsync failure")
+
+        monkeypatch.setattr(os, "fsync", failing_fsync)
+        with pytest.raises(OSError, match="simulated fsync"):
+            store.persist_file(
+                "full/filename", BytesIO(b"new content"), DUMMY_SPIDER_INFO
+            )
+        assert target.read_bytes() == b"previous"
+        assert not list(tmp_path.rglob("*.tmp"))
+
+    def test_rename_failure_keeps_previous_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = self._store(tmp_path)
+        store.persist_file("full/filename", BytesIO(b"previous"), DUMMY_SPIDER_INFO)
+        target = tmp_path / "full" / "filename"
+
+        def failing_replace(src: str, dst: str) -> None:
+            raise OSError("simulated rename failure")
+
+        monkeypatch.setattr(os, "replace", failing_replace)
+        with pytest.raises(OSError, match="simulated rename"):
+            store.persist_file(
+                "full/filename", BytesIO(b"new content"), DUMMY_SPIDER_INFO
+            )
+        assert target.read_bytes() == b"previous"
+        assert not list(tmp_path.rglob("*.tmp"))
+
+    def test_failure_without_previous_file_leaves_no_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = self._store(tmp_path)
+        target = tmp_path / "full" / "filename"
+
+        def failing_fsync(fd: int) -> None:
+            raise OSError("simulated fsync failure")
+
+        monkeypatch.setattr(os, "fsync", failing_fsync)
+        with pytest.raises(OSError, match="simulated fsync"):
+            store.persist_file("full/filename", BytesIO(b"content"), DUMMY_SPIDER_INFO)
+        assert not target.exists()
+        assert not list(tmp_path.rglob("*.tmp"))
+        assert store.stat_file("full/filename", DUMMY_SPIDER_INFO) == {}
+
+    @pytest.mark.parametrize(
+        "bad_path",
+        [
+            "/etc/passwd",
+            "../escape",
+            "full/../../escape",
+        ],
+    )
+    def test_rejects_paths_outside_root(self, tmp_path: Path, bad_path: str) -> None:
+        store = self._store(tmp_path)
+        with pytest.raises(ValueError, match="outside of the storage root"):
+            store.persist_file(bad_path, BytesIO(b"data"), DUMMY_SPIDER_INFO)
+        with pytest.raises(ValueError, match="outside of the storage root"):
+            store.stat_file(bad_path, DUMMY_SPIDER_INFO)
+
+    def test_rejects_symlink_outside_root(self, tmp_path: Path) -> None:
+        outside = tmp_path.parent / f"outside-file-{tmp_path.name}"
+        outside.write_bytes(b"outside")
+        link_dir = tmp_path / "full"
+        link_dir.mkdir()
+        (link_dir / "link").symlink_to(outside)
+        store = self._store(tmp_path)
+        try:
+            with pytest.raises(ValueError, match="outside of the storage root"):
+                store.persist_file("full/link", BytesIO(b"data"), DUMMY_SPIDER_INFO)
+            assert outside.read_bytes() == b"outside"
+        finally:
+            outside.unlink()
+
+    def test_allows_symlink_inside_root(self, tmp_path: Path) -> None:
+        target = tmp_path / "full" / "target"
+        link_dir = tmp_path / "links"
+        link_dir.mkdir()
+        (link_dir / "link").symlink_to(target)
+        store = self._store(tmp_path)
+        store.persist_file("links/link", BytesIO(b"data"), DUMMY_SPIDER_INFO)
+        assert target.read_bytes() == b"data"
+
+    def test_legacy_mode_allows_parent_traversal(self, tmp_path: Path) -> None:
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        store = FSFilesStore(nested)
+        escaped = tmp_path / "escape"
+        store.persist_file("../escape", BytesIO(b"data"), DUMMY_SPIDER_INFO)
+        assert escaped.read_bytes() == b"data"
+
+    def test_concurrent_writes_never_mix_content(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        payloads = [bytes([i]) * 50_000 for i in range(10)]
+        errors: list[BaseException] = []
+
+        def write(payload: bytes) -> None:
+            try:
+                for _ in range(5):
+                    store.persist_file(
+                        "full/filename", BytesIO(payload), DUMMY_SPIDER_INFO
+                    )
+            except BaseException as exc:  # pragma: no cover - failure reporter
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=write, args=(payload,)) for payload in payloads
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        final = (tmp_path / "full" / "filename").read_bytes()
+        assert len(final) == 50_000
+        assert len(set(final)) == 1
+        assert not list(tmp_path.rglob("*.tmp"))
+
+    def test_stale_temp_file_is_not_cache_hit(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        target_dir = tmp_path / "full"
+        target_dir.mkdir()
+        stale = target_dir / ".filename.999.1.tmp"
+        stale.write_bytes(b"partial")
+        assert store.stat_file("full/filename", DUMMY_SPIDER_INFO) == {}
+        store.persist_file("full/filename", BytesIO(b"complete"), DUMMY_SPIDER_INFO)
+        assert not stale.exists()
+        stat = store.stat_file("full/filename", DUMMY_SPIDER_INFO)
+        assert stat["checksum"] == hashlib.md5(b"complete").hexdigest()
+
+    def test_open_temp_reuses_stale_name(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        tmp_path.joinpath("full").mkdir()
+        stale = tmp_path / "full" / ".filename.1.1.tmp"
+        stale.write_bytes(b"stale")
+        fd, actual = store._open_temp(stale)
+        with os.fdopen(fd, "wb"):
+            pass
+        assert actual == stale
+        assert stale.read_bytes() == b""
+
+    def test_open_temp_falls_back_to_unique_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = self._store(tmp_path)
+        tmp_path.joinpath("full").mkdir()
+        wanted = tmp_path / "full" / ".filename.1.1.tmp"
+        calls = 0
+        real_open = os.open
+
+        def always_exists(name: str, flags: int, *args: Any) -> int:
+            nonlocal calls
+            calls += 1
+            if calls <= 2:
+                raise FileExistsError(name)
+            return real_open(name, flags, *args)
+
+        monkeypatch.setattr(os, "open", always_exists)
+        fd, actual = store._open_temp(wanted)
+        os.close(fd)
+        assert calls == 3
+        assert actual != wanted
+        assert actual.name.startswith(".filename.1.1.tmp.")
+        assert actual.name.endswith(".tmp")
+        created = list((tmp_path / "full").iterdir())
+        assert len(created) == 1
+        assert created[0] == actual
+
+    def test_fallback_temp_failure_cleans_actual_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = self._store(tmp_path)
+        tmp_path.joinpath("full").mkdir()
+        calls = 0
+        real_open = os.open
+
+        def always_exists(name: str, flags: int, *args: Any) -> int:
+            nonlocal calls
+            calls += 1
+            if calls <= 2:
+                raise FileExistsError(name)
+            return real_open(name, flags, *args)
+
+        monkeypatch.setattr(os, "open", always_exists)
+        monkeypatch.setattr(os, "write", lambda fd, data: 0)
+        with pytest.raises(OSError, match="wrote 0 bytes"):
+            store.persist_file("full/filename", BytesIO(b"data"), DUMMY_SPIDER_INFO)
+        assert not list(tmp_path.rglob("*.tmp"))
+        assert not (tmp_path / "full" / "filename").exists()
+
+    def test_zero_write_aborts_and_cleans_temp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = self._store(tmp_path)
+        monkeypatch.setattr(os, "write", lambda fd, data: 0)
+        with pytest.raises(OSError, match="wrote 0 bytes"):
+            store.persist_file("full/filename", BytesIO(b"data"), DUMMY_SPIDER_INFO)
+        assert not (tmp_path / "full" / "filename").exists()
+        assert not list(tmp_path.rglob("*.tmp"))
+
+    def test_stale_sweep_keeps_unrelated_dotfiles(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        target_dir = tmp_path / "full"
+        target_dir.mkdir()
+        unrelated = target_dir / ".other-file.1.tmp"
+        unrelated.write_bytes(b"keep me")
+        stale = target_dir / ".filename.999.1.tmp"
+        stale.write_bytes(b"partial")
+        store.persist_file("full/filename", BytesIO(b"complete"), DUMMY_SPIDER_INFO)
+        assert not stale.exists()
+        assert unrelated.read_bytes() == b"keep me"
+        assert (target_dir / "filename").read_bytes() == b"complete"
+
+    def test_stale_sweep_removes_own_pid_temp(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        target_dir = tmp_path / "full"
+        target_dir.mkdir()
+        own = target_dir / f".filename.{os.getpid()}.7.tmp"
+        own.write_bytes(b"partial")
+        store.persist_file("full/filename", BytesIO(b"complete"), DUMMY_SPIDER_INFO)
+        assert not own.exists()
+        assert (target_dir / "filename").read_bytes() == b"complete"
+
+    def test_stale_sweep_keeps_live_pid_temp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = self._store(tmp_path)
+        target_dir = tmp_path / "full"
+        target_dir.mkdir()
+        live = target_dir / ".filename.4242.1.tmp"
+        live.write_bytes(b"another live writer")
+        monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+        store.persist_file("full/filename", BytesIO(b"complete"), DUMMY_SPIDER_INFO)
+        assert live.read_bytes() == b"another live writer"
+        assert (target_dir / "filename").read_bytes() == b"complete"
+
+    def test_stale_sweep_removes_dead_pid_temp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = self._store(tmp_path)
+        target_dir = tmp_path / "full"
+        target_dir.mkdir()
+        dead = target_dir / ".filename.4242.1.tmp"
+        dead.write_bytes(b"crashed writer")
+
+        def dead_kill(pid: int, sig: int) -> None:
+            raise ProcessLookupError(pid)
+
+        monkeypatch.setattr(os, "kill", dead_kill)
+        store.persist_file("full/filename", BytesIO(b"complete"), DUMMY_SPIDER_INFO)
+        assert not dead.exists()
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            ".filename.no-pid.tmp",
+            ".filename..tmp",
+        ],
+    )
+    def test_stale_sweep_ignores_malformed_temp(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        store = self._store(tmp_path)
+        target_dir = tmp_path / "full"
+        target_dir.mkdir()
+        malformed = target_dir / name
+        malformed.write_bytes(b"x")
+        store.persist_file("full/filename", BytesIO(b"complete"), DUMMY_SPIDER_INFO)
+        assert malformed.read_bytes() == b"x"
+
+    def test_stale_sweep_with_glob_metacharacters_in_name(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        target_dir = tmp_path / "full"
+        target_dir.mkdir()
+        sibling = target_dir / ".aXfile.tmp"
+        sibling.write_bytes(b"keep me")
+        # The bracket in the target name is a glob character class matching
+        # "X"; without the literal filter the sweep would also match the
+        # sibling above.
+        store.persist_file("full/a[X]b", BytesIO(b"v1"), DUMMY_SPIDER_INFO)
+        target = target_dir / "a[X]b"
+        stale = target_dir / ".a[X]b.999.1.tmp"
+        stale.write_bytes(b"partial")
+        store.persist_file("full/a[X]b", BytesIO(b"v2"), DUMMY_SPIDER_INFO)
+        assert target.read_bytes() == b"v2"
+        assert not stale.exists()
+        assert sibling.read_bytes() == b"keep me"
 
 
 @pytest.mark.requires_botocore

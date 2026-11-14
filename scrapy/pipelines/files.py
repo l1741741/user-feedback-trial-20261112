@@ -9,9 +9,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import functools
+import glob
 import hashlib
 import logging
 import mimetypes
+import os
+import threading
 import time
 import warnings
 from collections import defaultdict
@@ -117,15 +120,35 @@ class FilesStoreProtocol(Protocol):
 class FSFilesStore:
     checksum_algorithm: str = "md5"
 
-    def __init__(self, basedir: str | PathLike[str]):
+    def __init__(
+        self,
+        basedir: str | PathLike[str],
+        *,
+        safe_write: bool = False,
+    ):
         basedir = _to_string(basedir)
         if "://" in basedir:
             basedir = basedir.split("://", 1)[1]
         self.basedir: str = basedir
+        self.safe_write: bool = safe_write
         self.created_directories: defaultdict[MediaPipeline.SpiderInfo, set[str]] = (
             defaultdict(set)
         )
         self._mkdir(Path(self.basedir))
+        # One lock per target path serializes concurrent safe writes to the
+        # same file, so the committed file always contains one whole write.
+        self._write_locks_guard = threading.Lock()
+        self._write_locks: dict[str, threading.Lock] = {}
+        self._tmp_counter = 0
+
+    @classmethod
+    def from_crawler(
+        cls, crawler: Crawler, uri: str, *, get_setting_name: Callable[[str], str]
+    ) -> Self:
+        return cls(
+            uri,
+            safe_write=crawler.settings.getbool(get_setting_name("SAFE_WRITE")),
+        )
 
     def persist_file(
         self,
@@ -136,13 +159,180 @@ class FSFilesStore:
         headers: dict[str, str] | None = None,
     ) -> None:
         absolute_path = self._get_filesystem_path(path)
+        if self.safe_write:
+            self._safe_persist_file(path, absolute_path, buf)
+            return
         self._mkdir(absolute_path.parent, info)
         absolute_path.write_bytes(buf.getvalue())
+
+    def _safe_persist_file(
+        self, path: str | PathLike[str], absolute_path: Path, buf: BytesIO
+    ) -> None:
+        target = self._safe_path(path, absolute_path)
+        self._ensure_directory(target.parent)
+        data = buf.getvalue()
+        with self._lock_for(str(target)):
+            self._discard_stale_temps(target)
+            self._tmp_counter += 1
+            tmp_path = target.with_name(
+                f".{target.name}.{os.getpid()}.{self._tmp_counter}.tmp"
+            )
+            self._atomic_write(target, data, tmp_path)
+
+    @staticmethod
+    def _ensure_directory(dirname: Path) -> None:
+        # exist_ok=True also covers the case where another process creates
+        # the directory before this call runs.
+        dirname.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _discard_stale_temps(target: Path) -> None:
+        """Remove temporary files a crashed process left for *target*.
+
+        Such files never replaced the target, so they hold no committed data.
+        A temporary file name embeds the PID of its writer, and a PID belongs
+        to at most one live process, so only files written by the current
+        process or by a process that no longer exists are removed. Files of
+        other live processes are left untouched even though the per-target
+        lock does not span processes. The glob pattern is escaped so
+        metacharacters in a custom file name are matched literally.
+        """
+        literal_prefix = f".{target.name}."
+        pattern = f"{glob.escape(literal_prefix)}*.tmp"
+        current_pid = os.getpid()
+        for candidate in target.parent.glob(pattern):
+            if not FSFilesStore._temp_pid_is_reclaimable(
+                candidate.name, literal_prefix, current_pid
+            ):
+                continue
+            with suppress(FileNotFoundError, OSError):
+                candidate.unlink()
+
+    @staticmethod
+    def _temp_pid_is_reclaimable(
+        name: str, literal_prefix: str, current_pid: int
+    ) -> bool:
+        if not name.startswith(literal_prefix):
+            return False
+        pid_text = name[len(literal_prefix) :].split(".", 1)[0]
+        if not pid_text.isdigit():
+            return False
+        pid = int(pid_text)
+        if pid == current_pid:
+            # Same-process writes to this target are serialized by the lock,
+            # so a matching file here cannot be a live temporary file.
+            return True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except (PermissionError, OSError):
+            # The process still exists, or the platform has no signal-0
+            # liveness check; leave the file for its owner or a later run.
+            return False
+        return False
+
+    def _open_temp(self, tmp_path: Path) -> tuple[int, Path]:
+        """Open an exclusive new temporary file for *tmp_path*.
+
+        Returns the file descriptor and the path it was opened at. O_EXCL
+        guarantees no other live writer created the same name. A name a
+        crashed process left behind is unlinked first; if another process
+        raced ahead and recreated it, a uniquely named sibling is used
+        instead of touching that writer's file. Either way the returned path
+        ends in the temporary-file suffix, so it is reclaimed by the stale
+        sweep after a crash.
+        """
+        try:
+            fd = os.open(
+                _to_string(tmp_path),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o644,
+            )
+        except FileExistsError:
+            with suppress(FileNotFoundError):
+                tmp_path.unlink()
+            try:
+                fd = os.open(
+                    _to_string(tmp_path),
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o644,
+                )
+            except FileExistsError:
+                tmp_path = tmp_path.with_name(
+                    f"{tmp_path.name}.{os.getpid()}."
+                    f"{threading.get_ident()}.{self._tmp_counter}.tmp"
+                )
+                fd = os.open(
+                    _to_string(tmp_path),
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o644,
+                )
+        return fd, tmp_path
+
+    def _atomic_write(self, target: Path, data: bytes, tmp_path: Path) -> None:
+        """Write *data* to a temporary file and atomically replace *target*.
+
+        The destination file is created from the complete buffer in a
+        uniquely named temporary file, flushed and fsynced, and only renamed
+        onto *target* once its on-disk length matches the buffer. A failure
+        before the rename leaves any previously committed file untouched and
+        removes the temporary file.
+        """
+        fd, actual_tmp = self._open_temp(tmp_path)
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written == 0:
+                    raise OSError("os.write() wrote 0 bytes")
+                view = view[written:]
+            os.fsync(fd)
+            if os.fstat(fd).st_size != len(data):
+                raise OSError("temporary file length does not match the buffer")
+            os.close(fd)
+        except BaseException:
+            with suppress(OSError):
+                os.close(fd)
+            with suppress(FileNotFoundError):
+                actual_tmp.unlink()
+            raise
+        try:
+            actual_tmp.replace(target)
+            self._fsync_directory(target.parent)
+        except BaseException:
+            with suppress(FileNotFoundError):
+                actual_tmp.unlink()
+            raise
+
+    @staticmethod
+    def _fsync_directory(dirname: Path) -> None:
+        # Persisting the rename requires fsyncing the directory, which has no
+        # file descriptor on Windows; there an fsync of the file itself is the
+        # best durability guarantee available.
+        try:
+            dir_fd = os.open(_to_string(dirname), os.O_RDONLY | os.O_DIRECTORY)
+        except (AttributeError, OSError):  # pragma: no cover - non-Unix
+            return
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+    def _lock_for(self, key: str) -> threading.Lock:
+        with self._write_locks_guard:
+            lock = self._write_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._write_locks[key] = lock
+            return lock
 
     def stat_file(
         self, path: str | PathLike[str], info: MediaPipeline.SpiderInfo
     ) -> StatInfo:
         absolute_path = self._get_filesystem_path(path)
+        if self.safe_write:
+            absolute_path = self._safe_path(path, absolute_path)
         try:
             last_modified = absolute_path.stat().st_mtime
         except OSError:
@@ -152,6 +342,28 @@ class FSFilesStore:
             checksum = hashlib.file_digest(f, self.checksum_algorithm).hexdigest()
 
         return {"last_modified": last_modified, "checksum": checksum}
+
+    def _safe_path(self, path: str | PathLike[str], absolute_path: Path) -> Path:
+        """Resolve *absolute_path* and reject locations outside the store root.
+
+        Absolute components, parent-directory traversal and symbolic links that
+        point outside of the store root would otherwise let a storage path read
+        or replace files that do not belong to the store.
+        """
+        path_text = _to_string(path)
+        root = Path(self.basedir).resolve(strict=True)
+        if Path(path_text).is_absolute() or ".." in path_text.split("/"):
+            raise ValueError(
+                f"Storage path {path_text!s} resolves outside of the storage "
+                f"root {root!s}"
+            )
+        target = absolute_path.resolve()
+        if target != root and root not in target.parents:
+            raise ValueError(
+                f"Storage path {path_text!s} resolves outside of the storage "
+                f"root {root!s}"
+            )
+        return target
 
     def _get_filesystem_path(self, path: str | PathLike[str]) -> Path:
         path_comps = _to_string(path).split("/")

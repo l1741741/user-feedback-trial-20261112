@@ -264,6 +264,39 @@ Where:
 
 * ``<FILE_NAME>`` is the file name assigned to the file.  For more info see :ref:`topics-file-naming`.
 
+.. setting:: FILES_STORE_SAFE_WRITE
+.. setting:: IMAGES_STORE_SAFE_WRITE
+
+.. versionadded:: VERSION
+
+By default, a file is written straight to its destination path, so a process
+that stops while a file is being written can leave a partial file that the
+next run treats as a valid cached file. Set
+:setting:`FILES_STORE_SAFE_WRITE` (or :setting:`IMAGES_STORE_SAFE_WRITE` for
+the Images Pipeline) to ``True`` to make file system storage write each file
+into a temporary file in the destination directory, flush and fsync it,
+verify its length, and atomically replace the destination file only once the
+write is complete. A failed write keeps the previously stored file and
+removes the temporary file. Storage paths that are absolute, escape the
+storage root through ``..`` components, or reach outside of it through
+symbolic links are rejected, and concurrent writes to the same destination
+are serialized so that the stored file always contains the full content of
+one writer. The mtime and checksum used for cache decisions then describe a
+fully committed file only.
+
+If a process is killed before the replacement, the destination file keeps
+its previous committed content (or stays absent) and the leftover temporary
+file is ignored by cache checks and removed on the next write to that
+destination.
+
+.. code-block:: python
+
+   FILES_STORE_SAFE_WRITE = True
+
+This setting only applies to the built-in file system storage
+(:class:`~scrapy.pipelines.files.FSFilesStore`). Remote storages keep their
+own upload semantics and do not support it.
+
 
 .. _media-pipeline-ftp:
 
