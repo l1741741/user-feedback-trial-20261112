@@ -111,6 +111,7 @@ __all__ = [
     "FILES_STORE",
     "FILES_STORE_GCS_ACL",
     "FILES_STORE_S3_ACL",
+    "FILES_VERIFY_DIGEST",
     "FORCE_CRAWLER_PROCESS",
     "FTP_PASSIVE_MODE",
     "FTP_PASSWORD",
@@ -439,6 +440,7 @@ FEED_URI_PARAMS = None  # a function to extend uri arguments
 FILES_STORE = None
 FILES_STORE_GCS_ACL = ""
 FILES_STORE_S3_ACL = "private"
+FILES_VERIFY_DIGEST = False
 
 FORCE_CRAWLER_PROCESS = False
 

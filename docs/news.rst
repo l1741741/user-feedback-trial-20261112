@@ -3,6 +3,21 @@
 Release notes
 =============
 
+Unreleased
+----------
+
+-   Added the :setting:`FILES_VERIFY_DIGEST` setting, disabled by default.
+    When enabled, :class:`~scrapy.pipelines.files.FilesPipeline` verifies
+    every downloaded file against the ``sha-256`` member of the ``Digest``
+    response header and/or the ``Content-MD5`` response header, checking the
+    exact bytes that are stored. At least one supported digest must be
+    present, every advertised supported digest must match, and malformed
+    headers fail the download explicitly. Verified digests are kept as
+    storage metadata (a sidecar file for the local filesystem storage) and an
+    already stored file is reused without a new download only when such
+    metadata exists. Local writes are now atomic through a same-directory
+    temporary file.
+
 Scrapy 2.20.0 (2026-11-06)
 --------------------------
 

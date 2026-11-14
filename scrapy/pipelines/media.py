@@ -38,11 +38,12 @@ if TYPE_CHECKING:
     from scrapy.utils.request import RequestFingerprinterProtocol
 
 
-class FileInfo(TypedDict):
+class FileInfo(TypedDict, total=False):
     url: str
     path: str
     checksum: str | None
     status: str
+    digests: dict[str, str]
 
 
 FileInfoOrError: TypeAlias = (

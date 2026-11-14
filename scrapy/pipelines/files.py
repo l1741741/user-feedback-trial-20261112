@@ -8,10 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import functools
 import hashlib
+import hmac
+import json
 import logging
 import mimetypes
+import os
+import re
+import tempfile
 import time
 import warnings
 from collections import defaultdict
@@ -75,6 +81,134 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Algorithms accepted from the ``Digest`` and ``Content-MD5`` response
+# headers, mapped to the name of the matching :mod:`hashlib` implementation.
+_DIGEST_ALGORITHMS: dict[str, str] = {
+    "sha-256": "sha256",
+    "md5": "md5",
+}
+
+# sha-256 has 32 bytes, md5 has 16 bytes.
+_DIGEST_BYTE_LENGTHS: dict[str, int] = {"sha-256": 32, "md5": 16}
+
+
+class DigestVerificationError(_FileException):
+    """Raised when a downloaded file cannot be verified against the
+    ``Content-MD5`` or ``Digest`` response headers in
+    :setting:`FILES_VERIFY_DIGEST` mode.
+
+    This covers malformed headers (unknown syntax or invalid base64), digest
+    mismatches and the absence of any supported digest.
+    """
+
+
+class _MalformedDigestError(ValueError):
+    """Raised internally while parsing the ``Digest`` or ``Content-MD5``
+    response headers. It never leaves the pipeline as a :class:`ValueError`."""
+
+
+def _decode_digest_value(algorithm: str, value: str) -> bytes:
+    """Decode the base64 value of a digest and validate its length."""
+    try:
+        # validate=True rejects characters that standard base64 disallows,
+        # including embedded whitespace, instead of silently dropping them.
+        digest = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise _MalformedDigestError(
+            f"invalid base64 {algorithm} digest value: {value!r}"
+        ) from exc
+    expected_length = _DIGEST_BYTE_LENGTHS[algorithm]
+    if len(digest) != expected_length:
+        raise _MalformedDigestError(
+            f"{algorithm} digest must be {expected_length} bytes, "
+            f"got {len(digest)}: {value!r}"
+        )
+    return digest
+
+
+def _parse_digest_header(header_value: str) -> list[tuple[str, bytes]]:
+    """Parse an RFC 9530 ``Digest`` header value.
+
+    The accepted syntax is a comma-separated list of ``algorithm=value``
+    members, where *value* is standard base64. Both the RFC 9530 colon form
+    (``sha-256=:base64:``) and the RFC 3230 bare-base64 form
+    (``sha-256=base64``), still used by some servers, are accepted.
+
+    Malformed members, unsupported algorithms and invalid base64 raise
+    :class:`_MalformedDigestError`.
+    """
+    digests: list[tuple[str, bytes]] = []
+    for member in header_value.split(","):
+        member = member.strip()
+        if not member:
+            raise _MalformedDigestError(
+                f"empty digest member in Digest header: {header_value!r}"
+            )
+        match = re.fullmatch(r"([A-Za-z0-9_-]+)\s*=\s*(.*)", member)
+        if match is None:
+            raise _MalformedDigestError(
+                f"could not parse Digest header member {member!r}"
+            )
+        name, value = match.groups()
+        algorithm = name.lower()
+        if algorithm not in _DIGEST_ALGORITHMS:
+            raise _MalformedDigestError(f"unsupported digest algorithm: {name!r}")
+        value = value.strip()
+        # RFC 9530 structured-field form: algorithm=:base64:
+        if value.startswith(":") and value.endswith(":") and len(value) >= 2:
+            value = value[1:-1]
+        digests.append((algorithm, _decode_digest_value(algorithm, value)))
+    if not digests:
+        raise _MalformedDigestError(f"empty Digest header: {header_value!r}")
+    return digests
+
+
+def _parse_content_md5_header(header_value: str) -> tuple[str, bytes]:
+    """Parse an RFC 1864 ``Content-MD5`` header value (standard base64)."""
+    value = header_value.strip()
+    if "," in value:
+        raise _MalformedDigestError(
+            "Content-MD5 must contain a single base64 digest"
+        )
+    return "md5", _decode_digest_value("md5", value)
+
+
+def _response_digests(response: Response) -> dict[str, bytes]:
+    """Extract every supported digest advertised by *response*.
+
+    All supported algorithms present in the headers are returned. Malformed
+    headers or unsupported algorithms raise :class:`_MalformedDigestError`.
+    """
+    advertised: dict[str, bytes] = {}
+
+    def add(algorithm: str, digest: bytes) -> None:
+        previous = advertised.get(algorithm)
+        if previous is not None and previous != digest:
+            raise _MalformedDigestError(
+                f"conflicting {algorithm} digests between the Digest and "
+                f"Content-MD5 response headers"
+            )
+        advertised[algorithm] = digest
+
+    raw_digest = response.headers.get("Digest")
+    if raw_digest is not None:
+        for algorithm, digest in _parse_digest_header(
+            raw_digest.decode("ascii", errors="strict")
+        ):
+            add(algorithm, digest)
+    raw_content_md5 = response.headers.get("Content-MD5")
+    if raw_content_md5 is not None:
+        try:
+            value = raw_content_md5.decode("ascii", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise _MalformedDigestError(
+                f"non-ASCII Content-MD5 header value: {raw_content_md5!r}"
+            ) from exc
+        algorithm, digest = _parse_content_md5_header(value)
+        add(algorithm, digest)
+    return advertised
+
+
 def _to_string(path: str | PathLike[str]) -> str:
     return str(path)  # convert a Path object to string
 
@@ -88,6 +222,7 @@ def _checksum_algorithm(settings: BaseSettings, key: str) -> str:
 class StatInfo(TypedDict, total=False):
     checksum: str
     last_modified: float
+    digests: dict[str, str]
 
 
 class FilesStoreProtocol(Protocol):
@@ -116,6 +251,9 @@ class FilesStoreProtocol(Protocol):
 
 class FSFilesStore:
     checksum_algorithm: str = "md5"
+    #: Suffix of the sidecar file that stores the digests that a stored file
+    #: was verified against when :setting:`FILES_VERIFY_DIGEST` is enabled.
+    DIGEST_SUFFIX: ClassVar[str] = ".scrapy-digests.json"
 
     def __init__(self, basedir: str | PathLike[str]):
         basedir = _to_string(basedir)
@@ -137,7 +275,38 @@ class FSFilesStore:
     ) -> None:
         absolute_path = self._get_filesystem_path(path)
         self._mkdir(absolute_path.parent, info)
-        absolute_path.write_bytes(buf.getvalue())
+        # Write through a unique temporary file in the same directory and
+        # atomically replace the destination, so a crash or a concurrent
+        # download can never leave a half-written file at the final path.
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{absolute_path.name}.",
+            suffix=".tmp",
+            dir=absolute_path.parent,
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(tmp_fd, "wb") as tmp_file:
+                tmp_file.write(buf.getvalue())
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            if meta and "digests" in meta:
+                # Replace the sidecar before the data file: if the process
+                # dies afterwards, a new data file may briefly run with the
+                # previous sidecar, but the reverse never happens (no data
+                # file is ever exposed without matching metadata), and the
+                # next run repairs or replaces both atomically per file.
+                self._write_digest_sidecar(absolute_path, meta["digests"])
+            # On success os.replace() atomically swaps the unique temporary
+            # file into the destination and removes the temporary name.
+            os.replace(tmp_path, absolute_path)
+        except BaseException:
+            # Never touch a pre-existing destination file on failure; only
+            # remove the temporary file that this very call owns. Its name
+            # is unique per call, so concurrent downloads can never remove
+            # each other's temporary file.
+            with suppress(FileNotFoundError):
+                tmp_path.unlink()
+            raise
 
     def stat_file(
         self, path: str | PathLike[str], info: MediaPipeline.SpiderInfo
@@ -151,7 +320,56 @@ class FSFilesStore:
         with absolute_path.open("rb") as f:
             checksum = hashlib.file_digest(f, self.checksum_algorithm).hexdigest()
 
-        return {"last_modified": last_modified, "checksum": checksum}
+        stat: StatInfo = {"last_modified": last_modified, "checksum": checksum}
+        digests = self._read_digest_sidecar(absolute_path)
+        if digests:
+            stat["digests"] = digests
+        return stat
+
+    def _digest_sidecar_path(self, absolute_path: Path) -> Path:
+        return absolute_path.with_name(absolute_path.name + self.DIGEST_SUFFIX)
+
+    def _write_digest_sidecar(
+        self, absolute_path: Path, digests: dict[str, str]
+    ) -> None:
+        """Atomically write the digest sidecar next to *absolute_path*.
+
+        The sidecar is written to a unique temporary name first: a
+        half-written sidecar can never be mistaken for verifiable metadata.
+        """
+        sidecar = self._digest_sidecar_path(absolute_path)
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{sidecar.name}.", suffix=".tmp", dir=sidecar.parent
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as tmp_file:
+                json.dump({"digests": digests}, tmp_file, sort_keys=True)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            os.replace(tmp_path, sidecar)
+        except BaseException:
+            with suppress(FileNotFoundError):
+                tmp_path.unlink()
+            raise
+
+    def _read_digest_sidecar(self, absolute_path: Path) -> dict[str, str]:
+        sidecar = self._digest_sidecar_path(absolute_path)
+        try:
+            with sidecar.open(encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        digests = data.get("digests") if isinstance(data, dict) else None
+        if not isinstance(digests, dict):
+            return {}
+        # JSON object keys are always strings; only keep entries whose
+        # algorithm is supported and whose digest is also a string.
+        return {
+            algorithm: digest
+            for algorithm, digest in digests.items()
+            if algorithm in _DIGEST_ALGORITHMS and isinstance(digest, str)
+        }
 
     def _get_filesystem_path(self, path: str | PathLike[str]) -> Path:
         path_comps = _to_string(path).split("/")
@@ -162,8 +380,10 @@ class FSFilesStore:
     ) -> None:
         seen: set[str] = self.created_directories[domain] if domain else set()
         if str(dirname) not in seen:
-            if not dirname.exists():
-                dirname.mkdir(parents=True)
+            # exist_ok=True: concurrent downloads targeting the same
+            # directory may race on its creation; the directory cache above
+            # is per-call bookkeeping, not a lock.
+            dirname.mkdir(parents=True, exist_ok=True)
             seen.add(str(dirname))
 
 
@@ -691,6 +911,9 @@ class FilesPipeline(MediaPipeline):
         self.store.checksum_algorithm = _checksum_algorithm(
             settings, resolve("FILES_CHECKSUM_ALGORITHM")
         )
+        self.verify_digest: bool = settings.getbool(
+            resolve("FILES_VERIFY_DIGEST"), False
+        )
         self.expires: float = settings.getfloat(resolve("FILES_EXPIRES"), self.EXPIRES)
         if not hasattr(self, "FILES_URLS_FIELD"):
             self.FILES_URLS_FIELD = self.DEFAULT_FILES_URLS_FIELD
@@ -760,6 +983,30 @@ class FilesPipeline(MediaPipeline):
         if 0 <= self.expires < age_days:
             return None  # returning None force download
 
+        if self.verify_digest:
+            # In digest verification mode, an already stored file may be
+            # reused only if the storage can prove it was itself verified
+            # against at least one of the algorithms the pipeline supports.
+            # A checksum calculated from the bytes on disk is not enough:
+            # without the server-provided digest it cannot detect corruption
+            # introduced before the first verification.
+            stored_digests = result.get("digests") or {}
+            if not any(
+                algorithm in stored_digests for algorithm in _DIGEST_ALGORITHMS
+            ):
+                logger.debug(
+                    "File (no-verifiable-digest): Re-downloading %(medianame)s "
+                    "from %(request)s referred in <%(referer)s>: the storage "
+                    "reports no verified digest metadata",
+                    {
+                        "medianame": self.MEDIA_NAME,
+                        "request": request,
+                        "referer": referer_str(request),
+                    },
+                    extra={"spider": info.spider},
+                )
+                return None  # returning None force download
+
         referer = referer_str(request)
         logger.debug(
             "File (uptodate): Downloaded %(medianame)s from %(request)s "
@@ -779,12 +1026,15 @@ class FilesPipeline(MediaPipeline):
                 f"expired yet, get no checksum.",
                 extra={"spider": info.spider},
             )
-        return {
+        file_info: FileInfo = {
             "url": request.url,
             "path": path,
             "checksum": checksum,
             "status": "uptodate",
         }
+        if self.verify_digest and result.get("digests"):
+            file_info["digests"] = result["digests"]
+        return file_info
 
     def media_to_download(
         self, request: Request, info: MediaPipeline.SpiderInfo, *, item: Any = None
@@ -817,6 +1067,12 @@ class FilesPipeline(MediaPipeline):
                 extra={"spider": info.spider},
             )
             raise _MediaRequestFiltered(str(failure.value)) from failure.value
+
+        if isinstance(failure.value, DigestVerificationError):
+            # Already logged with an explicit "digest-error" message in
+            # media_downloaded(); do not log it a second time as a generic
+            # download error.
+            raise _FileException(str(failure.value)) from failure.value
 
         logger.warning(
             f"File (unknown-error): Error downloading {self.MEDIA_NAME} from "
@@ -867,6 +1123,18 @@ class FilesPipeline(MediaPipeline):
             checksum: str = await ensure_awaitable(
                 self.file_downloaded(response, request, info, item=item)
             )
+        except DigestVerificationError as exc:
+            logger.warning(
+                "File (digest-error): Digest verification failed for a file "
+                "from %(request)s referred in <%(referer)s>: %(errormsg)s",
+                {
+                    "request": request,
+                    "referer": referer,
+                    "errormsg": str(exc),
+                },
+                extra={"spider": info.spider},
+            )
+            raise
         except _FileException as exc:
             logger.warning(
                 "File (error): Error processing file from %(request)s "
@@ -885,17 +1153,81 @@ class FilesPipeline(MediaPipeline):
             )
             raise _FileException(str(exc)) from exc
 
-        return {
+        file_info: FileInfo = {
             "url": request.url,
             "path": path,
             "checksum": checksum,
             "status": status,
         }
+        if self.verify_digest:
+            # _verify_response_digest() ran inside file_downloaded() in the
+            # default implementation. Subclasses that override
+            # file_downloaded() keep full control and may not verify, in which
+            # case no digest metadata is claimed.
+            digests = request.meta.get("_files_verified_digests")
+            if digests:
+                file_info["digests"] = digests
+        return file_info
 
     def inc_stats(self, status: str) -> None:
         stats = self.crawler.stats
         stats.inc_value("file_count")
         stats.inc_value(f"file_status_count/{status}")
+
+    def _verify_response_digest(
+        self, response: Response, request: Request
+    ) -> dict[str, str]:
+        """Verify the body of *response* against its digest headers.
+
+        Returns the verified digests, as hexadecimal strings keyed by the
+        header algorithm name (``"sha-256"`` and/or ``"md5"``).
+
+        Every supported algorithm advertised by the ``Digest`` and
+        ``Content-MD5`` headers is checked, and the download is only accepted
+        if at least one supported algorithm is present and every advertised
+        digest matches the bytes that the pipeline actually received and is
+        about to store (:attr:`Response.body`).
+
+        Malformed headers, invalid base64, unsupported algorithms, missing
+        digests or any mismatch raise :class:`DigestVerificationError`.
+        """
+        try:
+            advertised = _response_digests(response)
+            if not advertised:
+                raise _MalformedDigestError(
+                    "the response provides neither a Content-MD5 nor a Digest "
+                    "header with a supported algorithm (sha-256, md5)"
+                )
+            body = response.body
+            verified: dict[str, str] = {}
+            for algorithm, expected in advertised.items():
+                hashlib_name = _DIGEST_ALGORITHMS[algorithm]
+                actual = hashlib.new(hashlib_name, body).digest()
+                if not hmac.compare_digest(actual, expected):
+                    raise DigestVerificationError(
+                        f"{algorithm} digest mismatch for {response.url}: "
+                        f"expected {expected.hex()}, got {actual.hex()}"
+                    )
+                verified[algorithm] = actual.hex()
+        except _MalformedDigestError as exc:
+            raise DigestVerificationError(
+                f"could not verify the digest of {response.url}: {exc}"
+            ) from exc
+        # Exposed so that media_downloaded() can record the verified digests
+        # in the result metadata without changing the file_downloaded()
+        # extension-point contract, which still returns a checksum string.
+        request.meta["_files_verified_digests"] = verified
+        logger.debug(
+            "File (digest-verified): Verified %(algorithms)s digest(s) of "
+            "%(request)s referred in <%(referer)s>",
+            {
+                "algorithms": ", ".join(sorted(verified)),
+                "request": request,
+                "referer": referer_str(request),
+            },
+            extra={"spider": self.crawler.spider},
+        )
+        return verified
 
     async def _file_downloaded(
         self,
@@ -909,7 +1241,20 @@ class FilesPipeline(MediaPipeline):
         buf = BytesIO(response.body)
         checksum = hashlib.file_digest(buf, self.store.checksum_algorithm).hexdigest()
         buf.seek(0)
-        await ensure_awaitable(self.store.persist_file(path, buf, info))
+        meta: dict[str, Any] | None = None
+        if self.verify_digest:
+            # The digest headers describe the representation that the
+            # response carries. The pipeline only ever sees and stores
+            # response.body, so the verification is always performed against
+            # those exact bytes; see the FILES_VERIFY_DIGEST documentation
+            # for the Content-Encoding contract. A failure raises before
+            # persist_file() is called, so a previously stored file and its
+            # metadata are left untouched.
+            digests = self._verify_response_digest(response, request)
+            meta = {"digests": digests}
+        await ensure_awaitable(
+            self.store.persist_file(path, buf, info, meta=meta)
+        )
         return checksum
 
     # Overridable Interface

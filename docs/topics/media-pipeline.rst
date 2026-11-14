@@ -592,6 +592,96 @@ A :ref:`custom storage <media-pipeline-custom-storage>` that calculates
 checksums in ``stat_file`` must use the algorithm that the pipeline sets as its
 ``checksum_algorithm`` attribute.
 
+.. _topics-files-verify-digest:
+
+Digest verification of downloaded files
+---------------------------------------
+
+.. setting:: FILES_VERIFY_DIGEST
+
+By default, a downloaded file is stored as soon as its download finishes, and
+the only integrity information kept about it is the checksum the pipeline
+itself calculates from the stored bytes (see :ref:`checksum-algorithm`).
+
+Set :setting:`FILES_VERIFY_DIGEST` to ``True`` to additionally verify every
+downloaded file against the digest that the server advertises in the
+``Digest`` (`RFC 9530`_) and/or ``Content-MD5`_ (`RFC 1864`_) response
+headers::
+
+    FILES_VERIFY_DIGEST = True
+
+The setting is opt-in and defaults to ``False``; when disabled, digest
+headers are ignored entirely and the pipeline behaves exactly as before.
+
+The supported algorithms are ``sha-256`` (from the ``Digest`` header) and
+``md5`` (from either header). The rules are deliberately strict:
+
+*   Verification is performed on the exact bytes of
+    :attr:`~scrapy.http.Response.body` that the pipeline stores, the same
+    bytes the downloader delivered to the pipeline.
+
+*   At least one supported algorithm must be advertised. A response without
+    any supported digest is treated as a failed download.
+
+*   When several supported algorithms are advertised, *all* of them must
+    match. A mismatch on any of them fails the download, even if another one
+    matches.
+
+*   Malformed headers — unknown syntax, an unsupported algorithm name,
+    invalid base64 or a digest whose decoded length is wrong for its
+    algorithm — fail the download with an explicit error, they are never
+    silently ignored.
+
+A failed verification is handled like any other file download failure: the
+item gets no entry in its files result field, no success metadata is written,
+and a file that was already stored at the same path from a previous run is
+left byte-identical. Local storage writes go through a temporary file in the
+same directory followed by an atomic replacement, so an interrupted or failed
+download can never leave a half-written file where a later run would find it.
+
+.. _RFC 9530: https://www.rfc-editor.org/rfc/rfc9530
+.. _RFC 1864: https://www.rfc-editor.org/rfc/rfc1864
+.. _Content-MD5: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-MD5
+
+Content-Encoding contract
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Integrity digests describe a specific byte representation of the resource,
+not the abstract resource itself. The pipeline only ever handles
+:attr:`~scrapy.http.Response.body`, so the contract is unambiguous:
+
+*   The digest is always checked against the bytes of
+    :attr:`~scrapy.http.Response.body`, and only those bytes are stored.
+*   When the :ref:`compression middleware <http-compression>` successfully
+    decodes a response body it removes the ``Content-Encoding`` header, so a
+    digest that was calculated over the encoded representation can never be
+    falsely reported as matching the decoded body: such a response simply
+    fails verification unless its digest matches the decoded bytes.
+*   If a response still carries a ``Content-Encoding`` header when it reaches
+    the pipeline (an encoding the middleware did not decode), its body is the
+    encoded representation, and that is what both the verification and the
+    stored file cover.
+
+The pipeline never re-encodes or otherwise transforms the body, so the bytes
+that were verified are always the bytes that are persisted.
+
+Reusing already stored files
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+With verification enabled, a file that has not expired is only reused without
+a new download when the storage can provide verifiable digest metadata for it:
+the digests that were recorded when the file was first verified. The local
+file storage keeps them in a sidecar JSON file (``<file>.scrapy-digests.json``)
+written atomically next to the file, and includes them in the result of
+``stat_file`` under the ``digests`` key. Files written while verification was
+disabled, or by storage backends that do not provide such metadata — built-in
+Amazon S3, Google Cloud Storage and FTP storages cannot — are re-downloaded
+instead of being skipped, however fresh their modification time is. The
+pipeline never assumes a cloud storage offers the atomic rename semantics of
+a local filesystem; remote uploads receive the verified digests through the
+existing ``persist_file`` metadata argument and otherwise keep their usual
+upload semantics.
+
 .. _topics-images-thumbnails:
 
 Thumbnail generation for images
@@ -836,6 +926,12 @@ See here the methods that you can override in your custom Files Pipeline:
           * ``cached`` - file was taken from a cache (the response has a
             ``"cached"`` flag, e.g. from
             :class:`~scrapy.downloadermiddlewares.httpcache.HttpCacheMiddleware`).
+
+        * ``digests`` - present only when
+          :ref:`FILES_VERIFY_DIGEST <topics-files-verify-digest>` is enabled
+          and the file was verified. A mapping of the verified digest
+          algorithm names (``"sha-256"`` and/or ``"md5"``) to their
+          hexadecimal values.
 
       The list of tuples received by :meth:`~item_completed` is
       guaranteed to retain the same order of the requests returned from the
