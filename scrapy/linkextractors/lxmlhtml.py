@@ -38,6 +38,25 @@ XHTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
 
 _collect_string_content = etree.XPath("string()")
 
+# A valid width descriptor is a positive integer followed by "w".
+_width_descriptor_re = re.compile(r"^\d+w$")
+# A valid pixel density descriptor is a non-negative floating-point number
+# followed by "x".
+_density_descriptor_re = re.compile(r"^(?:\d+\.?\d*|\.\d+)x$")
+
+# HTML attributes separate tokens with ASCII whitespace only.
+_ascii_whitespace = frozenset(" \t\n\f\r")
+
+# Default bounds that keep srcset parsing linear even on hostile markup.
+_DEFAULT_SRCSET_MAX_CANDIDATES = 100
+_DEFAULT_SRCSET_MAX_CHARS = 100_000
+_SRCSET_ON_ERROR_SKIP = "skip"
+_SRCSET_ON_ERROR_REJECT = "reject"
+
+
+def _is_ascii_whitespace(char: str) -> bool:
+    return char in _ascii_whitespace
+
 
 def _nons(tag: Any) -> Any:
     if (
@@ -81,6 +100,141 @@ def _name_matches(allowed: set[str], denied: set[str], name: str) -> bool:
     return "*" in allowed or name in allowed
 
 
+def _tokenize_srcset(
+    attr_value: str,
+) -> list[tuple[str, list[str]]]:
+    """Split an HTML ``srcset`` value into ``(url, descriptors)`` pairs.
+
+    Tokenizing follows the HTML parsing model instead of splitting on commas:
+    while a URL is being read every comma belongs to it (data URLs contain
+    their own commas), and a comma separates candidates only once the
+    descriptors section after the URL has started.
+    """
+    raw_candidates: list[tuple[str, list[str]]] = []
+    url_parts: list[str] = []
+    descriptors: list[str] = []
+    token_parts: list[str] = []
+    in_url = True
+    url_started = False
+
+    def finish_candidate() -> None:
+        url = "".join(url_parts)
+        if url or descriptors:
+            raw_candidates.append((url, descriptors))
+
+    for char in attr_value:
+        if in_url:
+            if _is_ascii_whitespace(char):
+                # Leading whitespace is padding; whitespace after the URL
+                # marks the beginning of the descriptors section.
+                if url_started:
+                    in_url = False
+            else:
+                url_parts.append(char)
+                url_started = True
+            continue
+        if _is_ascii_whitespace(char):
+            if token_parts:
+                descriptors.append("".join(token_parts))
+                token_parts = []
+            continue
+        if char == ",":
+            if token_parts:
+                descriptors.append("".join(token_parts))
+                token_parts = []
+            finish_candidate()
+            url_parts = []
+            descriptors = []
+            in_url = True
+            url_started = False
+            continue
+        token_parts.append(char)
+    if token_parts:
+        descriptors.append("".join(token_parts))
+    finish_candidate()
+    return raw_candidates
+
+
+def _classify_descriptor(descriptor: str) -> str:
+    """Return ``"width"``, ``"density"`` or ``""`` for an invalid token."""
+    if _width_descriptor_re.fullmatch(descriptor) and any(
+        char != "0" for char in descriptor[:-1]
+    ):
+        return "width"
+    if _density_descriptor_re.fullmatch(descriptor):
+        return "density"
+    return ""
+
+
+def _parse_srcset(
+    attr_value: str,
+    *,
+    on_error: str,
+    max_candidates: int,
+    max_chars: int,
+) -> list[tuple[str, str]] | None:
+    """Parse an HTML ``srcset`` attribute into ``(url, descriptor)`` pairs.
+
+    Each candidate is either a bare URL or a URL followed by exactly one width
+    (``480w``) or pixel density (``2x``) descriptor. Duplicate descriptors and
+    candidates mixing both descriptor kinds are treated as conflicts; see
+    :func:`_tokenize_srcset` for why a plain comma split is not used.
+
+    With ``on_error="skip"`` invalid candidates are dropped and the remaining
+    ones are returned; with ``on_error="reject"`` any invalid candidate makes
+    the whole attribute fail and ``None`` is returned. Attributes longer than
+    *max_chars* and candidate lists longer than *max_candidates* are also
+    rejected, so parsing stays bounded.
+    """
+    if len(attr_value) > max_chars:
+        logger.warning(
+            f"Rejecting srcset attribute of {len(attr_value)} characters, "
+            f"above the limit of {max_chars}"
+        )
+        return None
+
+    candidates: list[tuple[str, str]] = []
+    seen_widths: set[str] = set()
+    seen_densities: set[str] = set()
+    has_width = False
+    has_density = False
+    for url, raw_descriptors in _tokenize_srcset(attr_value):
+        descriptor = raw_descriptors[0] if raw_descriptors else ""
+        descriptor_kind = (
+            _classify_descriptor(descriptor) if len(raw_descriptors) == 1 else ""
+        )
+        valid = bool(url) and (not raw_descriptors or descriptor_kind != "")
+        if valid and descriptor_kind == "width":
+            valid = descriptor not in seen_widths and not has_density
+        elif valid and descriptor_kind == "density":
+            valid = descriptor not in seen_densities and not has_width
+
+        if not valid:
+            if on_error == _SRCSET_ON_ERROR_REJECT:
+                logger.warning(
+                    f"Rejecting srcset attribute containing invalid candidate "
+                    f"with URL {url!r}"
+                )
+                return None
+            logger.debug(f"Skipping invalid srcset candidate with URL {url!r}")
+            continue
+
+        if descriptor_kind == "width":
+            seen_widths.add(descriptor)
+            has_width = True
+        elif descriptor_kind == "density":
+            seen_densities.add(descriptor)
+            has_density = True
+        candidates.append((url, descriptor))
+        if len(candidates) >= max_candidates:
+            logger.warning(
+                f"Stopping srcset parsing after {max_candidates} candidates, "
+                f"the configured limit"
+            )
+            break
+    return candidates
+
+
 class LxmlParserLinkExtractor:
     def __init__(
         self,
@@ -90,6 +244,11 @@ class LxmlParserLinkExtractor:
         unique: bool = False,
         strip: bool = True,
         canonicalized: bool = False,
+        *,
+        srcset_attrs: Iterable[str] = (),
+        srcset_on_error: str = _SRCSET_ON_ERROR_SKIP,
+        srcset_max_candidates: int = _DEFAULT_SRCSET_MAX_CANDIDATES,
+        srcset_max_chars: int = _DEFAULT_SRCSET_MAX_CHARS,
     ):
         # mypy doesn't infer types for operator.* and also for partial()
         self.scan_tag: Callable[[str], bool] = (
@@ -112,18 +271,45 @@ class LxmlParserLinkExtractor:
             if canonicalized
             else _canonicalize_link_url
         )
+        self.srcset_attrs: frozenset[str] = frozenset(srcset_attrs)
+        self.srcset_on_error: str = srcset_on_error
+        self.srcset_max_candidates: int = srcset_max_candidates
+        self.srcset_max_chars: int = srcset_max_chars
 
-    def _iter_links(
-        self, document: HtmlElement
-    ) -> Iterable[tuple[HtmlElement, str, str]]:
-        for el in document.iter(etree.Element):
-            if not self.scan_tag(_nons(el.tag)):
-                continue
-            attribs = el.attrib
-            for attrib in attribs:
-                if not self.scan_attr(attrib):
-                    continue
-                yield el, attrib, attribs[attrib]
+    def _build_link(
+        self,
+        el: HtmlElement,
+        attr_val: str,
+        response_url: str,
+        response_encoding: str,
+        base_url: str,
+        source_attr: str | None = None,
+    ) -> Link | None:
+        """Resolve and normalize one attribute value into a Link."""
+        # pseudo lxml.html.HtmlElement.make_links_absolute(base_url)
+        try:
+            if self.strip:
+                attr_val = strip_html5_whitespace(attr_val)
+            attr_val = urljoin(base_url, attr_val)
+        except ValueError:
+            return None  # skipping bogus links
+        url = self.process_attr(attr_val)
+        if url is None:
+            return None
+        try:
+            url = safe_url_string(url, encoding=response_encoding)
+        except ValueError:
+            logger.debug(f"Skipping extraction of link with bad URL {url!r}")
+            return None
+
+        # to fix relative links after process_value
+        url = urljoin(response_url, url)
+        return Link(
+            url,
+            _collect_string_content(el) or "",
+            nofollow=rel_has_nofollow(el.get("rel")),
+            source_attr=source_attr,
+        )
 
     def _extract_links(
         self,
@@ -134,32 +320,42 @@ class LxmlParserLinkExtractor:
     ) -> list[Link]:
         links: list[Link] = []
         # hacky way to get the underlying lxml parsed document
-        for el, _, attr_val in self._iter_links(selector.root):
-            # pseudo lxml.html.HtmlElement.make_links_absolute(base_url)
-            try:
-                if self.strip:
-                    attr_val = strip_html5_whitespace(attr_val)  # noqa: PLW2901 this is intended
-                attr_val = urljoin(base_url, attr_val)  # noqa: PLW2901
-            except ValueError:
-                continue  # skipping bogus links
-            else:
-                url = self.process_attr(attr_val)
-                if url is None:
-                    continue
-            try:
-                url = safe_url_string(url, encoding=response_encoding)
-            except ValueError:
-                logger.debug(f"Skipping extraction of link with bad URL {url!r}")
+        for el in selector.root.iter(etree.Element):
+            if not self.scan_tag(_nons(el.tag)):
                 continue
-
-            # to fix relative links after process_value
-            url = urljoin(response_url, url)
-            link = Link(
-                url,
-                _collect_string_content(el) or "",
-                nofollow=rel_has_nofollow(el.get("rel")),
-            )
-            links.append(link)
+            for attr_name, attr_val in el.attrib.items():
+                if attr_name in self.srcset_attrs:
+                    candidates = _parse_srcset(
+                        attr_val,
+                        on_error=self.srcset_on_error,
+                        max_candidates=self.srcset_max_candidates,
+                        max_chars=self.srcset_max_chars,
+                    )
+                    if candidates is None:
+                        continue
+                    for candidate_url, _descriptor in candidates:
+                        link = self._build_link(
+                            el,
+                            candidate_url,
+                            response_url,
+                            response_encoding,
+                            base_url,
+                            source_attr=attr_name,
+                        )
+                        if link is not None:
+                            links.append(link)
+                    continue
+                if not self.scan_attr(attr_name):
+                    continue
+                link = self._build_link(
+                    el,
+                    attr_val,
+                    response_url,
+                    response_encoding,
+                    base_url,
+                )
+                if link is not None:
+                    links.append(link)
         return self._deduplicate_if_needed(links)
 
     def extract_links(self, response: TextResponse) -> list[Link]:
@@ -318,6 +514,42 @@ class LxmlLinkExtractor:
         URLs from elements or attributes that allow leading or trailing
         whitespaces).
     :type strip: bool
+
+    :param srcset_attrs: an attribute or list of attributes whose values are
+        parsed as HTML ``srcset`` candidate lists, such as ``srcset`` and
+        ``imagesrcset``. Each valid candidate is extracted as a separate
+        :class:`~scrapy.link.Link`, with its descriptor (``480w`` or ``2x``)
+        left out of the URL and the attribute name stored in the link's
+        ``source_attr``. Commas inside data URLs are kept intact. Defaults to
+        ``()``, in which case attributes are treated as single URLs as before.
+
+        .. versionadded:: VERSION
+    :type srcset_attrs: str or list
+
+    :param srcset_on_error: what to do when a ``srcset`` attribute contains an
+        invalid candidate (a malformed descriptor, a duplicate descriptor or a
+        mix of width and density descriptors). With ``"skip"`` (the default)
+        invalid candidates are skipped and the remaining ones are extracted;
+        with ``"reject"`` the whole attribute is ignored. Each decision is
+        written to the logger.
+
+        .. versionadded:: VERSION
+    :type srcset_on_error: str
+
+    :param srcset_max_candidates: maximum number of candidates extracted from
+        one ``srcset`` attribute. Once reached, parsing of that attribute stops
+        and a warning is logged. Defaults to 100.
+
+        .. versionadded:: VERSION
+    :type srcset_max_candidates: int
+
+    :param srcset_max_chars: maximum length, in characters, of a ``srcset``
+        attribute that is parsed. Longer attributes are rejected and a warning
+        is logged, so an oversized attribute cannot turn parsing into an
+        unbounded loop. Defaults to 100000.
+
+        .. versionadded:: VERSION
+    :type srcset_max_chars: int
     """
 
     _csstranslator = HTMLTranslator()
@@ -341,7 +573,29 @@ class LxmlLinkExtractor:
         deny_tags: str | Iterable[str] = (),
         deny_attrs: str | Iterable[str] = (),
         schemes: str | Iterable[str] | None = None,
+        *,
+        srcset_attrs: str | Iterable[str] | None = None,
+        srcset_on_error: str = _SRCSET_ON_ERROR_SKIP,
+        srcset_max_candidates: int = _DEFAULT_SRCSET_MAX_CANDIDATES,
+        srcset_max_chars: int = _DEFAULT_SRCSET_MAX_CHARS,
     ):
+        if srcset_on_error not in (
+            _SRCSET_ON_ERROR_SKIP,
+            _SRCSET_ON_ERROR_REJECT,
+        ):
+            raise ValueError(
+                f"srcset_on_error must be 'skip' or 'reject', got {srcset_on_error!r}"
+            )
+        if srcset_max_candidates < 1:
+            raise ValueError(
+                "srcset_max_candidates must be a positive integer, "
+                f"got {srcset_max_candidates!r}"
+            )
+        if srcset_max_chars < 1:
+            raise ValueError(
+                f"srcset_max_chars must be a positive integer, got {srcset_max_chars!r}"
+            )
+        srcset_attr_set = frozenset(arg_to_iter(srcset_attrs))
         tags, attrs = set(arg_to_iter(tags)), set(arg_to_iter(attrs))
         deny_tags, deny_attrs = (
             set(arg_to_iter(deny_tags)),
@@ -354,7 +608,12 @@ class LxmlLinkExtractor:
             process=process_value,
             strip=strip,
             canonicalized=True,
+            srcset_attrs=srcset_attr_set,
+            srcset_on_error=srcset_on_error,
+            srcset_max_candidates=srcset_max_candidates,
+            srcset_max_chars=srcset_max_chars,
         )
+        self.srcset_attrs: frozenset[str] = srcset_attr_set
         self.allow_res: list[re.Pattern[str]] = self._compile_regexes(allow)
         self.deny_res: list[re.Pattern[str]] = self._compile_regexes(deny)
 

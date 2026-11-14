@@ -63,3 +63,19 @@ def test_bytes_url() -> None:
 def test_eq_non_link() -> None:
     url = "http://example.com"
     assert Link(url) != url
+
+
+def test_source_attr() -> None:
+    plain = Link("http://www.example.com/a")
+    from_href = Link("http://www.example.com/a", source_attr="href")
+    from_srcset = Link("http://www.example.com/a", source_attr="srcset")
+
+    assert plain.source_attr is None
+    assert from_href.source_attr == "href"
+    assert from_srcset.source_attr == "srcset"
+    _assert_different_links(plain, from_href)
+    _assert_different_links(from_href, from_srcset)
+
+    again = Link("http://www.example.com/a", source_attr="srcset")
+    _assert_same_links(from_srcset, again)
+    assert eval(repr(from_srcset)) == from_srcset

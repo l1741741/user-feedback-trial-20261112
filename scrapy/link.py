@@ -24,12 +24,24 @@ class Link:
 
     :param nofollow: an indication of the presence or absence of a nofollow value in the ``rel`` attribute
                     of the anchor tag.
+
+    :param source_attr: the name of the attribute the link was extracted from,
+                    or ``None`` when the extractor does not provide it. For a
+                    ``srcset`` candidate it is the name of the ``srcset``
+                    attribute, without the width or density descriptor.
+
+        .. versionadded:: VERSION
     """
 
-    __slots__ = ["fragment", "nofollow", "text", "url"]
+    __slots__ = ["fragment", "nofollow", "source_attr", "text", "url"]
 
     def __init__(
-        self, url: str, text: str = "", fragment: str = "", nofollow: bool = False
+        self,
+        url: str,
+        text: str = "",
+        fragment: str = "",
+        nofollow: bool = False,
+        source_attr: str | None = None,
     ):
         if not isinstance(url, str):
             got = url.__class__.__name__
@@ -38,6 +50,7 @@ class Link:
         self.text: str = text
         self.fragment: str = fragment
         self.nofollow: bool = nofollow
+        self.source_attr: str | None = source_attr
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Link):
@@ -47,15 +60,21 @@ class Link:
             and self.text == other.text
             and self.fragment == other.fragment
             and self.nofollow == other.nofollow
+            and self.source_attr == other.source_attr
         )
 
     def __hash__(self) -> int:
         return (
-            hash(self.url) ^ hash(self.text) ^ hash(self.fragment) ^ hash(self.nofollow)
+            hash(self.url)
+            ^ hash(self.text)
+            ^ hash(self.fragment)
+            ^ hash(self.nofollow)
+            ^ hash(self.source_attr)
         )
 
     def __repr__(self) -> str:
         return (
             f"Link(url={self.url!r}, text={self.text!r}, "
-            f"fragment={self.fragment!r}, nofollow={self.nofollow!r})"
+            f"fragment={self.fragment!r}, nofollow={self.nofollow!r}, "
+            f"source_attr={self.source_attr!r})"
         )

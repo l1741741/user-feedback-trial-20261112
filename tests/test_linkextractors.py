@@ -10,8 +10,19 @@ from w3lib.url import canonicalize_url
 from scrapy.http import HtmlResponse, TextResponse, XmlResponse
 from scrapy.link import Link
 from scrapy.linkextractors import lxmlhtml
-from scrapy.linkextractors.lxmlhtml import LxmlLinkExtractor, LxmlParserLinkExtractor
+from scrapy.linkextractors.lxmlhtml import (
+    LxmlLinkExtractor,
+    LxmlParserLinkExtractor,
+    _parse_srcset,
+)
 from tests import get_testdata
+
+
+def _parse(value: str, **kwargs: Any):
+    kwargs.setdefault("on_error", "skip")
+    kwargs.setdefault("max_candidates", 100)
+    kwargs.setdefault("max_chars", 100_000)
+    return _parse_srcset(value, **kwargs)
 
 
 class TestLxmlLinkExtractor:
@@ -968,3 +979,424 @@ class TestLxmlParserLinkExtractor:
             strip=False, process=reject_trailing_whitespace
         )
         assert lx_no_strip.extract_links(response) == []
+
+
+class TestParseSrcset:
+    """Unit tests for the srcset tokenizer and descriptor validation."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            # Bare URL, no descriptors.
+            ("/a.png", [("/a.png", "")]),
+            # Width and density descriptors.
+            ("/a.png 480w", [("/a.png", "480w")]),
+            ("/a.png 2x", [("/a.png", "2x")]),
+            ("/a.png 1.5x", [("/a.png", "1.5x")]),
+            ("/a.png .5x", [("/a.png", ".5x")]),
+            # Several candidates separated by comma plus whitespace.
+            (
+                "/small.png 480w, /large.png 800w",
+                [("/small.png", "480w"), ("/large.png", "800w")],
+            ),
+            # A data URL keeps the commas embedded in its payload, including
+            # when further candidates follow after the descriptor.
+            (
+                "data:image/gif;base64,R0lGOD,l=q,AA== 1x, /b.png 2x",
+                [
+                    ("data:image/gif;base64,R0lGOD,l=q,AA==", "1x"),
+                    ("/b.png", "2x"),
+                ],
+            ),
+            (
+                "data:text/plain,hello,world",
+                [("data:text/plain,hello,world", "")],
+            ),
+            # All ASCII whitespace kinds separate tokens and candidates.
+            (
+                "/a.png\t1x\n, /b.png\f2x\r",
+                [("/a.png", "1x"), ("/b.png", "2x")],
+            ),
+            # Repeated whitespace around the URL and descriptor is padding.
+            (
+                "/a.png    480w   ,   /b.png  800w",
+                [("/a.png", "480w"), ("/b.png", "800w")],
+            ),
+            # Multibyte characters in URLs are preserved character-wise.
+            (
+                "/café.png 1x, /naïve.png 2x",
+                [("/café.png", "1x"), ("/naïve.png", "2x")],
+            ),
+            # A comma without preceding whitespace is part of the URL, even
+            # when it looks like the plain single-URL separator.
+            ("/a.png,/b.png 2x", [("/a.png,/b.png", "2x")]),
+            # Trailing comma and whitespace do not create empty candidates.
+            ("/a.png 1x,", [("/a.png", "1x")]),
+            ("/a.png 1x, ", [("/a.png", "1x")]),
+            # Empty or whitespace-only attributes yield no candidate.
+            ("", []),
+            ("   ", []),
+        ],
+    )
+    def test_valid_values(self, value: str, expected: list[tuple[str, str]]) -> None:
+        assert _parse(value) == expected
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "/a.png 0w",  # zero width is not a valid non-negative integer here
+            "/a.png 00w",
+            "/a.png -1x",  # densities cannot be negative
+            "/a.png 100w 2x",  # two descriptors on one candidate
+            "/a.png 480w 800w",
+            "/a.png foo",  # unknown descriptor
+            "/a.png 2X",  # descriptor suffix is case-sensitive
+            "/a.png 1h",
+        ],
+    )
+    def test_invalid_candidate_skipped(self, value: str) -> None:
+        assert _parse(value) == []
+
+    def test_invalid_candidate_does_not_drop_valid_ones(self) -> None:
+        value = "/good.png 1x, /bad.png 0w, /also-good.png 2x"
+        assert _parse(value) == [
+            ("/good.png", "1x"),
+            ("/also-good.png", "2x"),
+        ]
+
+    def test_duplicate_width_descriptor_is_conflict(self) -> None:
+        value = "/a.png 480w, /b.png 480w"
+        assert _parse(value) == [("/a.png", "480w")]
+
+    def test_duplicate_density_descriptor_is_conflict(self) -> None:
+        value = "/a.png 1x, /b.png 1x"
+        assert _parse(value) == [("/a.png", "1x")]
+
+    def test_mixed_descriptor_kinds_are_conflict(self) -> None:
+        # A width after a density, and the reverse order.
+        assert _parse("/a.png 1x, /b.png 480w") == [("/a.png", "1x")]
+        assert _parse("/a.png 480w, /b.png 1x") == [("/a.png", "480w")]
+
+    def test_reject_mode_returns_none_on_invalid_candidate(self) -> None:
+        assert _parse("/a.png 480w, /b.png 480w", on_error="reject") is None
+        assert _parse("/a.png 0w", on_error="reject") is None
+
+    def test_reject_mode_keeps_valid_attribute(self) -> None:
+        assert _parse("/a.png 480w, /b.png 800w", on_error="reject") == [
+            ("/a.png", "480w"),
+            ("/b.png", "800w"),
+        ]
+
+    def test_skip_mode_logs_debug(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("DEBUG", logger="scrapy.linkextractors.lxmlhtml"):
+            _parse("/a.png 0w")
+        assert len(caplog.records) == 1
+        assert "Skipping invalid srcset candidate" in caplog.records[0].getMessage()
+
+    def test_reject_mode_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING", logger="scrapy.linkextractors.lxmlhtml"):
+            result = _parse("/a.png 0w", on_error="reject")
+        assert result is None
+        assert len(caplog.records) == 1
+        record = caplog.records[0]
+        assert record.levelname == "WARNING"
+        assert "Rejecting srcset attribute" in record.getMessage()
+
+    def test_candidate_limit_stops_parsing(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        value = ", ".join(f"/i{n}.png {n + 1}x" for n in range(10))
+        with caplog.at_level("WARNING", logger="scrapy.linkextractors.lxmlhtml"):
+            result = _parse(value, max_candidates=3)
+        assert len(result) == 3
+        assert result[0] == ("/i0.png", "1x")
+        assert result[-1] == ("/i2.png", "3x")
+        assert any(
+            "Stopping srcset parsing" in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_character_budget_rejects_whole_attribute(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        value = "/a.png 1x, " + "x" * 50
+        with caplog.at_level("WARNING", logger="scrapy.linkextractors.lxmlhtml"):
+            assert _parse(value, max_chars=10) is None
+        assert any(
+            "above the limit" in record.getMessage() for record in caplog.records
+        )
+
+    def test_character_budget_boundary_is_accepted(self) -> None:
+        value = "/a.png 1x"
+        assert _parse(value, max_chars=len(value)) == [("/a.png", "1x")]
+
+    def test_parsing_is_linear_on_long_comma_run(self) -> None:
+        # A long run of commas inside a bare URL must stay one bounded pass.
+        value = "data:text/plain," + "a," * 1000
+        result = _parse(value, max_chars=100_000)
+        assert result == [(value, "")]
+
+
+class TestLxmlLinkExtractorSrcset:
+    """Integration tests for srcset extraction through the public API."""
+
+    def _response(self, body: bytes) -> HtmlResponse:
+        return HtmlResponse("http://example.com/page/index", body=body)
+
+    def _extractor(self, **kwargs: Any) -> LxmlLinkExtractor:
+        kwargs.setdefault("tags", "img")
+        kwargs.setdefault("attrs", ())
+        kwargs.setdefault("srcset_attrs", "srcset")
+        kwargs.setdefault("deny_extensions", ())
+        return LxmlLinkExtractor(**kwargs)
+
+    def test_disabled_by_default(self) -> None:
+        response = self._response(
+            b'<img src="/plain.png" srcset="/a.png 480w, /b.png 800w"/>'
+        )
+        # The default extractor only scans a/area href, so nothing is found.
+        assert LxmlLinkExtractor().extract_links(response) == []
+        # Even with img scanned, srcset is treated as an unknown attribute.
+        lx = LxmlLinkExtractor(tags="img", attrs="src", deny_extensions=())
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/plain.png"
+        ]
+
+    def test_extracts_each_candidate_with_source_attr(self) -> None:
+        response = self._response(b'<img srcset="/small.png 480w, /large.png 800w"/>')
+        assert self._extractor().extract_links(response) == [
+            Link(
+                "http://example.com/small.png",
+                source_attr="srcset",
+            ),
+            Link(
+                "http://example.com/large.png",
+                source_attr="srcset",
+            ),
+        ]
+
+    def test_descriptor_is_not_part_of_url(self) -> None:
+        response = self._response(b'<img srcset="http://cdn.example.com/a.png 480w"/>')
+        link = self._extractor().extract_links(response)[0]
+        assert link.url == "http://cdn.example.com/a.png"
+        assert "480w" not in link.url
+
+    def test_relative_urls_resolve_against_base_tag(self) -> None:
+        response = HtmlResponse(
+            "http://example.com/page/index",
+            body=(
+                b'<html><head><base href="http://cdn.example.com/assets/"/></head>'
+                b'<body><img srcset="small.png 480w, /root.png 800w"/></body></html>'
+            ),
+        )
+        assert [link.url for link in self._extractor().extract_links(response)] == [
+            "http://cdn.example.com/assets/small.png",
+            "http://cdn.example.com/root.png",
+        ]
+
+    def test_data_url_with_commas_is_one_link(self) -> None:
+        response = self._response(
+            b'<img srcset="data:image/gif;base64,R0lGOD,l=q,AA== 1x, /b.png 2x"/>'
+        )
+        lx = self._extractor(schemes=())
+        assert [link.url for link in lx.extract_links(response)] == [
+            "data:image/gif;base64,R0lGOD,l=q,AA==",
+            "http://example.com/b.png",
+        ]
+        assert all(link.source_attr == "srcset" for link in lx.extract_links(response))
+
+    def test_empty_and_whitespace_attributes(self) -> None:
+        response = self._response(
+            b'<img srcset=""/><img srcset="   "/><img srcset="/a.png 1x"/>'
+        )
+        assert [link.url for link in self._extractor().extract_links(response)] == [
+            "http://example.com/a.png"
+        ]
+
+    def test_html_entities_are_decoded_before_parsing(self) -> None:
+        # &amp; must be decoded to &, so the parser sees the real URL.
+        response = self._response(b'<img srcset="/a.png?x=1&amp;y=2 480w"/>')
+        assert self._extractor().extract_links(response) == [
+            Link("http://example.com/a.png?x=1&y=2", source_attr="srcset"),
+        ]
+
+    def test_multibyte_urls(self) -> None:
+        response = self._response(
+            '<img srcset="/café.png 1x, /naïve.png 2x"/>'.encode()
+        )
+        assert [link.url for link in self._extractor().extract_links(response)] == [
+            "http://example.com/caf%C3%A9.png",
+            "http://example.com/na%C3%AFve.png",
+        ]
+
+    def test_skip_mode_keeps_valid_candidates(self) -> None:
+        response = self._response(
+            b'<img srcset="/good.png 1x, /bad.png 0w, /also.png 2x"/>'
+        )
+        assert [link.url for link in self._extractor().extract_links(response)] == [
+            "http://example.com/good.png",
+            "http://example.com/also.png",
+        ]
+
+    def test_reject_mode_drops_whole_attribute(self) -> None:
+        response = self._response(b'<img srcset="/a.png 480w, /b.png 480w"/>')
+        lx = self._extractor(srcset_on_error="reject")
+        assert lx.extract_links(response) == []
+
+    def test_reject_mode_keeps_valid_attribute(self) -> None:
+        response = self._response(b'<img srcset="/a.png 480w, /b.png 800w"/>')
+        lx = self._extractor(srcset_on_error="reject")
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/a.png",
+            "http://example.com/b.png",
+        ]
+
+    def test_invalid_on_error_value_raises(self) -> None:
+        with pytest.raises(ValueError, match="srcset_on_error"):
+            LxmlLinkExtractor(srcset_attrs="srcset", srcset_on_error="explode")
+
+    @pytest.mark.parametrize(
+        ("limit_name", "limit_value"),
+        [
+            ("srcset_max_candidates", 0),
+            ("srcset_max_candidates", -1),
+            ("srcset_max_chars", 0),
+        ],
+    )
+    def test_invalid_limits_raise(self, limit_name: str, limit_value: int) -> None:
+        def build() -> LxmlLinkExtractor:
+            if limit_name == "srcset_max_candidates":
+                return LxmlLinkExtractor(
+                    srcset_attrs="srcset", srcset_max_candidates=limit_value
+                )
+            return LxmlLinkExtractor(
+                srcset_attrs="srcset", srcset_max_chars=limit_value
+            )
+
+        with pytest.raises(ValueError, match="positive integer"):
+            build()
+
+    def test_candidate_limit_is_enforced(self) -> None:
+        body = ", ".join(f"/i{n}.png {n + 1}x" for n in range(10)).encode()
+        response = self._response(b'<img srcset="' + body + b'"/>')
+        lx = self._extractor(srcset_max_candidates=3)
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/i0.png",
+            "http://example.com/i1.png",
+            "http://example.com/i2.png",
+        ]
+
+    def test_character_budget_is_enforced(self) -> None:
+        long_value = b"/a.png 1x, " + b"x" * 500
+        response = self._response(b'<img srcset="' + long_value + b'"/>')
+        lx = self._extractor(srcset_max_chars=10)
+        assert lx.extract_links(response) == []
+
+    def test_dedup_removes_repeated_candidate_url(self) -> None:
+        response = self._response(b'<img srcset="/dup.png 1x, /dup.png 2x"/>')
+        # unique=True (the default) collapses the repeated URL.
+        assert [link.url for link in self._extractor().extract_links(response)] == [
+            "http://example.com/dup.png"
+        ]
+        # unique=False keeps both links in document order.
+        lx = self._extractor(unique=False)
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/dup.png",
+            "http://example.com/dup.png",
+        ]
+
+    def test_filters_apply_to_candidates(self) -> None:
+        response = self._response(b'<img srcset="/keep-a.png 1x, /drop-b.png 2x"/>')
+        lx = self._extractor(allow=(r"keep-a",))
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/keep-a.png"
+        ]
+
+    def test_process_value_applies_to_candidates(self) -> None:
+        response = self._response(b'<img srcset="/small.png 480w, /large.png 800w"/>')
+        lx = self._extractor(
+            process_value=lambda value: None if "large" in value else value
+        )
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/small.png"
+        ]
+
+    def test_single_url_attrs_keep_working_alongside_srcset(self) -> None:
+        response = self._response(
+            b'<img src="/plain.png" srcset="/a.png 480w, /b.png 800w"/>'
+        )
+        lx = LxmlLinkExtractor(
+            tags="img",
+            attrs="src",
+            srcset_attrs="srcset",
+            deny_extensions=(),
+        )
+        assert [
+            (link.url, link.source_attr) for link in lx.extract_links(response)
+        ] == [
+            ("http://example.com/plain.png", None),
+            ("http://example.com/a.png", "srcset"),
+            ("http://example.com/b.png", "srcset"),
+        ]
+
+    def test_custom_srcset_attribute_name(self) -> None:
+        response = self._response(b'<link imagesrcset="/a.png 480w, /b.png 800w"/>')
+        lx = LxmlLinkExtractor(
+            tags="link",
+            attrs=(),
+            srcset_attrs="imagesrcset",
+            deny_extensions=(),
+        )
+        assert [
+            (link.url, link.source_attr) for link in lx.extract_links(response)
+        ] == [
+            ("http://example.com/a.png", "imagesrcset"),
+            ("http://example.com/b.png", "imagesrcset"),
+        ]
+
+    def test_deny_attrs_only_governs_single_url_attrs(self) -> None:
+        # srcset_attrs is a separate, explicit channel: deny_attrs filters the
+        # regular single-URL attributes but never suppresses a srcset parse.
+        # Listing the same attribute in both channels must not extract it twice.
+        response = self._response(
+            b'<img src="/plain.png" srcset="/a.png 480w, /b.png 800w"/>'
+        )
+        lx = LxmlLinkExtractor(
+            tags="img",
+            attrs="*",
+            srcset_attrs="srcset",
+            deny_attrs="src",
+            deny_extensions=(),
+        )
+        assert [
+            (link.url, link.source_attr) for link in lx.extract_links(response)
+        ] == [
+            ("http://example.com/a.png", "srcset"),
+            ("http://example.com/b.png", "srcset"),
+        ]
+
+    def test_dom_and_response_are_not_modified(self) -> None:
+        body = b'<img srcset="/a.png 480w, /b.png 800w"/>'
+        response = self._response(body)
+        original = response.css("img::attr(srcset)").get()
+        self._extractor().extract_links(response)
+        # The attribute value and the raw body are untouched.
+        assert response.css("img::attr(srcset)").get() == original
+        assert response.body == body
+
+    def test_several_elements_preserve_document_order(self) -> None:
+        response = self._response(b'<img srcset="/a.png 1x"/><img srcset="/b.png 1x"/>')
+        assert [link.url for link in self._extractor().extract_links(response)] == [
+            "http://example.com/a.png",
+            "http://example.com/b.png",
+        ]
+
+    def test_restrict_xpaths_limits_srcset_scan(self) -> None:
+        response = self._response(
+            b'<div id="keep"><img srcset="/a.png 1x"/></div>'
+            b'<div id="drop"><img srcset="/b.png 1x"/></div>'
+        )
+        lx = self._extractor(restrict_xpaths='//div[@id="keep"]')
+        assert [link.url for link in lx.extract_links(response)] == [
+            "http://example.com/a.png"
+        ]
