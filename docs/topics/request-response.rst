@@ -1462,6 +1462,25 @@ TextResponse objects
        will be looked up in the response headers and body instead.
     :type encoding: str
 
+    :param strict_encoding: when ``False`` (the default), unknown encodings
+       and conflicting declarations are handled the way web browsers handle
+       them, as described under :attr:`~TextResponse.encoding`. When ``True``,
+       the encoding is resolved with a fixed priority and every unsupported
+       choice raises
+       :class:`~scrapy.http.response.text.ResponseEncodingError`. See
+       :ref:`topics-response-strict-encoding`.
+    :type strict_encoding: bool
+
+    :param encoding_errors: how bytes that the resolved encoding cannot
+       decode are treated by :attr:`~TextResponse.text`: ``"replace"`` (the
+       default) inserts a U+FFFD replacement character, ``"strict"`` raises
+       :exc:`UnicodeDecodeError`. When *strict_encoding* is ``True`` the
+       default becomes ``"strict"``.
+    :type encoding_errors: str
+
+    .. versionadded:: VERSION The *strict_encoding* and *encoding_errors*
+       parameters.
+
     :class:`TextResponse` objects support the following attributes in addition
     to the standard :class:`Response` ones:
 
@@ -1535,6 +1554,77 @@ TextResponse objects
                        return response
                    encoding = html_body_declared_encoding(response.body)
                    return response.replace(encoding=encoding) if encoding else response
+
+    .. _topics-response-strict-encoding:
+
+    Strict encoding mode
+    ~~~~~~~~~~~~~~~~~~~~
+
+    Passing ``strict_encoding=True`` makes the encoding resolution explicit
+    and predictable. The sources are tried in this order:
+
+    1. the encoding passed in the ``__init__()`` method *encoding* argument
+
+    2. the encoding of the `byte order mark`_ at the start of the response
+       body
+
+    3. the encoding declared in the Content-Type HTTP header
+
+    4. the encoding declared by a ``<meta>`` tag or an XML declaration, which
+       is only looked for in the first 4096 bytes of the body
+
+    5. UTF-8, when none of the above names an encoding
+
+    Unlike the default behavior, an encoding label that names no supported
+    encoding, including a label whose browser behavior is to decode nothing,
+    raises :class:`~scrapy.http.response.text.ResponseEncodingError` instead
+    of being ignored. An explicit *encoding* that is incompatible with the
+    byte order mark raises the same exception. The exception exposes its
+    ``source`` (``"encoding"``, ``"bom"``, ``"http"`` or ``"meta"``) and the
+    offending ``label``, so an :ref:`errback <errbacks>` can report where the
+    conflicting or unknown encoding came from.
+
+    .. code-block:: pycon
+
+        >>> from scrapy.http import TextResponse
+        >>> from scrapy.http.response.text import ResponseEncodingError
+        >>> response = TextResponse(
+        ...     "http://example.com",
+        ...     strict_encoding=True,
+        ...     headers={"Content-Type": "text/html; charset=bogus-xyz"},
+        ... )
+        >>> try:
+        ...     response.text
+        ... except ResponseEncodingError as error:
+        ...     print(error.source, error.label)
+        http bogus-xyz
+
+    The encoding resolution and the decoded body are cached, and the values
+    of :attr:`~TextResponse.encoding`, :attr:`~TextResponse.text` and
+    :attr:`~TextResponse.selector` always agree. :meth:`Response.replace`
+    builds a fresh response whose caches are independent, so replacing
+    *body* or *encoding* never reuses a decoding computed for the previous
+    values.
+
+    Invalid bytes are a separate question from unknown encodings: with
+    *encoding_errors* set to ``"strict"`` (the default in strict mode) they
+    raise :exc:`UnicodeDecodeError`, with the byte position reported by the
+    exception; set *encoding_errors* to ``"replace"`` to insert U+FFFD
+    instead.
+
+    .. attribute:: TextResponse.strict_encoding
+
+       Whether the response uses the strict encoding resolution described
+       above.
+
+       .. versionadded:: VERSION
+
+    .. attribute:: TextResponse.encoding_errors
+
+       The strategy used for bytes the resolved encoding cannot decode,
+       either ``"strict"`` or ``"replace"``.
+
+       .. versionadded:: VERSION
 
     .. attribute:: TextResponse.selector
 

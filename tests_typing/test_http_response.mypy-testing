@@ -57,3 +57,16 @@ def mypy_test_replace_subclass() -> None:
     kwargs: Dict[str, Any] = {}
     resp_copy3 = resp.replace(body=b"a", cls=TextResponse, **kwargs)
     reveal_type(resp_copy3)  # R: scrapy.http.response.text.TextResponse
+
+
+@pytest.mark.mypy_testing
+def mypy_test_strict_encoding() -> None:
+    resp = TextResponse(
+        "data:,", strict_encoding=True, encoding_errors="strict"
+    )
+    reveal_type(resp.strict_encoding)  # R: builtins.bool
+    reveal_type(resp.encoding_errors)  # R: typing.Literal["strict", "replace"]
+    TextResponse("data:,", strict_encoding=1)  # E: Argument "strict_encoding" to "TextResponse" has incompatible type "int"; expected "bool"
+    TextResponse("data:,", encoding_errors="ignore")  # E: Argument "encoding_errors" to "TextResponse" has incompatible type "Literal['ignore']"; expected "Literal['strict', 'replace'] | None"
+    resp.replace(strict_encoding=False, encoding_errors="replace")
+

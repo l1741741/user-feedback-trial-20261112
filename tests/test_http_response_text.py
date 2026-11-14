@@ -11,8 +11,13 @@ import pytest
 
 from scrapy.exceptions import ScrapyDeprecationWarning
 from scrapy.http import HtmlResponse, TextResponse, XmlResponse
-from scrapy.http.response.text import MetaRefresh
+from scrapy.http.response.text import (
+    META_PREFIX_SIZE,
+    MetaRefresh,
+    ResponseEncodingError,
+)
 from scrapy.selector import Selector
+from scrapy.utils.response import response_from_dict
 from tests.utils.bases.http_response import TestResponseBase
 
 
@@ -850,3 +855,423 @@ class TestCustomResponse(TestTextResponse):
             match=r"__init__\(\) got an unexpected keyword argument 'unknown'",
         ):
             r1.replace(unknown="unknown")
+
+
+class TestStrictEncoding:
+    response_class = TextResponse
+
+    def _response(self, **kwargs) -> TextResponse:
+        kwargs.setdefault("url", "http://example.com")
+        kwargs.setdefault("strict_encoding", True)
+        return self.response_class(**kwargs)
+
+    def test_default_mode_unchanged(self) -> None:
+        """Without strict_encoding, unknown labels keep being ignored."""
+        response = TextResponse(
+            "http://example.com",
+            headers={"Content-Type": "text/html; charset=UNKNOWN"},
+            body=b"\xc2\xa3",
+        )
+        assert response.strict_encoding is False
+        assert response.encoding_errors == "replace"
+        assert response.encoding == "utf-8"
+        assert response.text == "£"
+
+    def test_strict_defaults(self) -> None:
+        response = self._response()
+        assert response.strict_encoding is True
+        assert response.encoding_errors == "strict"
+        assert response.encoding == "utf-8"
+        assert response.text == ""
+
+    @pytest.mark.parametrize(
+        "value",
+        ["ignore", "strict ", ""],
+    )
+    def test_encoding_errors_validation(self, value: str) -> None:
+        with pytest.raises(ValueError, match="encoding_errors must be"):
+            TextResponse(
+                "http://example.com",
+                strict_encoding=True,
+                encoding_errors=value,  # type: ignore[arg-type]
+            )
+
+    @pytest.mark.parametrize("value", ["strict", "replace"])
+    def test_encoding_errors_accepted(self, value: str) -> None:
+        response = self._response(
+            body=b"h\xe3", encoding="utf-8", encoding_errors=value
+        )
+        if value == "replace":
+            assert response.text == "h�"
+        else:
+            with pytest.raises(UnicodeDecodeError):
+                response.text
+
+    def test_explicit_encoding_wins(self) -> None:
+        response = self._response(
+            body=b"<meta charset='gbk'>\xa8D",
+            encoding="gbk",
+            headers={"Content-Type": "text/html; charset=iso-8859-1"},
+        )
+        assert response.encoding == "gbk"
+        assert response.text == "<meta charset='gbk'>―"
+
+    def test_bom_beats_http_and_meta(self) -> None:
+        response = self._response(
+            body=codecs.BOM_UTF8 + b"WORD",
+            headers={"Content-Type": "text/html; charset=cp1251"},
+        )
+        assert response.encoding == "utf-8"
+        # The BOM is stripped from the decoded text.
+        assert response.text == "WORD"
+
+    def test_http_charset_beats_meta(self) -> None:
+        response = self._response(
+            headers={"Content-Type": "text/html; charset=iso-8859-1"},
+            body=b"<meta charset='utf-8'>\xa3",
+        )
+        assert response.encoding == "cp1252"
+        assert response.text == "<meta charset='utf-8'>£"
+
+    @pytest.mark.parametrize(
+        ("body", "encoding"),
+        [
+            (b'<meta charset="utf-8">', "utf-8"),
+            (b"<meta charset='gb2312'/>", "gbk"),
+            (b"<META CHARSET=ISO-8859-1>", "cp1252"),
+            (
+                (
+                    b'<meta http-equiv="content-type" '
+                    b'content="text/html;charset=iso-8859-1">'
+                ),
+                "cp1252",
+            ),
+            (b"<?xml version='1.0' encoding='iso-8859-1'?><xml/>", "cp1252"),
+        ],
+    )
+    def test_meta_encoding_used(self, body: bytes, encoding: str) -> None:
+        assert self._response(body=body).encoding == encoding
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b"<!-- <meta charset='iso-8859-2'> --><meta charset='utf-8'>",
+            b"<!--<meta charset='iso-8859-2'>-->",
+            # An unknown label hidden in a comment never raises.
+            b"<!-- <meta charset='bogus-xyz'> -->",
+        ],
+    )
+    def test_commented_meta_is_ignored(self, body: bytes) -> None:
+        assert self._response(body=body).encoding == "utf-8"
+
+    def test_xml_declaration_must_lead(self) -> None:
+        response = self._response(
+            body=b"<html><?xml version='1.0' encoding='iso-8859-2'?>"
+        )
+        assert response.encoding == "utf-8"
+
+    def test_unclosed_comment_covers_prefix(self) -> None:
+        response = self._response(body=b"<!-- <meta charset='iso-8859-2'>" + b"x" * 100)
+        assert response.encoding == "utf-8"
+
+    def test_default_utf8_when_no_source(self) -> None:
+        response = self._response(body=b"plain text without any declaration")
+        assert response.encoding == "utf-8"
+        assert response.text == "plain text without any declaration"
+
+    @pytest.mark.parametrize(
+        ("kwargs", "source", "label", "warns"),
+        [
+            (
+                {"encoding": "bogus-xyz"},
+                "encoding",
+                "bogus-xyz",
+                True,
+            ),
+            (
+                {"headers": {"Content-Type": "text/html; charset=bogus-xyz"}},
+                "http",
+                "bogus-xyz",
+                False,
+            ),
+            (
+                {"body": b"<meta charset='bogus-xyz'>"},
+                "meta",
+                "bogus-xyz",
+                False,
+            ),
+            (
+                {"body": b"<?xml version='1.0' encoding='bogus-xyz'?><xml/>"},
+                "meta",
+                "bogus-xyz",
+                False,
+            ),
+        ],
+    )
+    def test_unknown_encoding_raises(
+        self, kwargs: dict[str, object], source: str, label: str, warns: bool
+    ) -> None:
+        kwargs.setdefault("body", b"hi")
+        if warns:
+            with pytest.warns(ScrapyDeprecationWarning, match=repr(label)):
+                response = self._response(**kwargs)
+        else:
+            response = self._response(**kwargs)
+        with pytest.raises(ResponseEncodingError) as exc_info:
+            response.encoding
+        error = exc_info.value
+        assert error.source == source
+        assert error.label == label
+        assert label in str(error)
+        assert isinstance(error, LookupError)
+
+    def test_replacement_charset_raises_in_strict_mode(self) -> None:
+        response = self._response(
+            body=b"~{Dc:C~}",
+            headers={"Content-Type": "text/html; charset=hz"},
+        )
+        with pytest.raises(ResponseEncodingError) as exc_info:
+            response.encoding
+        assert exc_info.value.source == "http"
+        assert exc_info.value.label == "hz"
+
+    def test_explicit_replacement_label_raises(self) -> None:
+        with pytest.warns(ScrapyDeprecationWarning, match="'hz'"):
+            response = self._response(encoding="hz", body=b"hi")
+        with pytest.raises(ResponseEncodingError, match="'hz'"):
+            response.encoding
+
+    @pytest.mark.parametrize(
+        ("body", "encoding"),
+        [
+            (codecs.BOM_UTF8 + b"abc", "cp1251"),
+            (b"\xff\xfeh\x00i\x00", "utf-16-be"),
+            (b"\xfe\xff\x00h\x00i", "utf-16-le"),
+        ],
+    )
+    def test_bom_conflict_raises(self, body: bytes, encoding: str) -> None:
+        response = self._response(body=body, encoding=encoding)
+        with pytest.raises(ResponseEncodingError) as exc_info:
+            response.encoding
+        error = exc_info.value
+        assert error.source == "bom"
+        assert encoding in error.label
+        assert "!=" in error.label
+
+    @pytest.mark.parametrize(
+        ("body", "encoding"),
+        [
+            (b"\xff\xfeh\x00i\x00", "utf-16"),
+            (b"\xff\xfeh\x00i\x00", "utf-16le"),
+            (b"\xfe\xff\x00h\x00i", "utf-16be"),
+            (codecs.BOM_UTF8 + b"abc", "utf-8"),
+        ],
+    )
+    def test_compatible_bom_and_explicit_encoding(
+        self, body: bytes, encoding: str
+    ) -> None:
+        response = self._response(body=body, encoding=encoding)
+        assert response.text in {"hi", "abc"}
+
+    def test_utf16_byte_order(self) -> None:
+        little = self._response(body=b"\xff\xfeh\x00i\x00")
+        assert little.encoding == "utf-16-le"
+        assert little.text == "hi"
+        big = self._response(body=b"\xfe\xff\x00h\x00i")
+        assert big.encoding == "utf-16-be"
+        assert big.text == "hi"
+
+    def test_utf32_le_bom_reads_as_utf16le(self) -> None:
+        # Browsers read a UTF-32LE BOM as a UTF-16LE one; strict mode keeps
+        # that behavior, and decoding follows the BOM-named codec.
+        body = b"\xff\xfe\x00\x00h\x00\x00\x00i\x00\x00\x00"
+        response = self._response(body=body)
+        assert response.encoding == "utf-16-le"
+
+    def test_invalid_bytes_strict_raises_unicode_decode_error(self) -> None:
+        response = self._response(body=b"PREFIX\xe3\xabSUFFIX", encoding="utf-8")
+        with pytest.raises(UnicodeDecodeError) as exc_info:
+            response.text
+        error = exc_info.value
+        assert error.encoding == "utf-8"
+        assert error.start == 6
+        assert error.end == 8
+
+    def test_invalid_bytes_replace(self) -> None:
+        response = self._response(
+            body=b"PREFIX\xe3\xabSUFFIX",
+            encoding="utf-8",
+            encoding_errors="replace",
+        )
+        assert response.text == "PREFIX�SUFFIX"
+
+    def test_multibyte_truncation_raises(self) -> None:
+        response = self._response(body=b"\xa8", encoding="gbk")
+        with pytest.raises(UnicodeDecodeError, match="incomplete multibyte"):
+            response.text
+
+    def test_truncated_utf16_raises(self) -> None:
+        response = self._response(body=b"\xff\xfeh", encoding="utf-16le")
+        with pytest.raises(UnicodeDecodeError, match="truncated data"):
+            response.text
+
+    def test_text_encoding_selector_consistent(self) -> None:
+        response = self._response(body=b"<html><body><p>ok</p></body></html>")
+        assert response.encoding == "utf-8"
+        first = response.text
+        assert response.text is first
+        assert response.encoding == "utf-8"
+        assert response.selector is response.selector  # pylint: disable=comparison-with-itself
+        assert response.xpath("//p/text()").getall() == ["ok"]
+        assert response.css("p::text").getall() == ["ok"]
+
+    def test_error_is_stable_across_accesses(self) -> None:
+        response = self._response(body=b"\xff\xfeh", encoding="utf-16le")
+        for _ in range(3):
+            with pytest.raises(UnicodeDecodeError):
+                response.text
+
+    def test_replace_body_drops_decode_cache(self) -> None:
+        response = self._response(
+            body=b"<meta charset='cp1252'>\xa3", encoding="cp1252"
+        )
+        assert response.text.endswith("£")
+        replaced = response.replace(body=b"new body")
+        assert replaced.strict_encoding is True
+        assert replaced.encoding_errors == "strict"
+        assert replaced.text == "new body"
+        # The original response keeps its own cached decoding.
+        assert response.text.endswith("£")
+
+    def test_replace_body_redecodes_with_new_meta(self) -> None:
+        response = self._response(body=b"old", encoding="utf-8")
+        new_body = b"<meta charset='gbk'>" + "价".encode("gbk")
+        replaced = response.replace(body=new_body, encoding=None)
+        assert replaced.encoding == "gbk"
+        assert replaced.text == "<meta charset='gbk'>价"
+
+    def test_replace_encoding_drops_decode_cache(self) -> None:
+        response = self._response(body=b"\xa3", encoding="cp1252")
+        assert response.text == "£"
+        replaced = response.replace(encoding="cp1251", body=b"\xa3")
+        assert replaced.encoding == "cp1251"
+        assert replaced.text == b"\xa3".decode("cp1251")
+        assert response.text == "£"
+
+    def test_replace_into_strict_mode(self) -> None:
+        response = TextResponse(
+            "http://example.com",
+            headers={"Content-Type": "text/html; charset=bogus-xyz"},
+            body=b"\xc2\xa3",
+        )
+        assert response.encoding == "utf-8"
+        replaced = response.replace(strict_encoding=True)
+        # The inferred default encoding is not frozen as an explicit one, so
+        # the invalid header charset still surfaces in strict mode.
+        assert replaced._explicit_encoding is None
+        with pytest.raises(ResponseEncodingError):
+            replaced.encoding
+
+    def test_replace_into_strict_mode_keeps_explicit_encoding(self) -> None:
+        response = TextResponse(
+            "http://example.com",
+            encoding="cp1252",
+            headers={"Content-Type": "text/html; charset=bogus-xyz"},
+            body=b"\xa3",
+        )
+        replaced = response.replace(strict_encoding=True)
+        assert replaced._explicit_encoding == "cp1252"
+        assert replaced.encoding == "cp1252"
+        assert replaced.text == "£"
+
+    def test_replace_out_of_strict_mode(self) -> None:
+        response = self._response(
+            headers={"Content-Type": "text/html; charset=bogus-xyz"},
+            body=b"\xc2\xa3",
+        )
+        with pytest.raises(ResponseEncodingError):
+            response.encoding
+        replaced = response.replace(strict_encoding=False)
+        assert replaced.encoding == "utf-8"
+        assert replaced.text == "£"
+
+    def test_empty_body(self) -> None:
+        assert self._response(body=b"").text == ""
+        response = self._response(
+            body=b"", headers={"Content-Type": "text/html; charset=cp1252"}
+        )
+        assert response.encoding == "cp1252"
+        assert response.text == ""
+
+    def test_bom_only_body(self) -> None:
+        response = self._response(body=codecs.BOM_UTF8)
+        assert response.encoding == "utf-8"
+        assert response.text == ""
+
+    def test_meta_scan_is_bounded(self) -> None:
+        # A declaration past the prefix is not consulted, so a huge body is
+        # never scanned in full: resolution falls back to the UTF-8 default.
+        late_body = b"x" * (META_PREFIX_SIZE + 1) + b"<meta charset='iso-8859-2'>"
+        response = self._response(body=late_body)
+        assert response.encoding == "utf-8"
+        early_body = b"x" * 100 + b"<meta charset='iso-8859-2'>"
+        assert self._response(body=early_body).encoding == "iso8859-2"
+
+    def test_large_body_prefix_is_not_scanned_in_full(self) -> None:
+        size = 50_000_000
+        response = self._response(body=b"x" * size)
+        assert response.encoding == "utf-8"
+        # Slicing for the bounded prefix keeps memory use linear in the
+        # prefix size, not the body size.
+        assert response.body[:META_PREFIX_SIZE] == b"x" * META_PREFIX_SIZE
+
+    def test_non_html_response_uses_same_priority(self) -> None:
+        response = self._response(
+            body=b"plain \xa3 text",
+            headers={"Content-Type": "text/plain; charset=cp1252"},
+        )
+        assert response.encoding == "cp1252"
+        assert response.text == "plain £ text"
+
+    def test_header_value_is_copied(self) -> None:
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+        response = self._response(body=b"hi", headers=headers)
+        assert response.headers is not headers
+        response.headers[b"Content-Type"] = b"text/html; charset=cp1252"
+        assert headers == {"Content-Type": "text/html; charset=utf-8"}
+
+    def test_body_and_headers_remain_immutable(self) -> None:
+        response = self._response(body=b"hi")
+        with pytest.raises(AttributeError):
+            response.body = b"other"  # type: ignore[misc]
+        with pytest.raises(AttributeError):
+            response.url = "http://other.example"  # type: ignore[misc]
+
+    def test_str_body_uses_explicit_encoding(self) -> None:
+        response = self._response(body="café", encoding="utf-8")
+        assert response.body == "café".encode()
+        assert response.text == "café"
+        assert response.encoding == "utf-8"
+
+    def test_str_body_unknown_encoding_still_warns(self) -> None:
+        with pytest.warns(ScrapyDeprecationWarning, match="'cp437'"):
+            response = self._response(body="café", encoding="cp437")
+        with pytest.raises(ResponseEncodingError):
+            response.text
+
+    def test_dict_roundtrip(self) -> None:
+        response = self._response(body=b"hi", encoding="utf-8")
+        restored = response_from_dict(response.to_dict())
+        assert isinstance(restored, TextResponse)
+        assert restored.strict_encoding is True
+        assert restored.encoding_errors == "strict"
+        assert restored.encoding == "utf-8"
+        assert restored.text == "hi"
+
+
+class TestStrictEncodingHtml(TestStrictEncoding):
+    response_class = HtmlResponse
+
+
+class TestStrictEncodingXml(TestStrictEncoding):
+    response_class = XmlResponse

@@ -8,12 +8,13 @@ See documentation in docs/topics/request-response.rst
 from __future__ import annotations
 
 import json
+import re
 import warnings
 import weakref
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, Self, cast, overload
 from urllib.parse import urljoin
 
 import frostwork
@@ -29,7 +30,7 @@ from w3lib.encoding import (
 from w3lib.html import strip_html5_whitespace
 
 from scrapy.exceptions import ScrapyDeprecationWarning
-from scrapy.http.response import Response
+from scrapy.http.response import Response, ResponseTypeVar
 from scrapy.utils.python import memoizemethod_noargs
 
 if TYPE_CHECKING:
@@ -47,6 +48,50 @@ class _Unset(Enum):
 
 
 _UNSET = _Unset.UNSET
+
+# In strict mode the encoding declared inside the body is only looked for in
+# the first META_PREFIX_SIZE bytes, the limit of the prescan of the HTML
+# standard, so a huge body without an early declaration is never scanned in
+# full.
+META_PREFIX_SIZE = 4096
+
+# Charset labels are token or quoted-string values, made of word characters
+# and hyphens, the characters w3lib accepts in an encoding label.
+_META_CHARSET_RE = re.compile(
+    rb"""<meta[^>]*?charset\s*=\s*['"]?\s*([\w-]+)""",
+    re.IGNORECASE,
+)
+_XML_CHARSET_RE = re.compile(
+    rb"""<\?xml[^>]*?encoding\s*=\s*['"]([\w-]+)['"]""",
+    re.IGNORECASE,
+)
+# A declaration inside an HTML comment is not a declaration, as in browsers.
+_COMMENT_RE = re.compile(rb"<!--.*?(-->|$)", re.DOTALL)
+
+
+class ResponseEncodingError(LookupError):
+    """Raised by a :class:`TextResponse` created with ``strict_encoding=True``
+    when its encoding cannot be resolved the way the constructor was asked to.
+
+    .. versionadded:: VERSION
+
+    *source* names where the unsupported encoding came from: ``"encoding"``
+    for the *encoding* argument, ``"bom"`` for a byte order mark,
+    ``"http"`` for the charset of the Content-Type header and ``"meta"`` for
+    the charset declared by a ``<meta>`` tag or an XML declaration.
+
+    Invalid bytes never raise this error; they raise the standard
+    :exc:`UnicodeDecodeError` when *encoding_errors* is ``"strict"``.
+    """
+
+    def __init__(self, source: str, label: str, *, reason: str):
+        self.source = source
+        """Where the encoding came from."""
+        self.label = label
+        """The encoding label that could not be used, or the two labels of an
+        incompatible pair, joined with ``" != "``."""
+        self.reason = reason
+        super().__init__(f"{source} encoding {label!r}: {reason}")
 
 
 @dataclass(frozen=True)
@@ -75,18 +120,32 @@ def _is_browser_encoding(encoding: str) -> bool:
 
 
 class TextResponse(Response):
-    attributes: tuple[str, ...] = (*Response.attributes, "encoding")
+    attributes: tuple[str, ...] = (
+        *Response.attributes,
+        "encoding",
+        "strict_encoding",
+        "encoding_errors",
+    )
     __slots__ = (
         "_base_url",
         "_cached_benc",
         "_cached_decoded_json",
         "_cached_selector",
+        "_cached_strict",
         "_cached_ubody",
         "_encoding",
+        "_encoding_errors",
         "_meta_refresh",
+        "_strict_encoding",
     )
 
-    def __init__(self, *args: Any, **kwargs: Any):
+    def __init__(
+        self,
+        *args: Any,
+        strict_encoding: bool = False,
+        encoding_errors: Literal["strict", "replace"] | None = None,
+        **kwargs: Any,
+    ):
         self._encoding: str | None = kwargs.pop("encoding", None)
         if self._encoding is not None and not _is_browser_encoding(self._encoding):
             warnings.warn(
@@ -98,13 +157,85 @@ class TextResponse(Response):
                 ScrapyDeprecationWarning,
                 stacklevel=2,
             )
+        if encoding_errors is not None and encoding_errors not in {
+            "strict",
+            "replace",
+        }:
+            raise ValueError(
+                "encoding_errors must be 'strict' or 'replace', got "
+                f"{encoding_errors!r}"
+            )
+        self._strict_encoding: bool = strict_encoding
+        self._encoding_errors: Literal["strict", "replace"] = encoding_errors or (
+            "strict" if strict_encoding else "replace"
+        )
         self._cached_benc: str | None = None
         self._cached_ubody: str | None = None
+        self._cached_strict: tuple[str, int] | None = None
         self._cached_selector: Selector | None = None
         self._cached_decoded_json: object = _UNSET
         self._base_url: str | None = None
         self._meta_refresh: MetaRefresh | Literal[_Unset.UNSET] | None = _UNSET
         super().__init__(*args, **kwargs)
+
+    @property
+    def strict_encoding(self) -> bool:
+        """Whether encoding conflicts and unknown encodings raise
+        :class:`ResponseEncodingError` instead of being handled the way
+        browsers do.
+
+        .. versionadded:: VERSION
+        """
+        return self._strict_encoding
+
+    @property
+    def encoding_errors(self) -> Literal["strict", "replace"]:
+        """How :attr:`text` treats bytes that the resolved encoding cannot
+        decode: ``"strict"`` raises :exc:`UnicodeDecodeError`, ``"replace"``
+        inserts U+FFFD.
+
+        .. versionadded:: VERSION
+        """
+        return self._encoding_errors
+
+    @property
+    def _explicit_encoding(self) -> str | None:
+        """The *encoding* argument passed to the constructor, before any
+        resolution. :meth:`replace` copies it instead of the resolved
+        :attr:`encoding`, so a response keeps inferring its encoding when no
+        explicit encoding was given."""
+        return self._encoding
+
+    @overload
+    def replace(
+        self, *args: Any, cls: type[ResponseTypeVar], **kwargs: Any
+    ) -> ResponseTypeVar: ...
+
+    @overload
+    def replace(self, *args: Any, cls: None = None, **kwargs: Any) -> Self: ...
+
+    def replace(
+        self, *args: Any, cls: type[Response] | None = None, **kwargs: Any
+    ) -> Response:
+        if not self._strict_encoding and not kwargs.get("strict_encoding"):
+            # The resolved encoding has always been part of the copied
+            # attributes, including when no encoding argument was given.
+            return super().replace(*args, cls=cls, **kwargs)
+        # In strict mode reading the public encoding property can raise, and a
+        # resolved encoding must not be frozen into a response whose encoding
+        # was only inferred. Copy the constructor inputs instead.
+        for attr in self.attributes:
+            if attr == "encoding":
+                kwargs.setdefault(attr, self._explicit_encoding)
+            elif attr == "strict_encoding":
+                kwargs.setdefault(attr, self.strict_encoding)
+            elif attr == "encoding_errors":
+                kwargs.setdefault(attr, self.encoding_errors)
+            else:
+                kwargs.setdefault(attr, getattr(self, attr))
+        if cls is None:
+            cls = self.__class__
+        return cls(*args, **kwargs)
 
     def _set_body(self, body: str | bytes | None) -> None:
         self._body: bytes = b""  # used by encoding detection
@@ -127,6 +258,8 @@ class TextResponse(Response):
 
     @property
     def encoding(self) -> str:
+        if self._strict_encoding:
+            return self._strict_encoding_resolution()[0]
         return self._declared_encoding() or self._body_inferred_encoding()
 
     def _declared_encoding(self) -> str | None:
@@ -136,6 +269,88 @@ class TextResponse(Response):
             or self._headers_encoding()
             or self._body_declared_encoding()
         )
+
+    def _strict_encoding_resolution(self) -> tuple[str, int]:
+        """Resolve the encoding and the length of a BOM to strip, following
+        the documented strict-mode priority and validating every source."""
+        if self._cached_strict is None:
+            self._cached_strict = self._resolve_strict_encoding()
+        return self._cached_strict
+
+    def _resolve_strict_encoding(self) -> tuple[str, int]:
+        bom_enc, bom_length = self._bom_with_length()
+        if self._encoding is not None:
+            resolved = self._resolve_strict_label(self._encoding, "encoding")
+            if bom_enc is not None and bom_enc != resolved:
+                raise ResponseEncodingError(
+                    "bom",
+                    f"{self._encoding} != {bom_enc}",
+                    reason=(
+                        "the encoding argument is incompatible with the byte "
+                        "order mark of the body"
+                    ),
+                )
+            return resolved, bom_length
+        if bom_enc is not None:
+            return bom_enc, bom_length
+        header_label = self._raw_header_charset()
+        if header_label is not None:
+            return (
+                self._resolve_strict_label(header_label, "http"),
+                0,
+            )
+        meta_label, meta_source = self._raw_meta_charset()
+        if meta_label is not None:
+            return self._resolve_strict_label(meta_label, meta_source), 0
+        # No source named an encoding; UTF-8 is the documented default.
+        return "utf-8", 0
+
+    @staticmethod
+    def _resolve_strict_label(label: str, source: str) -> str:
+        resolved = resolve_encoding(label)
+        if resolved is None or (resolved == "replacement" and label != "replacement"):
+            raise ResponseEncodingError(
+                source,
+                label,
+                reason="the label names no supported encoding",
+            )
+        return resolved
+
+    def _bom_with_length(self) -> tuple[str | None, int]:
+        from frostwork.encoding import bom_encoding  # noqa: PLC0415
+
+        bom = bom_encoding(self.body)
+        if bom is None:
+            return None, 0
+        name, length = bom
+        return cast("str", resolve_encoding(name)), length
+
+    def _raw_header_charset(self) -> str | None:
+        content_type = self.headers.get(b"Content-Type")
+        if content_type is None:
+            return None
+        match = re.search(
+            r"(?:^|;)[ \t]*charset=(?:\"([\w-]+)\"|([\w-]+))",
+            content_type.decode("latin-1"),
+            re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        return match.group(1) or match.group(2)
+
+    def _raw_meta_charset(self) -> tuple[str | None, str]:
+        """Return the raw charset label declared in the bounded body prefix
+        and its source, without resolving it, so an unknown label can be
+        reported with the exact bytes the document used."""
+        prefix = _COMMENT_RE.sub(b"", self.body[:META_PREFIX_SIZE])
+        # An XML declaration is only recognized at the start of the document.
+        match = _XML_CHARSET_RE.match(prefix)
+        if match is not None:
+            return match.group(1).decode("latin-1"), "meta"
+        match = _META_CHARSET_RE.search(prefix)
+        if match is not None:
+            return match.group(1).decode("latin-1"), "meta"
+        return None, "meta"
 
     def json(self) -> Any:
         """Deserialize a JSON document to a Python object.
@@ -159,17 +374,26 @@ class TextResponse(Response):
     def text(self) -> str:
         """Body as unicode"""
         if self._cached_ubody is None:
-            if (
+            if self._strict_encoding:
+                self._cached_ubody = self._strict_text()
+            elif (
                 self._encoding is not None
                 and not _is_browser_encoding(self._encoding)
                 and not self._bom_encoding()
             ):
                 with suppress(LookupError):
                     self._cached_ubody = self.body.decode(self._encoding, "replace")
-            if self._cached_ubody is None:
+                if self._cached_ubody is None:
+                    charset = f"charset={self.encoding}"
+                    self._cached_ubody = html_to_unicode(charset, self.body)[1]
+            else:
                 charset = f"charset={self.encoding}"
                 self._cached_ubody = html_to_unicode(charset, self.body)[1]
         return self._cached_ubody
+
+    def _strict_text(self) -> str:
+        encoding, bom_length = self._strict_encoding_resolution()
+        return self.body[bom_length:].decode(encoding, self._encoding_errors)
 
     def urljoin(self, url: str) -> str:
         """Join this Response's url with a possible relative url to form an
