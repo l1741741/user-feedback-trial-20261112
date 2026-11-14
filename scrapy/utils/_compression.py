@@ -7,12 +7,18 @@ from gzip import GzipFile
 from io import BytesIO
 from typing import TYPE_CHECKING
 
-import brotli
+try:
+    import brotli
+except ImportError:  # the brotli package is optional
+    brotli = None  # type: ignore[assignment]
 
-if sys.version_info >= (3, 14):
-    from compression import zstd
-else:
-    from backports import zstd
+try:
+    if sys.version_info >= (3, 14):
+        from compression import zstd
+    else:
+        from backports import zstd
+except ImportError:  # the zstd package is optional
+    zstd = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from scrapy.http import Response
@@ -23,11 +29,13 @@ _CHUNK_SIZE = 65536  # 64 KiB
 _DECOMPRESSION_ERRORS: tuple[type[Exception], ...] = (
     EOFError,
     OSError,
-    brotli.error,
     struct.error,
     zlib.error,
-    zstd.ZstdError,
 )
+if brotli is not None:
+    _DECOMPRESSION_ERRORS = (*_DECOMPRESSION_ERRORS, brotli.error)
+if zstd is not None:
+    _DECOMPRESSION_ERRORS = (*_DECOMPRESSION_ERRORS, zstd.ZstdError)
 
 
 class _DecompressionMaxSizeExceeded(ValueError):
@@ -102,6 +110,10 @@ def _inflate(data: bytes, *, max_size: int = 0) -> bytes:
 
 
 def _unbrotli(data: bytes, *, max_size: int = 0) -> bytes:
+    if brotli is None:
+        raise ImportError(
+            "The brotli package is required to decompress Brotli responses."
+        )
     decompressor = brotli.Decompressor()
     first_chunk = decompressor.process(data, output_buffer_limit=_CHUNK_SIZE)
     decompressed_size = len(first_chunk)
@@ -119,6 +131,11 @@ def _unbrotli(data: bytes, *, max_size: int = 0) -> bytes:
 
 
 def _unzstd(data: bytes, *, max_size: int = 0) -> bytes:
+    if zstd is None:
+        raise ImportError(
+            "A zstd package (compression on Python 3.14+, backports.zstd "
+            "otherwise) is required to decompress Zstandard responses."
+        )
     stream_reader = zstd.ZstdFile(BytesIO(data))
     output_stream = BytesIO()
     output_chunk = b"."

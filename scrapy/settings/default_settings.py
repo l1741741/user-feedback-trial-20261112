@@ -44,6 +44,8 @@ __all__ = [
     "COMMANDS_MODULE",
     "COMPRESSION_ENABLED",
     "COMPRESSION_MAX_ENCODINGS",
+    "COMPRESSION_MAX_RATIO",
+    "COMPRESSION_RATIO_MIN_SIZE",
     "CONCURRENT_CONNECTIONS_PER_HANDLER",
     "CONCURRENT_ITEMS",
     "CONCURRENT_REQUESTS",
@@ -280,6 +282,13 @@ COMMANDS_MODULE = ""
 
 COMPRESSION_ENABLED = True
 COMPRESSION_MAX_ENCODINGS = 1
+# No ratio limit by default. Set to a finite positive float (e.g. 100.0) to
+# drop responses whose decompressed size / compressed size exceeds it once the
+# compressed body is at least COMPRESSION_RATIO_MIN_SIZE bytes.
+COMPRESSION_MAX_RATIO: float | None = None
+# Bodies smaller than this many compressed bytes are exempt from the ratio
+# check, since tiny inputs yield meaningless, extreme ratios.
+COMPRESSION_RATIO_MIN_SIZE = 1024
 
 CONCURRENT_CONNECTIONS_PER_HANDLER = None
 

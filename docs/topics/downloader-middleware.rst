@@ -828,6 +828,56 @@ response, keeping in mind that a high value lets a malicious server force many
 decompression passes.
 
 
+.. setting:: COMPRESSION_MAX_RATIO
+
+COMPRESSION_MAX_RATIO
+^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 2.20.0
+
+Default: ``None`` (disabled)
+
+Maximum accepted decompression ratio of a response, as a finite positive
+number (a float such as ``100.0``, or an int). Boolean values are rejected.
+``None`` disables the check.
+
+When enabled, once the full compressed response body is at least
+:setting:`COMPRESSION_RATIO_MIN_SIZE` bytes long, the middleware computes the
+ratio between each decoding layer's output and **the full compressed input**
+(the bytes received over the wire, in bytes):
+
+``ratio = decompressed size in bytes / compressed input size in bytes``
+
+The output of every decoding layer of a multi-layer ``Content-Encoding``,
+including the final output, must stay at or below this value. A response that
+exceeds it is dropped with
+:class:`~scrapy.downloadermiddlewares.httpcompression.HttpCompressionRatioExceeded`
+(a subclass of :exc:`~scrapy.exceptions.IgnoreRequest`), and counted in the
+:stat:`httpcompression/ratio_rejected` stat. Because the denominator is always
+the full compressed input, a short intermediate layer or additional members
+of a multi-member gzip body cannot bypass the limit.
+
+A compressed input of zero bytes is exempt: it has no defined ratio.
+:setting:`DOWNLOAD_MAXSIZE` and :setting:`COMPRESSION_MAX_ENCODINGS` still
+apply independently.
+
+
+.. setting:: COMPRESSION_RATIO_MIN_SIZE
+
+COMPRESSION_RATIO_MIN_SIZE
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 2.20.0
+
+Default: ``1024``
+
+Minimum size, in bytes, of the full compressed response body from which
+:setting:`COMPRESSION_MAX_RATIO` is enforced. A non-negative integer; boolean
+values are rejected. Compressed bodies shorter than this are never
+ratio-checked, because tiny inputs can show extreme, meaningless ratios (a few
+bytes can decompress to a few dozen bytes).
+
+
 HttpProxyMiddleware
 -------------------
 

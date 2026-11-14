@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import warnings
 from itertools import chain
 from logging import getLogger
@@ -14,6 +15,7 @@ from scrapy.exceptions import (
 )
 from scrapy.http import BodyFileResponse, Response, TextResponse
 from scrapy.responsetypes import responsetypes
+from scrapy.utils import _compression
 from scrapy.utils._compression import (
     _DECOMPRESSION_ERRORS,
     _DecompressionMaxSizeExceeded,
@@ -50,6 +52,32 @@ class _MaxEncodingCountExceeded(ValueError):
         self.max_count = max_count
 
 
+class _CompressionRatioExceeded(ValueError):
+    """Raised internally when a decompressed output breaks the ratio budget."""
+
+    def __init__(
+        self,
+        decompressed_size: int,
+        compressed_size: int,
+        ratio: float,
+        max_ratio: float,
+    ) -> None:
+        self.decompressed_size = decompressed_size
+        self.compressed_size = compressed_size
+        self.ratio = ratio
+        self.max_ratio = max_ratio
+
+
+class HttpCompressionRatioExceeded(IgnoreRequest):
+    """Raised by
+    :class:`~scrapy.downloadermiddlewares.httpcompression.HttpCompressionMiddleware`
+    when a response exceeds :setting:`COMPRESSION_MAX_RATIO` while being
+    decompressed.
+
+    .. versionadded:: 2.20.0
+    """
+
+
 class HttpCompressionMiddleware:
     """This middleware allows compressed (gzip, deflate etc.) traffic to be
     sent/received from websites"""
@@ -71,12 +99,48 @@ class HttpCompressionMiddleware:
             self._max_size = 1073741824
             self._warn_size = 33554432
             self._max_encodings = 1
+            self._max_ratio: float | None = None
+            self._ratio_min_size = 1024
             return
         self.stats = crawler.stats
         self._max_size = crawler.settings.getint("DOWNLOAD_MAXSIZE")
         self._warn_size = crawler.settings.getint("DOWNLOAD_WARNSIZE")
         self._max_encodings = crawler.settings.getint("COMPRESSION_MAX_ENCODINGS")
+        self._max_ratio = self._read_max_ratio(crawler)
+        self._ratio_min_size = self._read_ratio_min_size(crawler)
         crawler.signals.connect(self.open_spider, signals.spider_opened)
+
+    @staticmethod
+    def _read_max_ratio(crawler: Crawler) -> float | None:
+        value = crawler.settings.get("COMPRESSION_MAX_RATIO", None)
+        if value is None:
+            return None
+        # bool is a subclass of int: reject it explicitly instead of silently
+        # treating it as 0.0 or 1.0.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                "COMPRESSION_MAX_RATIO must be a finite positive number, "
+                f"got {value!r}."
+            )
+        ratio = float(value)
+        if not math.isfinite(ratio) or ratio <= 0:
+            raise ValueError(
+                "COMPRESSION_MAX_RATIO must be a finite positive number, "
+                f"got {value!r}."
+            )
+        return ratio
+
+    @staticmethod
+    def _read_ratio_min_size(crawler: Crawler) -> int:
+        value = crawler.settings.get("COMPRESSION_RATIO_MIN_SIZE", 1024)
+        # bool is a subclass of int: reject it explicitly, along with any
+        # other non-integer or negative value.
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(
+                "COMPRESSION_RATIO_MIN_SIZE must be a non-negative integer "
+                f"number of bytes, got {value!r}."
+            )
+        return value
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
@@ -101,8 +165,22 @@ class HttpCompressionMiddleware:
         if request.meta.get("body_file"):
             # Their body is written to a file, never decompressed.
             return None
-        request.headers.setdefault("Accept-Encoding", b", ".join(ACCEPTED_ENCODINGS))
+        request.headers.setdefault(
+            "Accept-Encoding", b", ".join(self._accepted_encodings())
+        )
         return None
+
+    @staticmethod
+    def _accepted_encodings() -> list[bytes]:
+        # Only advertise codings we can actually decode: if an optional
+        # decoding library is missing, asking the server for that coding would
+        # leave us unable to decode the response.
+        encodings = [b"gzip", b"deflate"]
+        if _compression.brotli is not None:
+            encodings.append(b"br")
+        if _compression.zstd is not None:
+            encodings.append(b"zstd")
+        return encodings
 
     @_warn_spider_arg
     async def process_response(
@@ -119,6 +197,7 @@ class HttpCompressionMiddleware:
                     response.body, content_encoding, max_size
                 )
             except _DecompressionMaxSizeExceeded as e:
+                self._inc_stat("httpcompression/size_rejected")
                 msg = (
                     f"Ignored response {response} because its body "
                     f"({len(response.body)} B compressed, "
@@ -127,6 +206,16 @@ class HttpCompressionMiddleware:
                 )
                 logger.warning(msg)
                 raise IgnoreRequest(msg) from e
+            except _CompressionRatioExceeded as e:
+                self._inc_stat("httpcompression/ratio_rejected")
+                msg = (
+                    f"Ignored response {response} because its decompression "
+                    f"ratio ({e.ratio:.2f}, {e.decompressed_size} B out of "
+                    f"{e.compressed_size} B compressed) exceeded "
+                    f"COMPRESSION_MAX_RATIO ({e.max_ratio:g})."
+                )
+                logger.warning(msg)
+                raise HttpCompressionRatioExceeded(msg) from e
             except _MaxEncodingCountExceeded as e:
                 msg = (
                     f"Ignored response {response} because its Content-Encoding "
@@ -168,24 +257,58 @@ class HttpCompressionMiddleware:
                 del response.headers["Content-Encoding"]
         return response
 
+    def _inc_stat(self, key: str) -> None:
+        if self.stats:
+            self.stats.inc_value(key)
+
     async def _handle_encoding(
         self, body: bytes, content_encoding: list[bytes], max_size: int
     ) -> tuple[bytes, list[bytes]]:
         to_decode, to_keep = self._split_encodings(content_encoding)
         if len(to_decode) > self._max_encodings:
             raise _MaxEncodingCountExceeded(len(to_decode), self._max_encodings)
+        # The full, on-the-wire compressed input is always the ratio
+        # denominator: checking a layer against only the previous layer's
+        # output would let a short intermediate layer, or extra gzip members,
+        # hide the true expansion against the bytes actually downloaded.
+        compressed_size = len(body)
+        check_ratio = (
+            self._max_ratio is not None and compressed_size >= self._ratio_min_size
+        )
         for encoding in to_decode:
             if len(body) >= _THREAD_DECODE_MIN_SIZE:
                 body = await run_in_thread(self._decode, body, encoding, max_size)
             else:
                 body = self._decode(body, encoding, max_size)
+            # Each layer's output is checked, so the final output is covered
+            # by the last iteration. Empty compressed input has no meaningful
+            # ratio (division by zero) and is exempt inside _check_ratio().
+            if check_ratio:
+                self._check_ratio(len(body), compressed_size)
         return body, to_keep
 
-    @staticmethod
+    def _check_ratio(
+        self, decompressed_size: int, compressed_size: int
+    ) -> None:
+        assert self._max_ratio is not None
+        if compressed_size == 0:
+            return
+        ratio = decompressed_size / compressed_size
+        if ratio > self._max_ratio:
+            raise _CompressionRatioExceeded(
+                decompressed_size,
+                compressed_size,
+                ratio,
+                self._max_ratio,
+            )
+
     def _split_encodings(
+        self,
         content_encoding: list[bytes],
     ) -> tuple[list[bytes], list[bytes]]:
-        supported_encodings = {*ACCEPTED_ENCODINGS, b"x-gzip"}
+        # Recomputed per response so that tests (and future runtime changes)
+        # can simulate a missing optional decoding library.
+        supported_encodings = {b"x-gzip", *self._accepted_encodings()}
         to_keep: list[bytes] = [
             encoding.strip().lower()
             for encoding in chain.from_iterable(
@@ -208,8 +331,11 @@ class HttpCompressionMiddleware:
         if encoding == b"deflate":
             return _inflate(body, max_size=max_size)
         if encoding == b"br":
+            # brotli missing: the coding is kept by _split_encodings(), so
+            # this only guards against direct calls.
             return _unbrotli(body, max_size=max_size)
         if encoding == b"zstd":
+            # zstd missing: likewise kept by _split_encodings().
             return _unzstd(body, max_size=max_size)
         # shouldn't be reached
         return body  # pragma: no cover

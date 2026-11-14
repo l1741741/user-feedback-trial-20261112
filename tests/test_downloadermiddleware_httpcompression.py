@@ -1,4 +1,7 @@
 import asyncio
+import math
+import subprocess
+import sys
 import zlib
 from gzip import GzipFile
 from io import BytesIO
@@ -7,12 +10,14 @@ from pathlib import Path
 from threading import Thread
 from typing import Any
 
+import brotli
 import pytest
 from w3lib.encoding import resolve_encoding
 
 from scrapy.downloadermiddlewares.httpcompression import (
     ACCEPTED_ENCODINGS,
     HttpCompressionMiddleware,
+    HttpCompressionRatioExceeded,
 )
 from scrapy.exceptions import (
     DecompressionError,
@@ -23,11 +28,21 @@ from scrapy.exceptions import (
 from scrapy.http import BodyFileResponse, HtmlResponse, Request, Response
 from scrapy.responsetypes import responsetypes
 from scrapy.spiders import Spider
-from scrapy.utils._compression import _CHUNK_SIZE, _DecompressionMaxSizeExceeded, gunzip
+from scrapy.utils._compression import (
+    _CHUNK_SIZE,
+    _DecompressionMaxSizeExceeded,
+    _inflate,
+    gunzip,
+)
 from scrapy.utils.misc import build_from_crawler
 from scrapy.utils.test import get_crawler
 from tests import tests_datadir
 from tests.utils.decorators import coroutine_test
+
+if sys.version_info >= (3, 14):
+    from compression import zstd
+else:
+    from backports import zstd
 
 SAMPLEDIR = Path(tests_datadir, "compressed")
 
@@ -960,3 +975,564 @@ class TestHttpCompression:
         )
         with pytest.raises(DecompressionError):
             await self.mw.process_response(request, response)
+
+
+
+
+def _gzip_bytes(data: bytes, *, level: int = 9) -> bytes:
+    buf = BytesIO()
+    with GzipFile(fileobj=buf, mode="wb", compresslevel=level) as f:
+        f.write(data)
+    return buf.getvalue()
+
+
+def _compress(codec: bytes, data: bytes) -> bytes:
+    if codec in (b"gzip", b"x-gzip"):
+        return _gzip_bytes(data)
+    if codec == b"deflate":
+        return zlib.compress(data, 9)
+    if codec == b"br":
+        return brotli.compress(data, quality=11)
+    if codec == b"zstd":
+        return zstd.compress(data, level=22)
+    raise ValueError(codec)
+
+
+class TestCompressionRatio:
+    """Tests for COMPRESSION_MAX_RATIO / COMPRESSION_RATIO_MIN_SIZE."""
+
+    def _mw(self, **settings: Any) -> HttpCompressionMiddleware:
+        crawler = get_crawler(Spider, settings_dict=settings)
+        spider = crawler._create_spider("scrapytest.org")
+        mw = build_from_crawler(HttpCompressionMiddleware, crawler)
+        mw.open_spider(spider)
+        crawler.stats.open_spider()
+        return mw
+
+    @staticmethod
+    def _response(body: bytes, encoding: str = "gzip") -> Response:
+        response = Response(
+            "http://scrapytest.org/",
+            body=body,
+            headers={"Content-Encoding": encoding},
+        )
+        response.request = Request("http://scrapytest.org")
+        return response
+
+    # --- setting validation -------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            True,
+            False,
+            0,
+            0.0,
+            -1.0,
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            "100.0",
+            [100.0],
+        ],
+    )
+    def test_invalid_max_ratio(self, value: Any) -> None:
+        with pytest.raises(ValueError, match="COMPRESSION_MAX_RATIO"):
+            self._mw(COMPRESSION_MAX_RATIO=value)
+
+    @pytest.mark.parametrize("value", [1, 1.0, 2.5, 100.0, 1_000_000.0])
+    def test_valid_max_ratio(self, value: float) -> None:
+        mw = self._mw(COMPRESSION_MAX_RATIO=value)
+        assert mw._max_ratio == float(value)
+
+    def test_max_ratio_disabled_by_default(self) -> None:
+        mw = self._mw()
+        assert mw._max_ratio is None
+        assert mw._ratio_min_size == 1024
+
+    @pytest.mark.parametrize("value", [True, False, -1, 1.5, "1024"])
+    def test_invalid_ratio_min_size(self, value: Any) -> None:
+        # Note: None is normalized to the default by Settings.
+        with pytest.raises(ValueError, match="COMPRESSION_RATIO_MIN_SIZE"):
+            self._mw(COMPRESSION_RATIO_MIN_SIZE=value)
+
+    @pytest.mark.parametrize("value", [0, 1, 1024, 10_000_000])
+    def test_valid_ratio_min_size(self, value: int) -> None:
+        mw = self._mw(COMPRESSION_RATIO_MIN_SIZE=value)
+        assert mw._ratio_min_size == value
+
+    # --- disabled by default / threshold exemption --------------------------
+
+    @coroutine_test
+    async def test_high_ratio_allowed_when_disabled(self) -> None:
+        body = _gzip_bytes(b"a" * 200_000)
+        response = self._response(body)
+        mw = self._mw()
+        new_response = await mw.process_response(response.request, response)
+        assert new_response.body == b"a" * 200_000
+        assert mw.stats.get_value("httpcompression/ratio_rejected") is None
+
+    @coroutine_test
+    async def test_below_min_size_not_checked(self) -> None:
+        # Even at an extreme ratio, a body below the minimum size goes through.
+        body = _gzip_bytes(b"a" * 4_000)
+        assert len(body) < 1024
+        response = self._response(body)
+        mw = self._mw(COMPRESSION_MAX_RATIO=1.0, COMPRESSION_RATIO_MIN_SIZE=1024)
+        new_response = await mw.process_response(response.request, response)
+        assert new_response.body == b"a" * 4_000
+        assert mw.stats.get_value("httpcompression/ratio_rejected") is None
+
+    @coroutine_test
+    async def test_min_size_zero_checks_nonempty_inputs(self) -> None:
+        body = _gzip_bytes(b"ab" * 50)
+        assert len(body) > 0
+        response = self._response(body)
+        mw = self._mw(COMPRESSION_MAX_RATIO=1.0, COMPRESSION_RATIO_MIN_SIZE=0)
+        with pytest.raises(HttpCompressionRatioExceeded):
+            await mw.process_response(response.request, response)
+
+    # --- exact boundaries ---------------------------------------------------
+
+    @coroutine_test
+    async def test_ratio_boundary_accepted_and_rejected(self) -> None:
+        plain = b"a" * 5_000_000
+        body = _gzip_bytes(plain)
+        compressed_size = len(body)
+        assert compressed_size >= 1024
+        exact_ratio = len(plain) / compressed_size
+
+        accepted = self._response(body)
+        mw_ok = self._mw(
+            COMPRESSION_MAX_RATIO=exact_ratio, COMPRESSION_RATIO_MIN_SIZE=1024
+        )
+        new_response = await mw_ok.process_response(accepted.request, accepted)
+        assert new_response.body == plain
+
+        rejected = self._response(body)
+        mw_bad = self._mw(
+            COMPRESSION_MAX_RATIO=exact_ratio - 1e-12,
+            COMPRESSION_RATIO_MIN_SIZE=1024,
+        )
+        with pytest.raises(HttpCompressionRatioExceeded) as exc_info:
+            await mw_bad.process_response(rejected.request, rejected)
+        assert isinstance(exc_info.value, IgnoreRequest)
+        cause = exc_info.value.__cause__
+        assert cause.__class__.__name__ == "_CompressionRatioExceeded"
+        assert math.isclose(cause.ratio, exact_ratio)
+        assert cause.compressed_size == compressed_size
+        assert cause.decompressed_size == len(plain)
+
+    @coroutine_test
+    async def test_min_size_boundary(self) -> None:
+        # A compressed body of exactly COMPRESSION_RATIO_MIN_SIZE bytes is
+        # checked; one byte longer threshold exempts the same body.
+        plain = b"a" * 50_000
+        body = _gzip_bytes(plain)
+        min_size = len(body)
+
+        exempt = self._response(body)
+        mw_exempt = self._mw(
+            COMPRESSION_MAX_RATIO=0.1, COMPRESSION_RATIO_MIN_SIZE=min_size + 1
+        )
+        new_response = await mw_exempt.process_response(exempt.request, exempt)
+        assert new_response.body == plain
+
+        checked = self._response(body)
+        mw_checked = self._mw(
+            COMPRESSION_MAX_RATIO=0.1, COMPRESSION_RATIO_MIN_SIZE=min_size
+        )
+        with pytest.raises(HttpCompressionRatioExceeded):
+            await mw_checked.process_response(checked.request, checked)
+
+    # --- every supported codec ----------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("codec", "encoding"),
+        [
+            ("gzip", "gzip"),
+            ("x-gzip", "x-gzip"),
+            ("deflate", "deflate"),
+            ("br", "br"),
+            ("zstd", "zstd"),
+        ],
+    )
+    @coroutine_test
+    async def test_ratio_rejected_each_codec(
+        self, codec: str, encoding: str
+    ) -> None:
+        body = _compress(codec.encode(), b"a" * 200_000)
+        response = self._response(body, encoding=encoding)
+        mw = self._mw(COMPRESSION_MAX_RATIO=10.0, COMPRESSION_RATIO_MIN_SIZE=0)
+        with pytest.raises(HttpCompressionRatioExceeded):
+            await mw.process_response(response.request, response)
+        assert mw.stats.get_value("httpcompression/ratio_rejected") == 1
+        assert mw.stats.get_value("httpcompression/size_rejected") is None
+
+    @pytest.mark.parametrize("codec", ["gzip", "deflate", "br", "zstd"])
+    @coroutine_test
+    async def test_ratio_accepted_each_codec(self, codec: str) -> None:
+        # Deterministic, nearly incompressible data keeps the ratio close to 1.
+        plain = bytes((i * 131 + 17) % 256 for i in range(8_192))
+        body = _compress(codec.encode(), plain)
+        response = self._response(body, encoding=codec)
+        mw = self._mw(COMPRESSION_MAX_RATIO=100.0, COMPRESSION_RATIO_MIN_SIZE=0)
+        new_response = await mw.process_response(response.request, response)
+        assert new_response.body == plain
+        assert mw.stats.get_value("httpcompression/response_count") == 1
+        assert mw.stats.get_value("httpcompression/ratio_rejected") is None
+
+    # --- empty compressed input ---------------------------------------------
+
+    @pytest.mark.parametrize("codec", ["gzip", "deflate", "br", "zstd"])
+    @coroutine_test
+    async def test_empty_compressed_input_exempt(self, codec: str) -> None:
+        # Zero-byte compressed inputs decode to zero-byte outputs and have no
+        # defined ratio (0 / 0): they are accepted even with a tiny budget.
+        response = self._response(b"", encoding=codec)
+        mw = self._mw(COMPRESSION_MAX_RATIO=0.5, COMPRESSION_RATIO_MIN_SIZE=0)
+        new_response = await mw.process_response(response.request, response)
+        assert new_response.body == b""
+        assert mw.stats.get_value("httpcompression/ratio_rejected") is None
+
+    # --- multi-layer encodings ----------------------------------------------
+
+    @coroutine_test
+    async def test_multi_layer_uses_full_wire_input_denominator(self) -> None:
+        # gzip(gzip(plain)) where the inner stream is a concatenation of many
+        # gzip members. With a per-layer-local denominator both layers pass the
+        # budget; with the full wire input as denominator the total expansion
+        # rejects it. This is the bypass the full-input denominator closes.
+        members = [_gzip_bytes(b"q" * 50_000) for _ in range(30)]
+        inner = b"".join(members)
+        outer = _gzip_bytes(inner)
+        plain = gunzip(inner)
+        wire_size = len(outer)
+        layer1_ratio = len(inner) / wire_size
+        layer2_local_ratio = len(plain) / len(inner)
+        total_ratio = len(plain) / wire_size
+        # Structural guarantee of the bypass construction.
+        assert total_ratio > max(layer1_ratio, layer2_local_ratio)
+        budget = math.sqrt(max(layer1_ratio, layer2_local_ratio) * total_ratio)
+        assert layer1_ratio <= budget
+        assert layer2_local_ratio <= budget
+        assert total_ratio > budget
+
+        response = self._response(outer, encoding="gzip, gzip")
+        mw = self._mw(
+            COMPRESSION_MAX_RATIO=budget,
+            COMPRESSION_RATIO_MIN_SIZE=0,
+            COMPRESSION_MAX_ENCODINGS=2,
+        )
+        with pytest.raises(HttpCompressionRatioExceeded) as exc_info:
+            await mw.process_response(response.request, response)
+        cause = exc_info.value.__cause__
+        # The rejection always cites the full wire input as denominator.
+        assert cause.compressed_size == wire_size
+
+    @coroutine_test
+    async def test_multi_layer_each_layer_checked_against_wire_input(
+        self,
+    ) -> None:
+        # Incompressible inner content: the first layer expands slightly, and
+        # that expansion is itself checked against the full wire input.
+        plain = bytes((i * 131 + 17) % 256 for i in range(20_000))
+        inner = _gzip_bytes(plain, level=1)
+        outer = _gzip_bytes(inner, level=9)
+        wire_size = len(outer)
+        layer1_ratio = len(inner) / wire_size
+        total_ratio = len(plain) / wire_size
+
+        # Budget below the first layer's ratio: rejection happens at layer 1.
+        response = self._response(outer, encoding="gzip, gzip")
+        mw = self._mw(
+            COMPRESSION_MAX_RATIO=layer1_ratio - 1e-9,
+            COMPRESSION_RATIO_MIN_SIZE=0,
+            COMPRESSION_MAX_ENCODINGS=2,
+        )
+        with pytest.raises(HttpCompressionRatioExceeded) as exc_info:
+            await mw.process_response(response.request, response)
+        assert exc_info.value.__cause__.decompressed_size == len(inner)
+        assert exc_info.value.__cause__.compressed_size == wire_size
+
+        # Budget at the exact total ratio: both layers pass and decoding wins.
+        accepted = self._response(outer, encoding="gzip, gzip")
+        mw_ok = self._mw(
+            COMPRESSION_MAX_RATIO=total_ratio,
+            COMPRESSION_RATIO_MIN_SIZE=0,
+            COMPRESSION_MAX_ENCODINGS=2,
+        )
+        new_response = await mw_ok.process_response(accepted.request, accepted)
+        assert new_response.body == plain
+
+    @coroutine_test
+    async def test_multi_layer_mixed_codecs(self) -> None:
+        # Content-Encoding "gzip, deflate": deflate was applied last, so the
+        # wire body is deflate(gzip(plain)) and deflate is decoded first.
+        plain = b"z" * 100_000
+        body = zlib.compress(_gzip_bytes(plain), 9)
+        response = self._response(body, encoding="gzip, deflate")
+        mw = self._mw(
+            COMPRESSION_MAX_RATIO=10.0,
+            COMPRESSION_RATIO_MIN_SIZE=0,
+            COMPRESSION_MAX_ENCODINGS=2,
+        )
+        with pytest.raises(HttpCompressionRatioExceeded):
+            await mw.process_response(response.request, response)
+
+    # --- multi-member gzip ---------------------------------------------------
+
+    @coroutine_test
+    async def test_multi_member_gzip_cannot_bypass_ratio(self) -> None:
+        # Concatenated gzip members: the denominator is the whole concatenated
+        # wire body, never reset per member.
+        members = [_gzip_bytes(b"a" * 50_000) for _ in range(30)]
+        body = b"".join(members)
+        total_plain = 30 * 50_000
+        exact_ratio = total_plain / len(body)
+        assert len(body) >= 1024
+
+        response = self._response(body)
+        mw_ok = self._mw(
+            COMPRESSION_MAX_RATIO=exact_ratio, COMPRESSION_RATIO_MIN_SIZE=1024
+        )
+        new_response = await mw_ok.process_response(response.request, response)
+        assert new_response.body == b"a" * total_plain
+
+        rejected = self._response(body)
+        mw_bad = self._mw(
+            COMPRESSION_MAX_RATIO=exact_ratio - 1e-12,
+            COMPRESSION_RATIO_MIN_SIZE=1024,
+        )
+        with pytest.raises(HttpCompressionRatioExceeded):
+            await mw_bad.process_response(rejected.request, rejected)
+
+    # --- truncated input -----------------------------------------------------
+
+    @coroutine_test
+    async def test_truncated_body_checked_with_partial_output(self) -> None:
+        full = _gzip_bytes(b"x" * 5_000_000)
+        truncated = full[: len(full) // 2]
+        assert len(truncated) >= 1024
+        partial = gunzip(truncated)  # gunzip returns as much data as it can.
+        assert partial
+        assert len(partial) / len(truncated) > 1.0
+        response = self._response(truncated)
+        mw = self._mw(COMPRESSION_MAX_RATIO=1.0)
+        with pytest.raises(HttpCompressionRatioExceeded):
+            await mw.process_response(response.request, response)
+        assert mw.stats.get_value("httpcompression/ratio_rejected") == 1
+
+    # --- original objects untouched / no partial output leakage --------------
+
+    @coroutine_test
+    async def test_rejection_does_not_mutate_response_or_request(self) -> None:
+        body = _gzip_bytes(b"a" * 200_000)
+        response = self._response(body)
+        request = response.request
+        original_encoding = response.headers.getlist("Content-Encoding")
+        original_body = response.body
+        original_request_headers = dict(request.headers)
+        mw = self._mw(COMPRESSION_MAX_RATIO=1.0, COMPRESSION_RATIO_MIN_SIZE=0)
+        with pytest.raises(HttpCompressionRatioExceeded):
+            await mw.process_response(request, response)
+        assert response.body == original_body
+        assert response.headers.getlist("Content-Encoding") == original_encoding
+        assert dict(request.headers) == original_request_headers
+        # No partial decoding products leak into the success stats.
+        assert mw.stats.get_value("httpcompression/response_count") is None
+        assert mw.stats.get_value("httpcompression/response_bytes") is None
+        assert mw.stats.get_value("httpcompression/ratio_rejected") == 1
+
+    # --- distinct ratio vs size stats ---------------------------------------
+
+    @coroutine_test
+    async def test_size_rejection_uses_separate_stat(self) -> None:
+        samplefile = SAMPLEDIR / "bomb-gzip.bin"
+        body = samplefile.read_bytes()
+        response = self._response(body)
+        crawler = get_crawler(Spider, settings_dict={"DOWNLOAD_MAXSIZE": 1_000_000})
+        spider = crawler._create_spider("scrapytest.org")
+        mw = build_from_crawler(HttpCompressionMiddleware, crawler)
+        mw.open_spider(spider)
+        crawler.stats.open_spider()
+        with pytest.raises(IgnoreRequest) as exc_info:
+            await mw.process_response(response.request, response)
+        assert not isinstance(exc_info.value, HttpCompressionRatioExceeded)
+        assert isinstance(exc_info.value.__cause__, _DecompressionMaxSizeExceeded)
+        assert mw.stats.get_value("httpcompression/size_rejected") == 1
+        assert mw.stats.get_value("httpcompression/ratio_rejected") is None
+
+    @coroutine_test
+    async def test_ratio_and_size_limits_coexist(self) -> None:
+        # The ratio limit trips first; DOWNLOAD_MAXSIZE remains in force
+        # independently and neither weakens the encoding-count limit.
+        body = _gzip_bytes(b"a" * 200_000)
+        response = self._response(body)
+        mw = self._mw(
+            COMPRESSION_MAX_RATIO=1.0,
+            COMPRESSION_RATIO_MIN_SIZE=0,
+            DOWNLOAD_MAXSIZE=10_000_000,
+        )
+        with pytest.raises(HttpCompressionRatioExceeded):
+            await mw.process_response(response.request, response)
+        assert mw.stats.get_value("httpcompression/ratio_rejected") == 1
+        assert mw.stats.get_value("httpcompression/size_rejected") is None
+
+    # --- unknown encoding stays compatible -----------------------------------
+
+    @coroutine_test
+    async def test_unknown_encoding_kept_with_ratio_enabled(self) -> None:
+        plain = b"<!DOCTYPE html>"
+        response = Response(
+            "http://scrapytest.org/",
+            body=plain,
+            headers={"Content-Encoding": "uuencode"},
+        )
+        response.request = Request("http://scrapytest.org")
+        mw = self._mw(COMPRESSION_MAX_RATIO=1.0)
+        new_response = await mw.process_response(response.request, response)
+        assert new_response.headers.getlist("Content-Encoding") == [b"uuencode"]
+        assert new_response.body == plain
+        assert mw.stats.get_value("httpcompression/ratio_rejected") is None
+
+    # --- missing optional decoding libraries ---------------------------------
+
+    @coroutine_test
+    async def test_missing_brotli_library_treated_as_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scrapy.utils._compression as compression_mod
+
+        monkeypatch.setattr(compression_mod, "brotli", None)
+        body = brotli.compress(b"a" * 4_096)
+        response = self._response(body, encoding="br")
+        mw = self._mw(COMPRESSION_MAX_RATIO=1.0)
+        # A missing optional library must not crash: the coding is kept on the
+        # response, exactly like an unknown encoding.
+        new_response = await mw.process_response(response.request, response)
+        assert new_response.headers.getlist("Content-Encoding") == [b"br"]
+        assert new_response.body == body
+        assert mw.stats.get_value("httpcompression/ratio_rejected") is None
+
+    @coroutine_test
+    async def test_missing_zstd_library_treated_as_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scrapy.utils._compression as compression_mod
+
+        monkeypatch.setattr(compression_mod, "zstd", None)
+        body = zstd.compress(b"a" * 4_096)
+        response = self._response(body, encoding="zstd")
+        mw = self._mw(COMPRESSION_MAX_RATIO=1.0)
+        new_response = await mw.process_response(response.request, response)
+        assert new_response.headers.getlist("Content-Encoding") == [b"zstd"]
+        assert new_response.body == body
+        assert mw.stats.get_value("httpcompression/ratio_rejected") is None
+
+    @coroutine_test
+    async def test_gzip_works_with_optional_libraries_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scrapy.utils._compression as compression_mod
+
+        monkeypatch.setattr(compression_mod, "brotli", None)
+        monkeypatch.setattr(compression_mod, "zstd", None)
+        body = _gzip_bytes(b"a" * 4_096)
+        response = self._response(body)
+        mw = self._mw(COMPRESSION_MAX_RATIO=100.0)
+        new_response = await mw.process_response(response.request, response)
+        assert new_response.body == b"a" * 4_096
+
+    @coroutine_test
+    async def test_missing_libraries_not_advertised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import scrapy.utils._compression as compression_mod
+
+        monkeypatch.setattr(compression_mod, "brotli", None)
+        monkeypatch.setattr(compression_mod, "zstd", None)
+        mw = self._mw()
+        request = Request("http://scrapytest.org")
+        mw.process_request(request)
+        assert request.headers.get("Accept-Encoding") == b"gzip, deflate"
+
+        monkeypatch.undo()
+        request2 = Request("http://scrapytest.org")
+        mw.process_request(request2)
+        assert request2.headers.get("Accept-Encoding") == b", ".join(
+            ACCEPTED_ENCODINGS
+        )
+
+    def test_decompression_errors_include_installed_library_classes(self) -> None:
+        # With the libraries installed the registry keeps their error types,
+        # and drops them gracefully when absent (see monkeypatched tests above).
+        import scrapy.utils._compression as compression_mod
+
+        assert compression_mod.brotli is not None
+        assert compression_mod.zstd is not None
+        assert compression_mod.brotli.error in compression_mod._DECOMPRESSION_ERRORS
+        assert compression_mod.zstd.ZstdError in compression_mod._DECOMPRESSION_ERRORS
+
+
+_MISSING_LIB_SCRIPT = """
+import sys
+
+
+class _ImportBlocker:
+    def find_spec(self, name, path, target=None):
+        if name in ("brotli", "backports.zstd", "compression.zstd"):
+            raise ImportError(f"blocked {name}")
+        return None
+
+
+sys.meta_path.insert(0, _ImportBlocker())
+sys.modules.pop("brotli", None)
+sys.modules.pop("backports.zstd", None)
+
+import scrapy.utils._compression as compression_mod
+from scrapy.downloadermiddlewares.httpcompression import HttpCompressionMiddleware
+
+assert compression_mod.brotli is None
+assert compression_mod.zstd is None
+assert HttpCompressionMiddleware._accepted_encodings() == [b"gzip", b"deflate"]
+
+# Direct helper use raises ImportError; the middleware never reaches them
+# because the codings are treated as unknown.
+for helper in (compression_mod._unbrotli, compression_mod._unzstd):
+    try:
+        helper(b"x")
+    except ImportError:
+        pass
+    else:
+        raise AssertionError("expected ImportError")
+
+# Built-in codecs keep working without the optional libraries.
+from gzip import GzipFile
+from io import BytesIO
+
+from scrapy.utils._compression import gunzip
+
+buf = BytesIO()
+with GzipFile(fileobj=buf, mode="wb") as f:
+    f.write(b"hello")
+assert gunzip(buf.getvalue()) == b"hello"
+print("missing optional libraries handled")
+"""
+
+
+def test_missing_optional_libraries_subprocess(
+    tmp_path: Path,
+) -> None:
+    """A fresh interpreter without brotli/zstd imports Scrapy fine and only
+    advertises the built-in gzip/deflate codings."""
+    script = tmp_path / "missing_libs.py"
+    script.write_text(_MISSING_LIB_SCRIPT)
+    result = subprocess.run(
+        [sys.executable, "-I", str(script)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "missing optional libraries handled" in result.stdout

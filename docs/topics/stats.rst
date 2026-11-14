@@ -476,6 +476,31 @@ one per actual value of the placeholder.
     Set by
     :class:`~scrapy.downloadermiddlewares.httpcompression.HttpCompressionMiddleware`.
 
+.. stat:: httpcompression/ratio_rejected
+
+``httpcompression/ratio_rejected``
+    Number of responses dropped with
+    :class:`~scrapy.downloadermiddlewares.httpcompression.HttpCompressionRatioExceeded`
+    because their decompression ratio exceeded
+    :setting:`COMPRESSION_MAX_RATIO`.
+
+    .. versionadded:: 2.20.0
+
+    Set by
+    :class:`~scrapy.downloadermiddlewares.httpcompression.HttpCompressionMiddleware`.
+
+.. stat:: httpcompression/size_rejected
+
+``httpcompression/size_rejected``
+    Number of responses dropped with
+    :exc:`~scrapy.exceptions.IgnoreRequest` because their decompressed size
+    exceeded :setting:`DOWNLOAD_MAXSIZE` during decompression.
+
+    .. versionadded:: 2.20.0
+
+    Set by
+    :class:`~scrapy.downloadermiddlewares.httpcompression.HttpCompressionMiddleware`.
+
 .. stat:: httperror/response_ignored_count
 
 ``httperror/response_ignored_count``

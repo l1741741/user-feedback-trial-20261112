@@ -3,6 +3,33 @@
 Release notes
 =============
 
+Unreleased
+----------
+
+New features
+~~~~~~~~~~~~
+
+-   :class:`~scrapy.downloadermiddlewares.httpcompression.HttpCompressionMiddleware`
+    now supports the new :setting:`COMPRESSION_MAX_RATIO` and
+    :setting:`COMPRESSION_RATIO_MIN_SIZE` settings, disabled by default, that
+    let you cap the decompression ratio of responses (decompressed size over
+    the size of the full compressed input). Responses that exceed the cap are
+    dropped with
+    :class:`~scrapy.downloadermiddlewares.httpcompression.HttpCompressionRatioExceeded`
+    and counted in the :stat:`httpcompression/ratio_rejected` stat, separately
+    from :stat:`httpcompression/size_rejected`, which counts
+    :setting:`DOWNLOAD_MAXSIZE` rejections. The check applies to every
+    decoding layer of a multi-layer ``Content-Encoding``, always using the full
+    on-the-wire compressed body as the denominator, so short intermediate
+    layers and multi-member gzip bodies cannot bypass it.
+
+-   The ``brotli`` and zstd (``backports.zstd`` or stdlib ``compression.zstd``)
+    decoding libraries are now optional at runtime. When one is missing, the
+    corresponding coding is no longer advertised in ``Accept-Encoding`` and, if
+    a server sends it anyway, it is kept on the response like an unsupported
+    encoding instead of raising an error.
+
+
 Scrapy 2.20.0 (2026-11-06)
 --------------------------
 

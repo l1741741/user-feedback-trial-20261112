@@ -20,6 +20,8 @@ the :ref:`download handler exceptions <download-handlers-exceptions>`.
 
 .. autoexception:: IgnoreRequest
 
+.. autoexception:: scrapy.downloadermiddlewares.httpcompression.HttpCompressionRatioExceeded
+
 .. autoexception:: NotConfigured
 
 .. autoexception:: NotSupported
