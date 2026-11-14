@@ -232,6 +232,7 @@ __all__ = [
     "STATSMAILER_RCPTS",
     "STATS_CLASS",
     "STATS_DUMP",
+    "STATS_JSON_PATH",
     "STICKY_META_KEYS",
     "TELNETCONSOLE_ENABLED",
     "TELNETCONSOLE_HOST",
@@ -648,6 +649,7 @@ SPIDER_MODULES: list[str] = []
 
 STATS_CLASS = "scrapy.statscollectors.MemoryStatsCollector"
 STATS_DUMP = True
+STATS_JSON_PATH = None
 
 STATSMAILER_RCPTS: list[str] = []
 

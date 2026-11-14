@@ -9,6 +9,7 @@ import pprint
 from collections.abc import MutableMapping
 from typing import TYPE_CHECKING, Any, TypeAlias
 
+from scrapy.utils._stats_json import _write_stats_snapshot
 from scrapy.utils.decorators import _warn_spider_arg
 
 if TYPE_CHECKING:
@@ -46,8 +47,12 @@ class StatsCollector(MutableMapping[str, Any]):
 
     def __init__(self, crawler: Crawler):
         self._dump: bool = crawler.settings.getbool("STATS_DUMP")
+        self._json_path: str | None = crawler.settings.get("STATS_JSON_PATH")
         self._stats: StatsT = {}
         self._crawler: Crawler = crawler
+        # True once a JSON snapshot has been written successfully, so a
+        # repeated close_spider() call never overwrites the frozen snapshot.
+        self._json_snapshot_frozen: bool = False
         for name in _SPIDER_ARG_METHODS:
             setattr(self, name, _warn_spider_arg(getattr(self, name)))
 
@@ -107,7 +112,27 @@ class StatsCollector(MutableMapping[str, Any]):
                 f"Dumping Scrapy stats:\n{self}",
                 extra={"spider": self._crawler.spider},
             )
+        self._write_json_snapshot(reason)
         self._persist_stats(self._stats)
+
+    def _write_json_snapshot(self, reason: str | None) -> None:
+        if not self._json_path or self._json_snapshot_frozen:
+            return
+        spider_name = self._crawler.spider.name if self._crawler.spider else None
+        try:
+            frozen = _write_stats_snapshot(
+                self._json_path, spider_name, reason, self._stats
+            )
+        except Exception:
+            # A failed snapshot must not break the rest of the shutdown
+            # sequence; the previous snapshot, if any, stays in place and
+            # another close_spider() call may retry the write.
+            logger.exception(
+                f"Could not write the JSON stats snapshot to {self._json_path!r}"
+            )
+            return
+        if frozen:
+            self._json_snapshot_frozen = True
 
     def _persist_stats(self, stats: StatsT) -> None:
         pass

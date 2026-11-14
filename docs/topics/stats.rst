@@ -97,6 +97,77 @@ stat, and with :class:`DummyStatsCollector` every stat is missing.
 
 .. skip: end
 
+.. _topics-stats-json:
+
+JSON stats snapshot
+===================
+
+.. versionadded:: VERSION
+
+Set the :setting:`STATS_JSON_PATH` setting to write the stats of a crawl to a
+UTF-8 JSON file when the spider closes. The setting is unset by default, so no
+file is created unless you opt in. The snapshot is written atomically: data
+goes to a temporary file in the same directory, which is flushed and
+:func:`fsync'ed <os.fsync>` before replacing the destination, so a reader
+never sees a partially written file, and a failed write leaves the previous
+snapshot, if any, untouched.
+
+The snapshot is a JSON object with the following keys, always emitted in
+sorted order:
+
+-   ``close_reason``: the *reason* argument of the :signal:`spider_closed`
+    signal, or ``null`` when none was given.
+
+-   ``spider_name``: the :attr:`~scrapy.Spider.name` of the closed spider, or
+    ``null`` when no spider is available.
+
+-   ``stats``: an independent deep copy of the stats at close time. Later
+    changes to the live stats never affect the written snapshot.
+
+-   ``unsupported_types``: a list of entries for values that could not be
+    serialized. Each entry holds a ``path`` (the location inside ``stats``,
+    e.g. ``stats.my_stat[0]``) and a ``type`` (the import path of the
+    value's class). Such values are written as ``null`` and a warning is
+    logged for each one.
+
+Values are converted as follows:
+
+-   :class:`~datetime.datetime` objects become timezone-aware ISO 8601
+    strings. A naive datetime is assumed to be in UTC.
+
+-   :class:`~datetime.timedelta` objects become a number of seconds, as
+    returned by :meth:`~datetime.timedelta.total_seconds`.
+
+-   :class:`bytes` objects become an object with a single
+    ``"__scrapy_bytes_base64__"`` key holding the standard Base64 encoding of
+    the bytes, which can be decoded losslessly with
+    :func:`base64.b64decode`.
+
+-   :class:`tuples <tuple>` become JSON arrays, and mappings become JSON
+    objects.
+
+For example, the snapshot of a crawl may look like:
+
+.. code-block:: json
+
+    {
+      "close_reason": "finished",
+      "spider_name": "myspider",
+      "stats": {
+        "elapsed_time_seconds": 1.5,
+        "finish_time": "2026-01-01T00:00:01.500000+00:00",
+        "response_received_count": 1,
+        "start_time": "2026-01-01T00:00:00+00:00"
+      },
+      "unsupported_types": []
+    }
+
+A failure while serializing or writing the snapshot is logged and never
+interrupts the rest of the spider shutdown, including in-memory stats
+persistence. A successful snapshot is frozen: if the stats collector is
+closed more than once, later calls do not overwrite it, while a close that
+failed to write the snapshot may retry on the next call.
+
 Available Stats Collectors
 ==========================
 

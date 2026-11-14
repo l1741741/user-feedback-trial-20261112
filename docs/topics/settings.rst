@@ -2407,6 +2407,22 @@ finishes.
 
 For more info see: :ref:`topics-stats`.
 
+.. setting:: STATS_JSON_PATH
+
+STATS_JSON_PATH
+---------------
+
+.. versionadded:: VERSION
+
+Default: ``None``
+
+A path to a file where a :ref:`JSON stats snapshot <topics-stats-json>` is
+written when the spider closes. When unset (the default), no file is created.
+
+The path may contain a ``%(spider)s`` placeholder, replaced with the
+:attr:`~scrapy.Spider.name` of the spider, percent-encoded so it cannot add
+path separators, e.g. ``"stats/%(spider)s.json"``.
+
 .. setting:: STICKY_META_KEYS
 
 STICKY_META_KEYS
