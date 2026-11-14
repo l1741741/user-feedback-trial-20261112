@@ -171,6 +171,9 @@ specify a path (e.g. ``/tmp/export.csv``). Alternatively, you can use a
 Supported :ref:`modes <feed-mode>`: ``"append"``, ``"create"`` and
 ``"overwrite"``. If :setting:`FEED_MODE` is ``None``, ``"append"`` is used.
 
+This is the only built-in storage backend that supports
+:ref:`digest manifests <feed-digest>` (the ``digest`` feed option).
+
 .. _topics-feed-storage-ftp:
 .. _feed-storage-ftp:
 
@@ -370,6 +373,18 @@ URI scheme through the :setting:`FEED_STORAGES` setting.
       :exc:`FileExistsError` if the target exists. Scrapy then handles that
       file as described in :setting:`FEED_MODE`.
 
+   .. attribute:: supports_digest
+      :type: bool
+
+      Optional flag, ``False`` when absent. Set it to ``True`` to allow the
+      ``digest`` :ref:`feed option <feed-options>` (see
+      :ref:`feed-digest`) with this storage. Such a storage must keep the
+      feed on the local filesystem and expose a ``path`` attribute pointing
+      at the stored file: after ``store()`` succeeds, Scrapy reads that file
+      back to hash its final bytes and publishes the manifest next to it.
+      Remote storages must not enable it, because Scrapy must not download
+      their output back just to compute a digest.
+
 If your storage backend blocks, subclass
 :class:`~scrapy.extensions.feedexport.BlockingFeedStorage` instead: it writes
 items into a temporary local file (see :ref:`delayed file delivery
@@ -518,6 +533,7 @@ Settings
 These are the settings used for configuring the feed exports:
 
 -   :setting:`FEEDS` (mandatory)
+-   :setting:`FEED_DIGEST`
 -   :setting:`FEED_EXPORT_ENCODING`
 -   :setting:`FEED_MODE`
 -   :setting:`FEED_STORE_EMPTY`
@@ -577,6 +593,10 @@ For instance:
             "postprocessing": [MyPlugin1, "scrapy.extensions.postprocessing.GzipPlugin"],
             "gzip_compresslevel": 5,
         },
+        "verified_items.jsonl": {
+            "format": "jsonlines",
+            "digest": True,
+        },
     }
 
 .. _feed-options:
@@ -592,6 +612,15 @@ as a fallback value if that key is not provided for a specific feed definition:
 
 -   ``batch_item_count``: falls back to
     :setting:`FEED_EXPORT_BATCH_ITEM_COUNT`.
+
+-   ``digest``: falls back to :setting:`FEED_DIGEST`.
+
+    .. versionadded:: 2.21.0
+
+    When ``True``, a SHA-256 :ref:`digest manifest <feed-digest>` is
+    published next to the feed file once it has been stored successfully.
+    Only :ref:`local filesystem <topics-feed-storage-fs>` feeds support it;
+    requesting it for another storage backend stops the crawl with an error.
 
 -   ``encoding``: falls back to :setting:`FEED_EXPORT_ENCODING`.
 
@@ -718,6 +747,94 @@ Whether to export empty feeds (i.e. feeds with no items).
 If ``False``, and there are no items to export, no new files are created and
 existing files are not modified, even if the ``mode`` :ref:`feed option
 <feed-options>` is ``"overwrite"``.
+
+.. setting:: FEED_DIGEST
+
+FEED_DIGEST
+-----------
+
+.. versionadded:: 2.21.0
+
+Default: ``False``
+
+Whether to publish a :ref:`digest manifest <feed-digest>` next to every feed
+of a :ref:`local filesystem <topics-feed-storage-fs>` storage. Can be
+overridden with the ``digest`` :ref:`feed option <feed-options>`.
+
+It is only supported by storage backends that keep the feed on the local
+filesystem and can therefore read it back after storing it. Enabling it for a
+feed that uses another storage backend, such as :ref:`S3
+<topics-feed-storage-s3>`, :ref:`GCS <topics-feed-storage-gcs>`,
+:ref:`FTP/FTPS <feed-storage-ftp>` or the :ref:`standard output
+<topics-feed-storage-stdout>`, raises an error when the crawler starts:
+Scrapy does not download a remote feed back to hash it, because that would
+duplicate data transfers and still could not verify what the remote server
+actually stores. A custom storage backend may opt in by setting
+``supports_digest = True`` and exposing a ``path`` attribute that points at
+the stored feed file.
+
+.. _feed-digest:
+
+Digest manifests
+----------------
+
+.. versionadded:: 2.21.0
+
+Offline consumers of a feed need to make sure that its file was transferred
+completely. When the ``digest`` :ref:`feed option <feed-options>` (or the
+:setting:`FEED_DIGEST` setting) is enabled, Scrapy publishes, next to every
+stored feed file ``<feed>``, a JSON manifest named
+``<feed>.manifest.json`` that describes the final stored file, for example
+``items.jsonl.manifest.json`` for an ``items.jsonl`` feed:
+
+.. code-block:: json
+
+    {
+      "algorithm": "sha256",
+      "batch_id": 1,
+      "byte_count": 42,
+      "digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "file_name": "items.jsonl",
+      "format": "jsonlines",
+      "item_count": 2
+    }
+
+The fields are:
+
+-   ``algorithm``: hash algorithm, currently always ``"sha256"``.
+-   ``batch_id``: 1-based :setting:`FEED_EXPORT_BATCH_ITEM_COUNT` batch
+    identifier of the feed file, ``1`` when batching is disabled.
+-   ``byte_count``: number of bytes of the stored feed file.
+-   ``digest``: hexadecimal SHA-256 digest of the stored feed file.
+-   ``file_name``: name of the feed file, without any directory component.
+-   ``format``: :ref:`serialization format <topics-feed-format>` of the feed.
+-   ``item_count``: number of items written into the feed file.
+
+The digest is computed from the bytes of the feed file **as finally stored
+on disk**, after the storage has been closed and by reading the whole file
+back from disk. It therefore covers the output of every
+:ref:`post-processing <post-processing>` plugin, including compression: for
+a gzip feed the digest and byte count describe the compressed ``.gz`` file,
+not the items before compression. A consumer can verify a transferred file
+by hashing the bytes it received and comparing the digest and byte count
+with the manifest.
+
+A manifest is only published when the storage of the feed closed
+successfully and the whole feed file could be read back and hashed. The
+manifest is first written to a temporary file in the same directory as its
+destination and then atomically renamed into place, so consumers never
+observe a half-written manifest. If the export, the read-back or the
+manifest write fails, the manifest of the previous, still valid export is
+left untouched and the temporary files are removed; the
+``feedexport/digest_failed/<storage class name>`` :ref:`stat <topics-stats>`
+is increased instead. The ``feedexport/digest_count/<storage class name>``
+stat counts the manifests that were published.
+
+With :setting:`batching <FEED_EXPORT_BATCH_ITEM_COUNT>`, each batch file gets
+its own manifest, carrying the batch identifier and the item count of that
+batch. When the feed ``mode`` is ``"append"``, the digest and byte count
+describe the whole appended file, while the item count describes only the
+items of the latest export.
 
 .. setting:: FEED_STORAGES
 

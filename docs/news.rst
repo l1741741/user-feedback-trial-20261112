@@ -3,6 +3,26 @@
 Release notes
 =============
 
+Scrapy 2.21.0 (unreleased)
+--------------------------
+
+New features
+~~~~~~~~~~~~
+
+-   Local filesystem feeds can now publish a :ref:`digest manifest
+    <feed-digest>` next to each stored feed file through the new ``digest``
+    :ref:`feed option <feed-options>` and :setting:`FEED_DIGEST` setting.
+
+    The manifest records the feed file name, its byte count, the
+    serialization format, the number of exported items, the batch
+    identifier and a SHA-256 digest of the final stored bytes, including
+    compression and other post-processing output, letting offline consumers
+    verify that a feed file was transferred completely. The manifest is
+    published atomically only after the feed storage closed successfully
+    and the whole file was read back and hashed; a failed export keeps the
+    previous manifest untouched. The feature is disabled by default and is
+    refused for storage backends that cannot read their output back.
+
 Scrapy 2.20.0 (2026-11-06)
 --------------------------
 

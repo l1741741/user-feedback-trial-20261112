@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import logging
+import os
 import re
 import sys
 import warnings
@@ -88,6 +91,105 @@ _ItemProcessor: TypeAlias = Callable[[Any], Iterable[Any]]
 
 
 _FEED_MODES: frozenset[str] = frozenset({"append", "create", "overwrite"})
+
+#: Suffix appended to a feed file path to get the path of its digest manifest,
+#: e.g. ``items.jsonl`` -> ``items.jsonl.manifest.json``.
+_FEED_DIGEST_MANIFEST_SUFFIX = ".manifest.json"
+
+#: Content of the ``algorithm`` field of every digest manifest.
+_FEED_DIGEST_ALGORITHM = "sha256"
+
+
+def feed_digest_manifest_path(feed_path: str | os.PathLike[str]) -> Path:
+    """Return the path of the digest manifest of the feed at *feed_path*."""
+    return Path(feed_path).with_name(
+        Path(feed_path).name + _FEED_DIGEST_MANIFEST_SUFFIX
+    )
+
+
+def hash_stored_file(
+    feed_path: str | os.PathLike[str],
+) -> tuple[str, int]:
+    """Hash the bytes actually stored at *feed_path*.
+
+    The file is read back from disk in full after the storage has been
+    closed, so the hash always covers the final contents of the feed file,
+    including any :ref:`post-processing <post-processing>` output (e.g. gzip
+    compression), never the pre-compression items.
+
+    :return: the hexadecimal SHA-256 digest and the number of hashed bytes.
+    """
+    digest = hashlib.sha256()
+    size = 0
+    with Path(feed_path).open("rb") as file:
+        while chunk := file.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def _atomic_write_bytes(path: str | os.PathLike[str], data: bytes) -> None:
+    """Write *data* to *path* through a temporary file in the same directory,
+    then atomically replace *path* with it.
+
+    The temporary file is removed if the write or the replacement fails.
+    """
+    target = Path(path)
+    temporary = NamedTemporaryFile(
+        mode="wb",
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=target.parent,
+        delete=False,
+    )
+    try:
+        temporary.write(data)
+        temporary.flush()
+        os.fsync(temporary.fileno())
+        temporary.close()
+        Path(temporary.name).replace(target)
+    except BaseException:
+        temporary.close()
+        with contextlib.suppress(FileNotFoundError):
+            Path(temporary.name).unlink()
+        raise
+
+
+def publish_feed_digest(
+    *,
+    feed_path: str | os.PathLike[str],
+    format: str,  # noqa: A002
+    item_count: int,
+    batch_id: int,
+) -> Path:
+    """Read back the stored feed at *feed_path*, build its SHA-256 digest
+    manifest and publish it atomically.
+
+    The digest is computed from the final stored bytes (see
+    :func:`hash_stored_file`), so it matches what an offline consumer reads.
+    The manifest is first written to a temporary file in the same directory
+    as the destination manifest, and only renamed into place once the whole
+    feed file could be read back and hashed; a failed export therefore leaves
+    any previously published manifest untouched.
+
+    :return: the path of the published manifest.
+    """
+    checksum, size = hash_stored_file(feed_path)
+    manifest = {
+        "algorithm": _FEED_DIGEST_ALGORITHM,
+        "batch_id": batch_id,
+        "byte_count": size,
+        "digest": checksum,
+        "file_name": Path(feed_path).name,
+        "format": format,
+        "item_count": item_count,
+    }
+    manifest_path = feed_digest_manifest_path(feed_path)
+    _atomic_write_bytes(
+        manifest_path,
+        json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8") + b"\n",
+    )
+    return manifest_path
 
 
 def _get_mode(storage: Any, feed_options: dict[str, Any] | None, legacy: str) -> str:
@@ -196,6 +298,15 @@ class FeedStorageProtocol(Protocol):
         """
 
 
+#: Storages that set this attribute to ``True`` can publish a digest
+#: manifest (see the ``digest`` feed option). They must expose a local
+#: ``path`` attribute pointing at the stored feed file, so that the file can
+#: be read back for hashing after :meth:`FeedStorageProtocol.store` succeeds.
+#:
+#: .. versionadded:: 2.21.0
+_DIGEST_CAPABILITY_ATTR = "supports_digest"
+
+
 class BlockingFeedStorage(ABC):
     """Base class for feed storages that store feeds using blocking code."""
 
@@ -257,6 +368,12 @@ class FileFeedStorage:
     """
 
     supported_modes: frozenset[str] = _FEED_MODES
+
+    # The stored file stays on the local machine, so it can be read back to
+    # compute and publish a digest manifest (the "digest" feed option).
+    #
+    # .. versionadded:: 2.21.0
+    supports_digest: bool = True
 
     def __init__(self, uri: str, *, feed_options: dict[str, Any] | None = None):
         self.path: str = file_uri_to_path(uri) if uri.startswith("file:") else uri
@@ -923,10 +1040,66 @@ class FeedExporter:
         else:
             logger.info("Stored %s", logmsg, extra={"spider": spider})
             self.crawler.stats.inc_value(f"feedexport/success_count/{slot_type}")
+            if slot.feed_options["digest"]:
+                self._publish_slot_digest(slot, spider, slot_type, logmsg)
 
         await self.crawler.signals.send_catch_log_async(
             signals.feed_slot_closed, slot=slot
         )
+
+    def _publish_slot_digest(
+        self,
+        slot: FeedSlot,
+        spider: Spider,
+        slot_type: str,
+        logmsg: str,
+    ) -> None:
+        """Publish the digest manifest of a slot whose feed was stored
+        successfully.
+
+        The digest is computed by reading the final stored file back from the
+        storage, including compression and other post-processing output, and
+        the manifest is published through an atomic replacement. A failure to
+        read the file back or write the manifest does not remove the feed or
+        any previously valid manifest.
+        """
+        storage = slot.storage
+        if not getattr(storage, _DIGEST_CAPABILITY_ATTR, False):
+            # Already refused at startup, but do not assume custom storages
+            # keep their promises at runtime.
+            logger.error(
+                "Cannot publish the digest manifest of %s: %s does not "
+                "support digest manifests.",
+                slot.uri,
+                slot_type,
+                extra={"spider": spider},
+            )
+            self.crawler.stats.inc_value(f"feedexport/digest_failed/{slot_type}")
+            return
+        # Storages that set supports_digest contractually expose a local
+        # "path" attribute pointing at the stored feed file.
+        feed_path: str | os.PathLike[str] = storage.path  # type: ignore[attr-defined]
+        try:
+            manifest_path = publish_feed_digest(
+                feed_path=feed_path,
+                format=slot.format,
+                item_count=slot.itemcount,
+                batch_id=slot.batch_id,
+            )
+        except OSError:
+            logger.exception(
+                "Could not publish the digest manifest of %s",
+                logmsg,
+                extra={"spider": spider},
+            )
+            self.crawler.stats.inc_value(f"feedexport/digest_failed/{slot_type}")
+        else:
+            logger.info(
+                "Published digest manifest: %s",
+                manifest_path,
+                extra={"spider": spider},
+            )
+            self.crawler.stats.inc_value(f"feedexport/digest_count/{slot_type}")
 
     def _start_new_batch(
         self,
@@ -1065,14 +1238,39 @@ class FeedExporter:
             try:
                 storage = self._get_storage(uri, feed_options)
                 self._check_storage_mode(uri, storage, feed_options)
-                return True
             except NotConfigured as e:
                 logger.error(
                     "Disabled feed storage scheme: %(scheme)s. Reason: %(reason)s",
                     {"scheme": scheme, "reason": str(e)},
                 )
+            else:
+                return self._check_digest_support(uri, storage, feed_options)
         else:
             logger.error("Unknown feed storage scheme: %(scheme)s", {"scheme": scheme})
+        return False
+
+    @staticmethod
+    def _check_digest_support(
+        uri: str, storage: FeedStorageProtocol, feed_options: dict[str, Any]
+    ) -> bool:
+        """Return whether *storage* can publish the digest manifest requested
+        through *feed_options*. A storage that cannot read its output back
+        (remote storages, standard output) must not silently skip the
+        manifest instead of failing the crawl."""
+        if not feed_options["digest"] or getattr(
+            storage, _DIGEST_CAPABILITY_ATTR, False
+        ):
+            return True
+        logger.error(
+            "The digest feed option is only supported by feed storages that "
+            "keep the feed on the local filesystem and declare "
+            "%s=True. The storage of the %s feed (%s) does not, so no "
+            "digest manifest can be published. Disable the digest feed "
+            "option for that feed or use a local file URI.",
+            _DIGEST_CAPABILITY_ATTR,
+            uri,
+            type(storage).__name__,
+        )
         return False
 
     @staticmethod
