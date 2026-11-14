@@ -279,6 +279,52 @@ import path.
 
 .. autoclass:: scrapy.utils.request.RequestFingerprinter
 
+.. setting:: REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS
+
+REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: VERSION
+
+Default: ``[]``
+
+URL query parameter names to leave out of request fingerprints, which is
+useful for tracking parameters that make otherwise identical URLs differ.
+
+.. code-block:: python
+
+    REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS = ["utm_source", "utm_campaign"]
+
+Names are matched exactly, and case-sensitively, against the decoded name of
+each URL query parameter. A ``+`` in a name is a literal plus sign, while a
+space in the URL may be spelled either as ``+`` or as ``%20``. Every
+occurrence of a matching name is dropped, whether it has a value or not.
+Only the query part of the URL is affected, and requests themselves are not
+modified.
+
+A rule is a parameter name, not a query string, so it must be valid UTF-8
+after percent decoding. Malformed percent escapes, such as ``"%zz"`` or
+``"%2"``, and escapes that do not decode to UTF-8 are rejected with
+:exc:`ValueError`; non-string rules are rejected with :exc:`TypeError`. An
+empty list ignores nothing.
+
+The setting does not change the fingerprint of a request without query
+parameters, nor does it merge different request methods or bodies: a ``GET``
+and a ``POST`` with the same URL still get different fingerprints. The
+fingerprint cache keeps entries for different rule lists apart, so results
+are never reused across configurations, while repeated calls with the same
+request and rules are stable.
+
+This setting only applies to :class:`scrapy.utils.request.RequestFingerprinter`
+and to :func:`scrapy.utils.request.fingerprint` calls that pass
+*ignore_query_params*. A custom :setting:`REQUEST_FINGERPRINTER_CLASS` is not
+affected unless it uses them itself.
+
+.. note:: Changing this setting between crawls that share a :setting:`JOBDIR`
+    makes the stored fingerprints and the new ones incompatible, so the crawl
+    refuses to resume and asks for the original configuration or a new job
+    directory. See :ref:`job-dir-fingerprint-changes`.
+
 .. _custom-request-fingerprinter:
 
 Writing your own request fingerprinter
@@ -354,6 +400,10 @@ deduplicated URL yourself and delegate the rest to
                 deduped_request = request.replace(url=deduped_url)
                 self.cache[request] = fingerprint(deduped_request)
             return self.cache[request]
+
+To ignore known parameters, such as tracking parameters, instead of
+deduplicating repeated ones, set
+:setting:`REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS`.
 
 You can also write your own fingerprinting logic from scratch.
 

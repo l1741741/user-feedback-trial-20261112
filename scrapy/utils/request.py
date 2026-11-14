@@ -9,7 +9,7 @@ import hashlib
 import json
 import logging
 from typing import TYPE_CHECKING, Any, Protocol, Self
-from urllib.parse import urlunparse
+from urllib.parse import unquote_to_bytes, urlunparse
 from weakref import WeakKeyDictionary
 
 from w3lib.url import canonicalize_url
@@ -28,8 +28,104 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _decode_query_name_rule(name: str) -> bytes:
+    """Decode a query parameter name rule, rejecting malformed encoding.
+
+    Rules are names, not query strings, so a ``+`` in a rule stands for the
+    literal plus sign, which a URL only needs to escape as ``%2B``.
+    """
+    i = 0
+    while i < len(name):
+        if name[i] != "%":
+            i += 1
+            continue
+        if (
+            i + 2 >= len(name)
+            or name[i + 1] not in _HEX_DIGITS
+            or name[i + 2] not in _HEX_DIGITS
+        ):
+            raise ValueError(
+                f"Invalid query parameter name rule {name!r}:"
+                f" {name[i : i + 3]!r} is not a valid percent escape."
+            )
+        i += 3
+    raw_name = unquote_to_bytes(name)
+    try:
+        raw_name.decode()
+    except UnicodeDecodeError:
+        raise ValueError(
+            f"Invalid query parameter name rule {name!r}:"
+            " it does not decode to valid UTF-8."
+        ) from None
+    return raw_name
+
+
+def _decode_url_query_name(name: str) -> bytes:
+    """Decode a URL query parameter name the way form data is decoded.
+
+    ``+`` means a space, which is how canonical URLs spell spaces in the
+    query. Percent escapes are decoded to raw bytes, so names that are not
+    valid percent encoding or not valid UTF-8 decode to bytes that no rule
+    can match.
+    """
+    return unquote_to_bytes(name.replace("+", " "))
+
+
+def _decode_query_name_rules(names: Iterable[str], *, source: str) -> tuple[bytes, ...]:
+    if isinstance(names, (str, bytes)):
+        raise TypeError(f"{source} must be a list of strings, got {names!r}.")
+    rules: set[bytes] = set()
+    for name in names:
+        if not isinstance(name, str):
+            raise TypeError(f"{source} must contain only strings, got {name!r}.")
+        rules.add(_decode_query_name_rule(name))
+    return tuple(sorted(rules))
+
+
+def _filter_query_params(url: str, ignored: tuple[bytes, ...]) -> str:
+    """Drop query parameters whose decoded name is in *ignored*.
+
+    Parameters are checked one at a time, so every occurrence of an ignored
+    name goes away while other parameters keep their original spelling.
+    Only the query part is rebuilt; the rest of the URL is copied verbatim.
+    A URL with no matching parameter is returned unchanged.
+    """
+    fragment_start = url.find("#")
+    if fragment_start < 0:
+        url_without_fragment = url
+        fragment = ""
+    else:
+        url_without_fragment = url[:fragment_start]
+        fragment = url[fragment_start:]
+    query_start = url_without_fragment.find("?")
+    if query_start < 0:
+        return url
+    ignored_set = set(ignored)
+    kept: list[str] = []
+    removed = False
+    for field in url_without_fragment[query_start + 1 :].split("&"):
+        name, _, _ = field.partition("=")
+        if field and _decode_url_query_name(name) in ignored_set:
+            removed = True
+            continue
+        kept.append(field)
+    if not removed:
+        return url
+    new_query = "&".join(kept)
+    if new_query:
+        return f"{url_without_fragment[: query_start + 1]}{new_query}{fragment}"
+    return f"{url_without_fragment[:query_start]}{fragment}"
+
+
 _fingerprint_cache: WeakKeyDictionary[
-    Request, dict[tuple[tuple[bytes, ...] | None, bool, bool, str | None], bytes]
+    Request,
+    dict[
+        tuple[tuple[bytes, ...] | None, bool, bool, str | None, tuple[bytes, ...]],
+        bytes,
+    ],
 ] = WeakKeyDictionary()
 
 
@@ -38,6 +134,7 @@ def fingerprint(
     *,
     include_headers: Iterable[bytes | str] | None = None,
     keep_fragments: bool = False,
+    ignore_query_params: Iterable[str] | None = None,
 ) -> bytes:
     """
     Return the request fingerprint.
@@ -70,7 +167,36 @@ def fingerprint(
     keep_fragments is not a substitute for rendering JavaScript to reach
     content loaded based on the URL fragment; see
     :ref:`topics-dynamic-content` for that instead.
+
+    *ignore_query_params* is a list of URL query parameter names that are left
+    out of the fingerprint, which is useful for tracking parameters. Names
+    are matched exactly and case-sensitively against the decoded name of each
+    URL query parameter, and every occurrence of a matching name is dropped.
+    Only the query part of the URL is affected, and the request itself is
+    never modified. Rules are names, so a ``+`` is a literal plus sign, while
+    a space in the URL may be spelled either ``+`` or ``%20``.
     """
+    processed_ignore_query_params = (
+        ()
+        if ignore_query_params is None
+        else _decode_query_name_rules(ignore_query_params, source="ignore_query_params")
+    )
+    return _fingerprint(
+        request,
+        include_headers=include_headers,
+        keep_fragments=keep_fragments,
+        ignore_query_params=processed_ignore_query_params,
+    )
+
+
+def _fingerprint(
+    request: Request,
+    *,
+    include_headers: Iterable[bytes | str] | None = None,
+    keep_fragments: bool = False,
+    ignore_query_params: tuple[bytes, ...] = (),
+) -> bytes:
+    """Build the fingerprint, with query parameter rules already decoded."""
     processed_include_headers: tuple[bytes, ...] | None = None
     if include_headers:
         processed_include_headers = tuple(
@@ -84,11 +210,14 @@ def fingerprint(
     if handler_id is not None and handler_id == urlparse_cached(request).scheme:
         handler_id = None
     cache = _fingerprint_cache.setdefault(request, {})
-    cache_key = (
+    cache_key: tuple[
+        tuple[bytes, ...] | None, bool, bool, str | None, tuple[bytes, ...]
+    ] = (
         processed_include_headers,
         effective_keep_fragments,
         verbatim_url,
         handler_id,
+        ignore_query_params,
     )
     if cache_key not in cache:
         # To decode bytes reliably (JSON does not support bytes), regardless of
@@ -101,10 +230,11 @@ def fingerprint(
                         header_value.hex()
                         for header_value in request.headers.getlist(header)
                     ]
-        if verbatim_url:
-            url = request.url
-        else:
-            url = canonicalize_url(request.url, keep_fragments=keep_fragments)
+        url = request.url
+        if ignore_query_params:
+            url = _filter_query_params(url, ignore_query_params)
+        if not verbatim_url:
+            url = canonicalize_url(url, keep_fragments=keep_fragments)
         fingerprint_data = {
             "method": request.method,
             "url": url,
@@ -130,6 +260,10 @@ class RequestFingerprinter:
     .. versionchanged:: 2.20.0
        :reqmeta:`download_handler` is taken into account.
 
+    .. versionchanged:: VERSION
+       :setting:`REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS` is taken into
+       account.
+
     It takes into account a canonical version
     (:func:`w3lib.url.canonicalize_url`) of :attr:`request.url
     <scrapy.Request.url>` and the values of :attr:`request.method
@@ -138,6 +272,10 @@ class RequestFingerprinter:
     request. It also takes into account :reqmeta:`download_handler` when it
     does not match the URL scheme. It then generates an `SHA1
     <https://en.wikipedia.org/wiki/SHA-1>`_ hash.
+
+    :setting:`REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS` removes the listed
+    URL query parameters from the URL before it is canonicalized, without
+    changing the request itself.
     """
 
     @classmethod
@@ -145,10 +283,24 @@ class RequestFingerprinter:
         return cls(crawler)
 
     def __init__(self, crawler: Crawler | None = None):
-        self._fingerprint = fingerprint
+        configured = (
+            crawler.settings.getlist("REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS")
+            if crawler is not None
+            else []
+        )
+        self._ignore_query_params = _decode_query_name_rules(
+            configured,
+            source="REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS",
+        )
+        # Stored in the job directory to detect configuration changes. Hex
+        # avoids depending on a text encoding for arbitrary parameter names.
+        self._jobdir_state = {
+            "ignore_query_params": [name.hex() for name in self._ignore_query_params]
+        }
+        self._fingerprint = _fingerprint
 
     def fingerprint(self, request: Request) -> bytes:
-        return self._fingerprint(request)
+        return self._fingerprint(request, ignore_query_params=self._ignore_query_params)
 
 
 def request_httprepr(request: Request) -> bytes:

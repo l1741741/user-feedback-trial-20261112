@@ -109,6 +109,155 @@ class DupeFilterTestMixin:
         assert case_insensitive_dupefilter.request_seen(r2)
         case_insensitive_dupefilter.close("finished")
 
+    def test_ignore_query_params(self) -> None:
+        r1 = Request("https://example.com/p?utm=1")
+        r2 = Request("https://example.com/p?utm=2")
+
+        dupefilter = self._get_dupefilter(
+            REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS=["utm"]
+        )
+        assert not dupefilter.request_seen(r1)
+        assert dupefilter.request_seen(r2)
+        dupefilter.close("finished")
+
+    def test_jobdir_same_config(self, tmp_path: Path) -> None:
+        r1 = Request("https://example.com/p?utm=1")
+
+        dupefilter = self._get_dupefilter(
+            JOBDIR=str(tmp_path),
+            REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS=["utm"],
+        )
+        assert not dupefilter.request_seen(r1)
+        dupefilter.close("finished")
+
+        resumed = self._get_dupefilter(
+            JOBDIR=str(tmp_path),
+            REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS=["utm"],
+        )
+        assert resumed.request_seen(Request("https://example.com/p?utm=2"))
+        resumed.close("finished")
+
+    @pytest.mark.parametrize(
+        "new_settings",
+        [
+            {},
+            {"REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS": ["utm_source"]},
+            {"REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS": ["utm", "ref"]},
+        ],
+    )
+    def test_jobdir_changed_config(
+        self, tmp_path: Path, new_settings: dict[str, Any]
+    ) -> None:
+        dupefilter = self._get_dupefilter(
+            JOBDIR=str(tmp_path),
+            REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS=["utm"],
+        )
+        dupefilter.request_seen(Request("https://example.com/p?utm=1"))
+        dupefilter.close("finished")
+
+        with pytest.raises(ValueError, match="fingerprinter configuration"):
+            self._get_dupefilter(JOBDIR=str(tmp_path), **new_settings)
+
+    def test_jobdir_rule_order_is_irrelevant(self, tmp_path: Path) -> None:
+        dupefilter = self._get_dupefilter(
+            JOBDIR=str(tmp_path),
+            REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS=["utm", "ref"],
+        )
+        dupefilter.request_seen(Request("https://example.com/p?utm=1"))
+        dupefilter.close("finished")
+
+        self._get_dupefilter(
+            JOBDIR=str(tmp_path),
+            REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS=["ref", "utm"],
+        ).close("finished")
+
+    def test_jobdir_legacy_default_config(self, tmp_path: Path) -> None:
+        dupefilter = self._get_dupefilter(JOBDIR=str(tmp_path))
+        dupefilter.request_seen(Request("https://example.com/1"))
+        dupefilter.close("finished")
+
+        # Job directories written before the configuration was recorded are
+        # resumable as long as the default configuration is still in use.
+        Path(tmp_path, "requests.fingerprint.json").unlink()
+        self._get_dupefilter(JOBDIR=str(tmp_path)).close("finished")
+
+    def test_jobdir_legacy_changed_config(self, tmp_path: Path) -> None:
+        dupefilter = self._get_dupefilter(JOBDIR=str(tmp_path))
+        dupefilter.request_seen(Request("https://example.com/1"))
+        dupefilter.close("finished")
+
+        Path(tmp_path, "requests.fingerprint.json").unlink()
+        with pytest.raises(ValueError, match="fingerprinter configuration"):
+            self._get_dupefilter(
+                JOBDIR=str(tmp_path),
+                REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS=["utm"],
+            )
+
+    def test_jobdir_unreadable_config(self, tmp_path: Path) -> None:
+        dupefilter = self._get_dupefilter(JOBDIR=str(tmp_path))
+        dupefilter.request_seen(Request("https://example.com/1"))
+        dupefilter.close("finished")
+
+        Path(tmp_path, "requests.fingerprint.json").write_text("{", encoding="utf-8")
+        with pytest.raises(ValueError, match="unreadable"):
+            self._get_dupefilter(JOBDIR=str(tmp_path))
+
+    def test_jobdir_custom_fingerprinter_same_class(self, tmp_path: Path) -> None:
+        class CustomFingerprinter:
+            def fingerprint(self, request: Request) -> bytes:
+                return hashlib.sha1(request.url.encode()).digest()
+
+        dupefilter = self._get_dupefilter(
+            JOBDIR=str(tmp_path),
+            REQUEST_FINGERPRINTER_CLASS=CustomFingerprinter,
+        )
+        dupefilter.request_seen(Request("https://example.com/1"))
+        dupefilter.close("finished")
+
+        resumed = self._get_dupefilter(
+            JOBDIR=str(tmp_path),
+            REQUEST_FINGERPRINTER_CLASS=CustomFingerprinter,
+        )
+        assert resumed.request_seen(Request("https://example.com/1"))
+        resumed.close("finished")
+
+    def test_jobdir_custom_fingerprinter_changed_class(self, tmp_path: Path) -> None:
+        class CustomFingerprinter:
+            def fingerprint(self, request: Request) -> bytes:
+                return hashlib.sha1(request.url.encode()).digest()
+
+        class OtherCustomFingerprinter:
+            def fingerprint(self, request: Request) -> bytes:
+                return hashlib.sha1(b"other" + request.url.encode()).digest()
+
+        dupefilter = self._get_dupefilter(
+            JOBDIR=str(tmp_path),
+            REQUEST_FINGERPRINTER_CLASS=CustomFingerprinter,
+        )
+        dupefilter.request_seen(Request("https://example.com/1"))
+        dupefilter.close("finished")
+
+        with pytest.raises(ValueError, match="fingerprinter configuration"):
+            self._get_dupefilter(
+                JOBDIR=str(tmp_path),
+                REQUEST_FINGERPRINTER_CLASS=OtherCustomFingerprinter,
+            )
+
+    def test_jobdir_class_switch(self, tmp_path: Path) -> None:
+        dupefilter = self._get_dupefilter(JOBDIR=str(tmp_path))
+        dupefilter.request_seen(Request("https://example.com/1"))
+        dupefilter.close("finished")
+
+        class CustomFingerprinter:
+            def fingerprint(self, request: Request) -> bytes:
+                return hashlib.sha1(request.url.encode()).digest()
+
+        with pytest.raises(ValueError, match="fingerprinter configuration"):
+            self._get_dupefilter(
+                JOBDIR=str(tmp_path),
+                REQUEST_FINGERPRINTER_CLASS=CustomFingerprinter,
+            )
+
 
 class TestRFPDupeFilter(DupeFilterTestMixin):
     dupefilter_class = RFPDupeFilter

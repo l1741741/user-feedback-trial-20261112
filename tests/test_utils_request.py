@@ -69,6 +69,7 @@ class _FingerprintFunction(Protocol):
         *,
         include_headers: Iterable[bytes | str] | None = None,
         keep_fragments: bool = False,
+        ignore_query_params: Iterable[str] | None = None,
     ) -> bytes: ...
 
 
@@ -77,14 +78,24 @@ class TestFingerprint:
     cache: (
         WeakKeyDictionary[
             Request,
-            dict[tuple[tuple[bytes, ...] | None, bool, bool, str | None], bytes],
+            dict[
+                tuple[
+                    tuple[bytes, ...] | None, bool, bool, str | None, tuple[bytes, ...]
+                ],
+                bytes,
+            ],
         ]
         | WeakKeyDictionary[
             Request,
-            dict[tuple[tuple[bytes, ...] | None, bool, bool, str | None], str],
+            dict[
+                tuple[
+                    tuple[bytes, ...] | None, bool, bool, str | None, tuple[bytes, ...]
+                ],
+                str,
+            ],
         ]
     ) = _fingerprint_cache
-    default_cache_key = (None, False, False, None)
+    default_cache_key = (None, False, False, None, ())
     known_hashes: tuple[tuple[Request, bytes | str, dict[str, Any]], ...] = (
         (
             Request("http://example.org"),
@@ -317,11 +328,324 @@ class TestFingerprint:
         expected = [_fingerprint for _, _fingerprint, _ in self.known_hashes]
         assert actual == expected
 
+    def test_ignore_query_params_drops_only_listed_names(self):
+        url = "https://example.com/p?a=1&b=2&c=3"
+        r1 = Request(url)
+        r2 = Request("https://example.com/p?b=2&c=3")
+        assert self.function(r1, ignore_query_params=["a"]) == self.function(r2)
+
+    def test_ignore_query_params_empty_list_keeps_fingerprint(self):
+        r1 = Request("https://example.com/p?a=1&b=2")
+        assert self.function(r1) == self.function(r1, ignore_query_params=[])
+
+    def test_ignore_query_params_is_case_sensitive(self):
+        r1 = Request("https://example.com/p?A=1&b=2")
+        r2 = Request("https://example.com/p?b=2")
+        assert self.function(r1, ignore_query_params=["a"]) == self.function(
+            r1, ignore_query_params=[]
+        )
+        assert self.function(r1, ignore_query_params=["A"]) == self.function(r2)
+
+    def test_ignore_query_params_does_not_match_substrings(self):
+        r1 = Request("https://example.com/p?a=1&aa=2&a-b=3&xa=4")
+        r2 = Request("https://example.com/p?aa=2&a-b=3&xa=4")
+        assert self.function(r1, ignore_query_params=["a"]) == self.function(r2)
+
+    def test_ignore_query_params_does_not_touch_path(self):
+        r1 = Request("https://example.com/a?x=1")
+        r2 = Request("https://example.com/b?x=1")
+        assert self.function(r1, ignore_query_params=["a"]) != self.function(
+            r2, ignore_query_params=["a"]
+        )
+
+    def test_ignore_query_params_does_not_touch_fragment(self):
+        r1 = Request("https://example.com/p?x=1#x=2")
+        r2 = Request("https://example.com/p#x=2")
+        assert self.function(
+            r1, keep_fragments=True, ignore_query_params=["x"]
+        ) == self.function(r2, keep_fragments=True)
+        r3 = Request("https://example.com/p?x=1#y=2")
+        assert self.function(
+            r1, keep_fragments=True, ignore_query_params=["x"]
+        ) != self.function(r3, keep_fragments=True, ignore_query_params=["x"])
+
+    def test_ignore_query_params_repeated_names(self):
+        with_dupes = Request("https://example.com/p?a=1&a=2&b=3")
+        without = Request("https://example.com/p?b=3")
+        assert self.function(with_dupes, ignore_query_params=["a"]) == self.function(
+            without
+        )
+
+    @pytest.mark.parametrize(
+        ("url", "without_url"),
+        [
+            # No equals sign.
+            ("https://example.com/p?a&b=2", "https://example.com/p?b=2"),
+            # Empty value.
+            ("https://example.com/p?a=&b=2", "https://example.com/p?b=2"),
+            # Percent-encoded and plus-encoded names.
+            (
+                "https://example.com/p?a%20b=1&a+c=2&b=3",
+                "https://example.com/p?b=3",
+            ),
+            # Percent-encoded equals sign inside a value.
+            (
+                "https://example.com/p?a=1%3D2&b=3",
+                "https://example.com/p?b=3",
+            ),
+        ],
+    )
+    def test_ignore_query_params_forms(self, url, without_url):
+        rules = ["a", "a b", "a c"]
+        assert self.function(Request(url), ignore_query_params=rules) == self.function(
+            Request(without_url), ignore_query_params=rules
+        )
+
+    def test_ignore_query_params_plus_and_space(self):
+        # A plus in a rule is a literal plus, only spelled %2B in the URL.
+        literal_plus = Request("https://example.com/p?a%2Bb=1&c=2")
+        space_in_url = Request("https://example.com/p?a+b=1&c=2")
+        space_encoded = Request("https://example.com/p?a%20b=1&c=2")
+        without = Request("https://example.com/p?c=2")
+
+        assert self.function(
+            literal_plus, ignore_query_params=["a+b"]
+        ) == self.function(without, ignore_query_params=["a+b"])
+        assert self.function(
+            space_in_url, ignore_query_params=["a b"]
+        ) == self.function(without, ignore_query_params=["a b"])
+        assert self.function(
+            space_encoded, ignore_query_params=["a b"]
+        ) == self.function(without, ignore_query_params=["a b"])
+        assert self.function(
+            literal_plus, ignore_query_params=["a b"]
+        ) != self.function(without, ignore_query_params=["a b"])
+
+    @pytest.mark.parametrize(
+        ("url", "rule"),
+        [
+            # A space in the URL is spelled + or %20, and either spelling of
+            # the rule names the same parameter.
+            ("https://example.com/p?a b=1&c=2", "a b"),
+            ("https://example.com/p?a b=1&c=2", "a%20b"),
+            ("https://example.com/p?a+b=1&c=2", "a b"),
+            ("https://example.com/p?a+b=1&c=2", "a%20b"),
+            ("https://example.com/p?a%20b=1&c=2", "a b"),
+            ("https://example.com/p?a%20b=1&c=2", "a%20b"),
+            # A plus in the URL is %2B, and only a literal plus rule names it.
+            ("https://example.com/p?a%2Bb=1&c=2", "a+b"),
+            ("https://example.com/p?a%2Bb=1&c=2", "a%2Bb"),
+        ],
+    )
+    def test_ignore_query_params_percent_encoding(self, url, rule):
+        without = Request("https://example.com/p?c=2")
+        assert self.function(Request(url), ignore_query_params=[rule]) == self.function(
+            without, ignore_query_params=[rule]
+        )
+
+    @pytest.mark.parametrize(
+        ("url", "rule"),
+        [
+            # Neither spelling names the other parameter.
+            ("https://example.com/p?a%2Bb=1&c=2", "a b"),
+            ("https://example.com/p?a%2Bb=1&c=2", "a%20b"),
+            ("https://example.com/p?a b=1&c=2", "a+b"),
+            ("https://example.com/p?a+b=1&c=2", "a%2Bb"),
+        ],
+    )
+    def test_ignore_query_params_percent_encoding_no_match(self, url, rule):
+        without = Request("https://example.com/p?c=2")
+        assert self.function(Request(url), ignore_query_params=[rule]) != self.function(
+            without, ignore_query_params=[rule]
+        )
+
+    @pytest.mark.parametrize(
+        ("rule", "exception"),
+        [
+            ("a", TypeError),
+            ([b"a"], TypeError),
+            ([1], TypeError),
+            (["%"], ValueError),
+            (["%2"], ValueError),
+            (["%zz"], ValueError),
+            (["%a"], ValueError),
+            (["%ff"], ValueError),
+        ],
+    )
+    def test_ignore_query_params_invalid_rules(self, rule, exception):
+        request = Request("https://example.com/p?a=1")
+        with pytest.raises(exception):
+            self.function(request, ignore_query_params=rule)
+
+    def test_ignore_query_params_does_not_modify_request(self):
+        request = Request(
+            "https://example.com/p?a=1&b=2#fragment",
+            method="POST",
+            body=b"body",
+            headers={"X-ID": "1"},
+            meta={"verbatim_url": True},
+        )
+        url = request.url
+        headers = dict(request.headers)
+        meta = dict(request.meta)
+        body = request.body
+        self.function(request, ignore_query_params=["a"])
+        assert request.url == url
+        assert dict(request.headers) == headers
+        assert dict(request.meta) == meta
+        assert request.body == body
+
+    def test_ignore_query_params_empty_name_rule(self):
+        with_empty_name = Request("https://example.com/p?=1&a=2")
+        without = Request("https://example.com/p?a=2")
+        assert self.function(
+            with_empty_name, ignore_query_params=[""]
+        ) == self.function(without, ignore_query_params=[""])
+
+    def test_ignore_query_params_no_match_keeps_fingerprint(self):
+        r1 = Request("https://example.com/p?a=1&b=2&empty=&noequal")
+        assert self.function(r1, ignore_query_params=["c"]) == self.function(r1)
+
+    def test_ignore_query_params_no_query_keeps_fingerprint(self):
+        r1 = Request("https://example.com/p?q=1#a=2")
+        assert self.function(
+            r1, keep_fragments=True, ignore_query_params=["q"]
+        ) == self.function(
+            Request("https://example.com/p#a=2"),
+            keep_fragments=True,
+        )
+
+    def test_ignore_query_params_keeps_method_and_body_apart(self):
+        get = Request("https://example.com/p?a=1")
+        post = Request("https://example.com/p?a=1", method="POST")
+        post_body = Request("https://example.com/p?a=1", method="POST", body=b"1")
+        assert self.function(get, ignore_query_params=["a"]) != self.function(
+            post, ignore_query_params=["a"]
+        )
+        assert self.function(post, ignore_query_params=["a"]) != self.function(
+            post_body, ignore_query_params=["a"]
+        )
+
+    def test_ignore_query_params_keeps_canonicalization(self):
+        r1 = Request("https://example.com/p?b=2&a=1&utm=tracking")
+        r2 = Request("https://example.com/p?utm=other&a=1&b=2")
+        assert self.function(r1, ignore_query_params=["utm"]) == self.function(
+            r2, ignore_query_params=["utm"]
+        )
+
+    def test_ignore_query_params_cache_isolation(self):
+        request = Request("https://example.com/p?a=1&b=2")
+        no_rules = self.function(request)
+        rules_a = self.function(request, ignore_query_params=["a"])
+        rules_b = self.function(request, ignore_query_params=["b"])
+        assert len({no_rules, rules_a, rules_b}) == 3
+        assert self.function(request) == no_rules
+        assert self.function(request, ignore_query_params=["a"]) == rules_a
+        assert self.function(request, ignore_query_params=["b"]) == rules_b
+
+    def test_ignore_query_params_cache_is_stable(self):
+        request = Request("https://example.com/p?a=1&b=2")
+        first = self.function(request, ignore_query_params=["a", "b"])
+        assert self.function(request, ignore_query_params=["b", "a"]) == first
+        assert self.function(request, ignore_query_params=["a", "a", "b"]) == first
+        assert self.function(request, ignore_query_params=["a", "a"]) == self.function(
+            request, ignore_query_params=["a"]
+        )
+
+    def test_ignore_query_params_and_verbatim_url(self):
+        r1 = Request("https://example.com/p?b=2&a=1", meta={"verbatim_url": True})
+        r2 = Request("https://example.com/p?b=2", meta={"verbatim_url": True})
+        assert self.function(r1, ignore_query_params=["a"]) == self.function(
+            r2, ignore_query_params=["a"]
+        )
+
 
 class TestRequestFingerprinter:
     def test_fingerprint(self):
         crawler = get_crawler()
         request = Request("https://example.com")
+        assert crawler.request_fingerprinter.fingerprint(request) == fingerprint(
+            request
+        )
+
+    def test_default_ignores_nothing(self):
+        crawler = get_crawler()
+        r1 = Request("https://example.com/p?a=1&b=2")
+        r2 = Request("https://example.com/p?b=2")
+        assert crawler.request_fingerprinter.fingerprint(
+            r1
+        ) != crawler.request_fingerprinter.fingerprint(r2)
+
+    @pytest.mark.parametrize(
+        "configured",
+        [
+            ["a"],
+            '["a"]',
+            "a",
+        ],
+    )
+    def test_ignore_query_params(self, configured):
+        crawler = get_crawler(
+            settings_dict={
+                "REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS": configured,
+            }
+        )
+        r1 = Request("https://example.com/p?a=1&b=2")
+        r2 = Request("https://example.com/p?b=2")
+        assert crawler.request_fingerprinter.fingerprint(
+            r1
+        ) == crawler.request_fingerprinter.fingerprint(r2)
+
+    def test_ignore_query_params_does_not_affect_verbatim_request(self):
+        crawler = get_crawler(
+            settings_dict={"REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS": ["a"]}
+        )
+        r1 = Request("https://example.com/p?a=1&b=2", meta={"verbatim_url": True})
+        r2 = Request("https://example.com/p?b=2", meta={"verbatim_url": True})
+        assert crawler.request_fingerprinter.fingerprint(
+            r1
+        ) == crawler.request_fingerprinter.fingerprint(r2)
+
+    def test_custom_fingerprinter_not_affected_by_setting(self):
+        class CustomFingerprinter:
+            def fingerprint(self, request):
+                return fingerprint(request)
+
+        crawler = get_crawler(
+            settings_dict={
+                "REQUEST_FINGERPRINTER_CLASS": CustomFingerprinter,
+                "REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS": ["a"],
+            }
+        )
+        r1 = Request("https://example.com/p?a=1&b=2")
+        r2 = Request("https://example.com/p?b=2")
+        assert crawler.request_fingerprinter.fingerprint(
+            r1
+        ) != crawler.request_fingerprinter.fingerprint(r2)
+
+    @pytest.mark.parametrize(
+        ("configured", "exception"),
+        [
+            ([1], TypeError),
+            ([b"a"], TypeError),
+            (["%zz"], ValueError),
+            (["%2"], ValueError),
+            (["%80"], ValueError),
+        ],
+    )
+    def test_ignore_query_params_invalid(self, configured, exception):
+        with pytest.raises(exception):
+            get_crawler(
+                settings_dict={
+                    "REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS": configured,
+                }
+            )
+
+    def test_ignore_query_params_empty_list(self):
+        crawler = get_crawler(
+            settings_dict={"REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMS": []}
+        )
+        request = Request("https://example.com/p?a=1")
         assert crawler.request_fingerprinter.fingerprint(request) == fingerprint(
             request
         )
