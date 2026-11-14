@@ -205,6 +205,8 @@ __all__ = [
     "REQUEST_FINGERPRINTER_CLASS",
     "RESPONSE_MAX_ACTIVE_SIZE",
     "RESPONSE_ROUGH_SIZE",
+    "RETRY_AFTER_ENABLED",
+    "RETRY_AFTER_MAX_DELAY",
     "RETRY_ENABLED",
     "RETRY_EXCEPTIONS",
     "RETRY_GIVE_UP_LOG_LEVEL",
@@ -580,6 +582,8 @@ REMOTE_CONTROL_TRACEBACK_MAX_BYTES = 16 * 1024
 REQUEST_FINGERPRINTER_CLASS = "scrapy.utils.request.RequestFingerprinter"
 
 RETRY_ENABLED = True
+RETRY_AFTER_ENABLED = False
+RETRY_AFTER_MAX_DELAY = -1
 RETRY_EXCEPTIONS = [
     "scrapy.exceptions.CannotResolveHostError",
     "scrapy.exceptions.DecompressionError",

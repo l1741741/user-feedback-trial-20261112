@@ -37,26 +37,29 @@ class TestRetry:
         self.mw: RetryMiddleware = build_from_crawler(RetryMiddleware, self.crawler)
         self.mw.max_retry_times = 2
 
-    def test_priority_adjust(self):
+    @coroutine_test
+    async def test_priority_adjust(self):
         req = Request("http://www.scrapytest.org/503")
         rsp = Response("http://www.scrapytest.org/503", body=b"", status=503)
-        req2 = self.mw.process_response(req, rsp)
+        req2 = await self.mw.process_response(req, rsp)
         assert isinstance(req2, Request)
         assert req2.priority < req.priority
 
-    def test_404(self):
+    @coroutine_test
+    async def test_404(self):
         req = Request("http://www.scrapytest.org/404")
         rsp = Response("http://www.scrapytest.org/404", body=b"", status=404)
 
         # dont retry 404s
-        assert self.mw.process_response(req, rsp) is rsp
+        assert await self.mw.process_response(req, rsp) is rsp
 
-    def test_dont_retry(self):
+    @coroutine_test
+    async def test_dont_retry(self):
         req = Request("http://www.scrapytest.org/503", meta={"dont_retry": True})
         rsp = Response("http://www.scrapytest.org/503", body=b"", status=503)
 
         # no retry
-        r = self.mw.process_response(req, rsp)
+        r = await self.mw.process_response(req, rsp)
         assert r is rsp
 
         # Test retry when dont_retry set to False
@@ -64,7 +67,7 @@ class TestRetry:
         rsp = Response("http://www.scrapytest.org/503", body=b"", status=503)
 
         # first retry
-        req2 = self.mw.process_response(req, rsp)
+        req2 = await self.mw.process_response(req, rsp)
         assert isinstance(req2, Request)
         assert req2.meta["retry_times"] == 1
 
@@ -74,22 +77,23 @@ class TestRetry:
         r = self.mw.process_exception(req, CannotResolveHostError())
         assert r is None
 
-    def test_503(self):
+    @coroutine_test
+    async def test_503(self):
         req = Request("http://www.scrapytest.org/503")
         rsp = Response("http://www.scrapytest.org/503", body=b"", status=503)
 
         # first retry
-        req2 = self.mw.process_response(req, rsp)
+        req2 = await self.mw.process_response(req, rsp)
         assert isinstance(req2, Request)
         assert req2.meta["retry_times"] == 1
 
         # second retry
-        req3 = self.mw.process_response(req2, rsp)
+        req3 = await self.mw.process_response(req2, rsp)
         assert isinstance(req3, Request)
         assert req3.meta["retry_times"] == 2
 
         # discard it
-        assert self.mw.process_response(req3, rsp) is rsp
+        assert await self.mw.process_response(req3, rsp) is rsp
 
         assert self.crawler.stats.get_value("retry/max_reached") == 1
         assert (
@@ -98,7 +102,10 @@ class TestRetry:
         )
         assert self.crawler.stats.get_value("retry/count") == 2
 
-    def test_give_up_log_level_setting(self, caplog: pytest.LogCaptureFixture) -> None:
+    @coroutine_test
+    async def test_give_up_log_level_setting(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         crawler = get_crawler(
             DefaultSpider, settings_dict={"RETRY_GIVE_UP_LOG_LEVEL": "WARNING"}
         )
@@ -108,19 +115,22 @@ class TestRetry:
         req = Request("http://example.com/503")
         rsp = Response("http://example.com/503", body=b"", status=503)
         with caplog.at_level(logging.WARNING):
-            assert mw.process_response(req, rsp) is rsp
+            assert await mw.process_response(req, rsp) is rsp
         assert (
             "scrapy.downloadermiddlewares.retry",
             logging.WARNING,
             f"Gave up retrying {req} (failed 1 times): 503 Service Unavailable",
         ) in caplog.record_tuples
 
-    def test_give_up_log_level_meta(self, caplog: pytest.LogCaptureFixture) -> None:
+    @coroutine_test
+    async def test_give_up_log_level_meta(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         self.mw.max_retry_times = 0
         req = Request("http://example.com/503", meta={"give_up_log_level": "WARNING"})
         rsp = Response("http://example.com/503", body=b"", status=503)
         with caplog.at_level(logging.WARNING):
-            assert self.mw.process_response(req, rsp) is rsp
+            assert await self.mw.process_response(req, rsp) is rsp
         assert (
             "scrapy.downloadermiddlewares.retry",
             logging.WARNING,

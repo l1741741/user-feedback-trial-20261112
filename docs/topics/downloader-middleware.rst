@@ -1169,6 +1169,25 @@ number of retries allowed for that request.
 The ``priority_adjust`` :attr:`Request.meta <scrapy.Request.meta>` key
 overrides :setting:`RETRY_PRIORITY_ADJUST` for a request.
 
+.. reqmeta:: retry_after_max_delay
+
+.. versionadded:: 2.20.0
+
+The ``retry_after_max_delay`` :attr:`Request.meta <scrapy.Request.meta>` key
+overrides :setting:`RETRY_AFTER_MAX_DELAY` for a request. As with the setting,
+a negative value disables the wait budget.
+
+.. reqmeta:: download_deadline
+
+.. versionadded:: 2.20.0
+
+The ``download_deadline`` :attr:`Request.meta <scrapy.Request.meta>` key holds
+an absolute point in time, in seconds since the epoch, by which the request
+must have been retried. When a ``Retry-After`` wait (see
+:setting:`RETRY_AFTER_ENABLED`) would end after the deadline, the response is
+propagated instead of scheduling the retry. The key only constrains retry
+scheduling; it does not cancel a download already in progress.
+
 To retry requests from a spider callback, you can use the
 :func:`get_retry_request` function:
 
@@ -1176,6 +1195,47 @@ To retry requests from a spider callback, you can use the
 
 RetryMiddleware Settings
 ~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. setting:: RETRY_AFTER_ENABLED
+
+RETRY_AFTER_ENABLED
+^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 2.20.0
+
+Default: ``False``
+
+Whether a ``429`` response carrying a ``Retry-After`` header is retried only
+after the delay the header asks for, instead of being retried immediately.
+
+The header may carry either a number of seconds or an HTTP date. A header that
+cannot be parsed, appears more than once, asks for a negative or overflowing
+delay, or points to a date in the past causes an immediate retry, the same as
+when the header is missing. When the response also carries a ``Date`` header,
+the HTTP-date form of ``Retry-After`` is measured against that date, so a skew
+between the server clock and the local clock does not change the wait.
+
+See :setting:`RETRY_AFTER_MAX_DELAY` for the maximum wait the middleware
+accepts.
+
+.. setting:: RETRY_AFTER_MAX_DELAY
+
+RETRY_AFTER_MAX_DELAY
+^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 2.20.0
+
+Default: ``-1``
+
+Maximum number of seconds the middleware waits for a ``Retry-After`` header
+(see :setting:`RETRY_AFTER_ENABLED`). A delay above this budget is not
+scheduled: the response is propagated instead, so the request is not retried.
+
+A negative value disables the budget, meaning any delay that fits within the
+request deadline may be scheduled. The :reqmeta:`retry_after_max_delay`
+:attr:`Request.meta <scrapy.Request.meta>` key overrides this setting for a
+request, and the :reqmeta:`download_deadline` meta key, when set, always
+shortens the accepted delay to the time left before the deadline.
 
 .. setting:: RETRY_ENABLED
 
