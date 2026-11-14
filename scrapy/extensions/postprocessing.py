@@ -20,16 +20,29 @@ class GzipPlugin:
     - `gzip_compresslevel`
     - `gzip_mtime`
     - `gzip_filename`
+    - `gzip_reproducible`
 
     See :py:class:`gzip.GzipFile` for more info about parameters.
+
+    If `gzip_reproducible` is ``True``, non-content metadata in the gzip
+    header is pinned: the modification time defaults to ``0`` and the
+    original file name to empty, so that exporting the same bytes with the
+    same settings produces identical compressed bytes. Explicit
+    `gzip_mtime` and `gzip_filename` values take precedence over these
+    pinned defaults. Compression is still streaming; the feed is not
+    buffered in memory.
     """
 
     def __init__(self, file: BinaryIO, feed_options: dict[str, Any]) -> None:
         self.file = file
         self.feed_options = feed_options
         compress_level = self.feed_options.get("gzip_compresslevel", 9)
-        mtime = self.feed_options.get("gzip_mtime")
-        filename = self.feed_options.get("gzip_filename")
+        if self.feed_options.get("gzip_reproducible", False):
+            mtime = self.feed_options.get("gzip_mtime", 0)
+            filename = self.feed_options.get("gzip_filename", "")
+        else:
+            mtime = self.feed_options.get("gzip_mtime")
+            filename = self.feed_options.get("gzip_filename")
         self.gzipfile = GzipFile(
             fileobj=self.file,
             mode="wb",
@@ -41,7 +54,13 @@ class GzipPlugin:
     def write(self, data: bytes) -> int:
         return self.gzipfile.write(data)
 
+    def flush(self) -> None:
+        self.gzipfile.flush()
+
     def close(self) -> None:
+        # Closing the GzipFile writes the trailer and flushes, but does not
+        # close the underlying file object, which remains owned by the
+        # caller. Closing twice is a no-op.
         self.gzipfile.close()
 
 

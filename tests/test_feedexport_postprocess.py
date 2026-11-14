@@ -4,21 +4,214 @@ import bz2
 import gzip
 import lzma
 import marshal
+import os
 import pickle
 import tempfile
+import time
 from io import BytesIO
 from typing import IO, TYPE_CHECKING
+from urllib.parse import urljoin
 
 import pytest
 
-from scrapy.extensions.postprocessing import PostProcessingManager
+from scrapy.extensions.postprocessing import GzipPlugin, PostProcessingManager
 from tests.utils.decorators import coroutine_test
-from tests.utils.feedexport import export_by_format, export_by_path, unique_path
+from tests.utils.feedexport import (
+    crawl_items,
+    export_by_format,
+    export_by_path,
+    unique_path,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from tests.mockserver.http import MockServer
+
+
+class NamedBytesIO(BytesIO):
+    """BytesIO with a ``name`` attribute, like a real file object."""
+
+    def __init__(self, name: str = ""):
+        super().__init__()
+        self.name = name
+
+
+class FailingStream:
+    """Wraps a binary stream and raises on write once ``fail`` is set."""
+
+    def __init__(self, wrapped: BytesIO):
+        self.wrapped = wrapped
+        self.fail = False
+
+    def write(self, data: bytes) -> int:
+        if self.fail:
+            raise OSError("simulated downstream write failure")
+        return self.wrapped.write(data)
+
+    def flush(self) -> None:
+        self.wrapped.flush()
+
+
+def gzip_header(data: bytes) -> dict:
+    return {
+        "magic": data[:2],
+        "compression_method": data[2],
+        "flags": data[3],
+        "mtime": int.from_bytes(data[4:8], "little"),
+    }
+
+
+class TestGzipPluginReproducible:
+    items = [{"foo": "bar"}]
+    expected = b"foo\r\nbar\r\n"
+
+    def make_plugin(self, stream=None, **feed_options):
+        return GzipPlugin(stream if stream is not None else BytesIO(), feed_options)
+
+    def compress(self, data_chunks, **feed_options) -> bytes:
+        stream = BytesIO()
+        plugin = self.make_plugin(stream, **feed_options)
+        for chunk in data_chunks:
+            plugin.write(chunk)
+        plugin.close()
+        return stream.getvalue()
+
+    def test_same_content_same_bytes(self):
+        first = self.compress([self.expected], gzip_reproducible=True)
+        second = self.compress([self.expected], gzip_reproducible=True)
+        assert first == second
+
+    def test_header_metadata_pinned(self):
+        data = self.compress([self.expected], gzip_reproducible=True)
+        header = gzip_header(data)
+        assert header["magic"] == b"\x1f\x8b"
+        assert header["compression_method"] == 8
+        assert header["mtime"] == 0
+        assert not header["flags"] & 0x08  # no FNAME field
+
+    def test_roundtrip_decompression(self):
+        data = self.compress([self.expected], gzip_reproducible=True)
+        assert gzip.decompress(data) == self.expected
+
+    def test_different_content_differs(self):
+        first = self.compress([b"foo"], gzip_reproducible=True)
+        second = self.compress([b"bar"], gzip_reproducible=True)
+        assert first != second
+        assert gzip.decompress(first) == b"foo"
+        assert gzip.decompress(second) == b"bar"
+
+    def test_chunked_and_oneshot_writes_match(self):
+        chunks = [self.expected[:3], self.expected[3:5], self.expected[5:]]
+        chunked = self.compress(chunks, gzip_reproducible=True)
+        oneshot = self.compress([self.expected], gzip_reproducible=True)
+        assert chunked == oneshot
+        assert gzip.decompress(chunked) == self.expected
+
+    def test_empty_feed(self):
+        data = self.compress([], gzip_reproducible=True)
+        assert gzip_header(data)["mtime"] == 0
+        assert gzip.decompress(data) == b""
+
+    def test_compresslevel_still_respected(self):
+        data = self.compress(
+            [self.expected], gzip_reproducible=True, gzip_compresslevel=1
+        )
+        reference_stream = BytesIO()
+        with gzip.GzipFile(
+            fileobj=reference_stream, mode="wb", compresslevel=1, mtime=0, filename=""
+        ) as reference_file:
+            reference_file.write(self.expected)
+        assert data == reference_stream.getvalue()
+        assert data != self.compress(
+            [self.expected], gzip_reproducible=True, gzip_compresslevel=9
+        )
+
+    def test_explicit_mtime_and_filename_override_pinned_defaults(self):
+        data = self.compress(
+            [self.expected],
+            gzip_reproducible=True,
+            gzip_mtime=123456789,
+            gzip_filename="FILE1",
+        )
+        header = gzip_header(data)
+        assert header["mtime"] == 123456789
+        assert header["flags"] & 0x08
+        assert b"FILE1\x00" in data
+        assert gzip.decompress(data) == self.expected
+
+    def test_default_behavior_not_pinned(self):
+        stream = NamedBytesIO(name="/tmp/feed.csv")
+        plugin = self.make_plugin(stream)
+        before = int(time.time())
+        plugin.write(self.expected)
+        plugin.close()
+        after = int(time.time())
+        data = stream.getvalue()
+        header = gzip_header(data)
+        assert before <= header["mtime"] <= after
+        assert header["flags"] & 0x08  # FNAME taken from the file object name
+        assert b"feed.csv\x00" in data
+        assert gzip.decompress(data) == self.expected
+
+    def test_close_does_not_close_underlying_stream(self):
+        stream = BytesIO()
+        plugin = self.make_plugin(stream, gzip_reproducible=True)
+        plugin.write(self.expected)
+        plugin.close()
+        assert not stream.closed
+        assert gzip.decompress(stream.getvalue()) == self.expected
+
+    def test_repeated_close(self):
+        stream = BytesIO()
+        plugin = self.make_plugin(stream, gzip_reproducible=True)
+        plugin.write(self.expected)
+        plugin.close()
+        data = stream.getvalue()
+        plugin.close()
+        assert stream.getvalue() == data
+        assert gzip.decompress(data) == self.expected
+
+    def test_flush_then_close(self):
+        stream = BytesIO()
+        plugin = self.make_plugin(stream, gzip_reproducible=True)
+        plugin.write(self.expected)
+        plugin.flush()
+        # data is streamed, not buffered in the plugin
+        assert len(stream.getvalue()) > 0
+        plugin.close()
+        assert gzip.decompress(stream.getvalue()) == self.expected
+
+    def test_downstream_write_error_propagates_on_flush(self):
+        failing = FailingStream(BytesIO())
+        plugin = self.make_plugin(failing, gzip_reproducible=True)
+        # small writes sit in the gzip buffer, the failure surfaces on flush
+        plugin.write(self.expected)
+        failing.fail = True
+        with pytest.raises(OSError, match="simulated downstream write failure"):
+            plugin.flush()
+
+    def test_downstream_write_error_propagates_on_large_write(self):
+        failing = FailingStream(BytesIO())
+        plugin = self.make_plugin(failing, gzip_reproducible=True)
+        failing.fail = True
+        # a payload larger than the gzip write buffer is written through
+        with pytest.raises(OSError, match="simulated downstream write failure"):
+            plugin.write(os.urandom(1024 * 1024))
+
+    def test_cross_instance_isolation(self):
+        stream_a, stream_b = BytesIO(), BytesIO()
+        plugin_a = self.make_plugin(stream_a, gzip_reproducible=True)
+        plugin_b = self.make_plugin(stream_b, gzip_reproducible=True)
+        plugin_a.write(b"aaa")
+        plugin_b.write(b"bbb")
+        plugin_a.write(b"ccc")
+        plugin_b.write(b"ddd")
+        plugin_a.close()
+        plugin_b.close()
+        assert gzip.decompress(stream_a.getvalue()) == b"aaaccc"
+        assert gzip.decompress(stream_b.getvalue()) == b"bbbddd"
+        assert stream_a.getvalue() != stream_b.getvalue()
 
 
 class TestFeedPostProcessedExports:
@@ -197,6 +390,42 @@ class TestFeedPostProcessedExports:
             result = gzip.decompress(data[filename])
             assert compressed == data[filename]
             assert result == self.expected
+
+    @coroutine_test
+    async def test_gzip_plugin_reproducible_batched_exports(
+        self, mockserver: MockServer, tmp_path: Path
+    ) -> None:
+        items = [{"foo": f"value{i}"} for i in range(4)]
+
+        async def export_once(dirname: str) -> list[bytes]:
+            feed_dir = tmp_path / dirname
+            feed_dir.mkdir()
+            feed_path = feed_dir / "feed_%(batch_id)02d"
+            settings = {
+                "FEEDS": {
+                    urljoin("file:", str(feed_path)): {
+                        "format": "jsonlines",
+                        "batch_item_count": 2,
+                        "postprocessing": [
+                            "scrapy.extensions.postprocessing.GzipPlugin"
+                        ],
+                        "gzip_reproducible": True,
+                    },
+                },
+            }
+            await crawl_items(mockserver, items, settings)
+            return [p.read_bytes() for p in sorted(feed_dir.iterdir())]
+
+        first = await export_once("run1")
+        second = await export_once("run2")
+
+        assert len(first) == 2
+        # same items, settings and batching produce identical compressed bytes
+        assert first == second
+        # batches hold different content and remain distinguishable
+        assert first[0] != first[1]
+        assert gzip.decompress(first[0]) == b'{"foo": "value0"}\n{"foo": "value1"}\n'
+        assert gzip.decompress(first[1]) == b'{"foo": "value2"}\n{"foo": "value3"}\n'
 
     @coroutine_test
     async def test_lzma_plugin(self, mockserver: MockServer, tmp_path: Path) -> None:
