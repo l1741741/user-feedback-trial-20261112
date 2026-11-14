@@ -52,17 +52,42 @@ class CookiesMiddleware:
 
     crawler: Crawler
 
-    def __init__(self, debug: bool = False):
-        self.jars: defaultdict[Any, CookieJar] = defaultdict(CookieJar)
+    def __init__(
+        self,
+        debug: bool = False,
+        max_count_per_jar: int | None = None,
+        max_bytes_per_jar: int | None = None,
+    ):
+        self.jars: defaultdict[Any, CookieJar] = defaultdict(
+            lambda: CookieJar(
+                max_count=max_count_per_jar,
+                max_bytes=max_bytes_per_jar,
+                on_reject=self._note_quota_rejected,
+            )
+        )
         self.debug: bool = debug
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
         if not crawler.settings.getbool("COOKIES_ENABLED"):
             raise NotConfigured
-        o = cls(crawler.settings.getbool("COOKIES_DEBUG"))
+        max_count = crawler.settings.getint("COOKIES_MAX_COUNT_PER_JAR")
+        max_bytes = crawler.settings.getint("COOKIES_MAX_BYTES_PER_JAR")
+        o = cls(
+            crawler.settings.getbool("COOKIES_DEBUG"),
+            max_count_per_jar=max_count if max_count > 0 else None,
+            max_bytes_per_jar=max_bytes if max_bytes > 0 else None,
+        )
         o.crawler = crawler
         return o
+
+    def _note_quota_rejected(self, cookie: Cookie) -> None:
+        self.crawler.stats.inc_value("cookies/jar_quota_rejected")
+        logger.debug(
+            f"Discarded cookie {cookie.name!r} for domain {cookie.domain!r}: "
+            "the cookie alone exceeds the cookie jar quota",
+            extra={"spider": self.crawler.spider},
+        )
 
     def _process_cookies(
         self, cookies: Iterable[Cookie], *, jar: CookieJar, request: Request

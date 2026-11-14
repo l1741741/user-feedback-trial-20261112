@@ -1,11 +1,14 @@
 import logging
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from email.utils import formatdate
 from typing import Any, NamedTuple
 
 import pytest
 from _pytest.mark import ParameterSet
 
+from scrapy.crawler import Crawler
 from scrapy.downloadermiddlewares.cookies import CookiesMiddleware
 from scrapy.downloadermiddlewares.defaultheaders import DefaultHeadersMiddleware
 from scrapy.downloadermiddlewares.redirect import RedirectMiddleware
@@ -1231,3 +1234,208 @@ class TestCookiesMiddleware:
         request = Request("data:,", cookies={"a": "b"})
         assert self.mw.process_request(request) is None
         assert "Cookie" not in request.headers
+
+
+class TestCookieJarQuotas:
+    """Tests for the COOKIES_MAX_COUNT_PER_JAR and COOKIES_MAX_BYTES_PER_JAR
+    settings.
+
+    The byte size of a cookie is the sum of the UTF-8 encoded lengths of
+    its stored name, value, domain and path, so a cookie named ``a`` with
+    value ``1`` stored for ``example.com`` with path ``/`` accounts for
+    1 + 1 + 11 + 1 = 14 bytes.
+    """
+
+    @staticmethod
+    def _make_mw(settings: dict[str, Any]) -> tuple[CookiesMiddleware, Crawler]:
+        crawler = get_crawler(DefaultSpider, settings_dict=settings)
+        crawler.spider = crawler._create_spider()
+        return build_from_crawler(CookiesMiddleware, crawler), crawler
+
+    @staticmethod
+    def _set_cookie(
+        mw: CookiesMiddleware, url: str, set_cookie: str, jar_key: Any = None
+    ) -> None:
+        meta = {"cookiejar": jar_key}
+        req = Request(url, meta=meta)
+        mw.process_request(req)
+        res = Response(url, headers={"Set-Cookie": set_cookie})
+        assert mw.process_response(req, res) is res
+
+    @staticmethod
+    def _sent_cookies(
+        mw: CookiesMiddleware, url: str, jar_key: Any = None
+    ) -> bytes | None:
+        req = Request(url, meta={"cookiejar": jar_key})
+        mw.process_request(req)
+        return req.headers.get("Cookie")
+
+    def test_unlimited_by_default(self):
+        mw, _ = self._make_mw({})
+        for i in range(10):
+            self._set_cookie(mw, "http://example.com/", f"c{i}={i}; Path=/")
+        assert len(mw.jars[None]) == 10
+
+    def test_count_quota_evicts_least_recently_used(self):
+        mw, _ = self._make_mw({"COOKIES_MAX_COUNT_PER_JAR": 3})
+        self._set_cookie(mw, "http://example.com/a", "a=1; Path=/a")
+        self._set_cookie(mw, "http://example.com/b", "b=2; Path=/b")
+        self._set_cookie(mw, "http://example.com/c", "c=3; Path=/c")
+        # Sending a cookie makes it the most recently used one.
+        assert self._sent_cookies(mw, "http://example.com/a") == b"a=1"
+        self._set_cookie(mw, "http://example.com/d", "d=4; Path=/d")
+        assert self._sent_cookies(mw, "http://example.com/a") == b"a=1"
+        assert self._sent_cookies(mw, "http://example.com/b") is None
+        assert self._sent_cookies(mw, "http://example.com/c") == b"c=3"
+        assert self._sent_cookies(mw, "http://example.com/d") == b"d=4"
+
+    def test_other_domain_read_does_not_refresh(self):
+        mw, _ = self._make_mw({"COOKIES_MAX_COUNT_PER_JAR": 2})
+        self._set_cookie(mw, "http://example.com/", "a=1; Path=/")
+        self._set_cookie(mw, "http://other.example/", "x=1; Path=/")
+        # A request to example.com must not refresh the other.example cookie.
+        assert self._sent_cookies(mw, "http://example.com/") == b"a=1"
+        self._set_cookie(mw, "http://example.com/", "b=2; Path=/")
+        assert self._sent_cookies(mw, "http://other.example/") is None
+        sent = self._sent_cookies(mw, "http://example.com/")
+        assert sent is not None
+        assert set(sent.split(b"; ")) == {b"a=1", b"b=2"}
+
+    def test_byte_quota_counts_multibyte_characters(self):
+        # "á" is 2 UTF-8 bytes, so each cookie accounts for
+        # 1 + 2 + 11 + 1 = 15 bytes and 2 cookies exceed the 29-byte quota.
+        # Counting characters instead of bytes would account for 14 bytes
+        # per cookie and keep both.
+        mw, _ = self._make_mw({"COOKIES_MAX_BYTES_PER_JAR": 29})
+        self._set_cookie(mw, "http://example.com/", "a=á; Path=/")
+        self._set_cookie(mw, "http://example.com/", "b=á; Path=/")
+        assert self._sent_cookies(mw, "http://example.com/") == "b=á".encode()
+
+    def test_byte_quota_counts_domain_and_path(self):
+        # The quota fits exactly a=1 on example.com with path / (14 bytes).
+        mw, crawler = self._make_mw({"COOKIES_MAX_BYTES_PER_JAR": 14})
+        self._set_cookie(mw, "http://example.com/", "a=1; Path=/")
+        # 1 + 1 + 15 + 1 = 18 bytes with the longer domain: rejected.
+        self._set_cookie(mw, "http://sub.example.com/", "b=1; Path=/")
+        # 1 + 1 + 11 + 4 = 17 bytes with the longer path: rejected.
+        self._set_cookie(mw, "http://example.com/abc", "c=1; Path=/abc")
+        assert self._sent_cookies(mw, "http://example.com/") == b"a=1"
+        # Host-only cookies leak to subdomains (known limitation), but the
+        # rejected cookie b must not be there.
+        assert self._sent_cookies(mw, "http://sub.example.com/") == b"a=1"
+        assert self._sent_cookies(mw, "http://example.com/abc") == b"a=1"
+        assert crawler.stats.get_value("cookies/jar_quota_rejected") == 2
+
+    def test_oversize_cookie_rejected_without_evicting(self):
+        mw, crawler = self._make_mw({"COOKIES_MAX_BYTES_PER_JAR": 14})
+        self._set_cookie(mw, "http://example.com/", "a=1; Path=/")
+        # 1 + 10 + 11 + 1 = 23 bytes on its own: rejected, a=1 is kept.
+        self._set_cookie(mw, "http://example.com/", "b=xxxxxxxxxx; Path=/")
+        assert self._sent_cookies(mw, "http://example.com/") == b"a=1"
+        assert len(mw.jars[None]) == 1
+        assert crawler.stats.get_value("cookies/jar_quota_rejected") == 1
+
+    def test_replacement_deducts_old_bytes(self):
+        # a=y (14 bytes) and b=zzzzzzzzzz (23 bytes) fit the 37-byte quota
+        # together only if replacing a=xxxxxxxxxxxxxxxx (29 bytes) with a=y
+        # frees the bytes of the old value.
+        mw, _ = self._make_mw({"COOKIES_MAX_BYTES_PER_JAR": 37})
+        self._set_cookie(mw, "http://example.com/", "a=xxxxxxxxxxxxxxxx; Path=/")
+        self._set_cookie(mw, "http://example.com/", "a=y; Path=/")
+        self._set_cookie(mw, "http://example.com/", "b=zzzzzzzzzz; Path=/")
+        sent = self._sent_cookies(mw, "http://example.com/")
+        assert sent is not None
+        assert set(sent.split(b"; ")) == {b"a=y", b"b=zzzzzzzzzz"}
+        assert len(mw.jars[None]) == 2
+
+    def test_same_name_same_value_not_counted_twice(self):
+        mw, _ = self._make_mw({"COOKIES_MAX_COUNT_PER_JAR": 2})
+        self._set_cookie(mw, "http://example.com/", "a=1; Path=/")
+        self._set_cookie(mw, "http://example.com/", "a=1; Path=/")
+        self._set_cookie(mw, "http://example.com/", "b=2; Path=/")
+        sent = self._sent_cookies(mw, "http://example.com/")
+        assert sent is not None
+        assert set(sent.split(b"; ")) == {b"a=1", b"b=2"}
+
+    def test_expired_cookies_cleared_before_lru_eviction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        now = [1_000_000.0]
+        monkeypatch.setattr(time, "time", lambda: now[0])
+        mw, _ = self._make_mw({"COOKIES_MAX_COUNT_PER_JAR": 2})
+        expires = formatdate(now[0] + 10, usegmt=True)
+        self._set_cookie(
+            mw, "http://example.com/old", f"old=1; Path=/old; Expires={expires}"
+        )
+        self._set_cookie(mw, "http://example.com/keep", "keep=2; Path=/keep")
+        # Refresh the expiring cookie so that keep=2 is the least recently
+        # used one: only clearing expired cookies first can save it.
+        assert self._sent_cookies(mw, "http://example.com/old") == b"old=1"
+        now[0] += 20
+        self._set_cookie(mw, "http://example.com/new", "new=3; Path=/new")
+        assert self._sent_cookies(mw, "http://example.com/keep") == b"keep=2"
+        assert self._sent_cookies(mw, "http://example.com/new") == b"new=3"
+        assert self._sent_cookies(mw, "http://example.com/old") is None
+
+    def test_expired_cookie_bytes_are_freed(self, monkeypatch: pytest.MonkeyPatch):
+        now = [1_000_000.0]
+        monkeypatch.setattr(time, "time", lambda: now[0])
+        # old, keep and new account for 25, 26 and 25 bytes respectively
+        # (name + 10-byte value + 11-byte domain + 1-byte path), so the
+        # 51-byte quota fits keep and new only once the expired old cookie
+        # stops counting.
+        mw, _ = self._make_mw({"COOKIES_MAX_BYTES_PER_JAR": 51})
+        expires = formatdate(now[0] + 10, usegmt=True)
+        self._set_cookie(
+            mw, "http://example.com/", f"old={'o' * 10}; Path=/; Expires={expires}"
+        )
+        self._set_cookie(mw, "http://example.com/", f"keep={'k' * 10}; Path=/")
+        now[0] += 20
+        self._set_cookie(mw, "http://example.com/", f"new={'n' * 10}; Path=/")
+        sent = self._sent_cookies(mw, "http://example.com/")
+        assert sent is not None
+        assert set(sent.split(b"; ")) == {
+            f"keep={'k' * 10}".encode(),
+            f"new={'n' * 10}".encode(),
+        }
+
+    def test_cleared_cookie_leaves_no_ghost_count(self):
+        mw, _ = self._make_mw({"COOKIES_MAX_COUNT_PER_JAR": 2})
+        self._set_cookie(mw, "http://example.com/", "a=1; Path=/")
+        self._set_cookie(mw, "http://example.com/", "b=2; Path=/")
+        mw.jars[None].clear("example.com", "/", "a")
+        self._set_cookie(mw, "http://example.com/", "c=3; Path=/")
+        sent = self._sent_cookies(mw, "http://example.com/")
+        assert sent is not None
+        assert set(sent.split(b"; ")) == {b"b=2", b"c=3"}
+
+    def test_full_clear_resets_quota(self):
+        mw, _ = self._make_mw({"COOKIES_MAX_COUNT_PER_JAR": 1})
+        self._set_cookie(mw, "http://example.com/", "a=1; Path=/")
+        mw.jars[None].clear()
+        self._set_cookie(mw, "http://example.com/", "b=2; Path=/")
+        assert self._sent_cookies(mw, "http://example.com/") == b"b=2"
+
+    def test_released_jar_quota_state_is_forgotten(self):
+        mw, _ = self._make_mw({"COOKIES_MAX_COUNT_PER_JAR": 1})
+        self._set_cookie(mw, "http://example.com/", "a=1; Path=/", jar_key="k")
+        del mw.jars["k"]
+        self._set_cookie(mw, "http://example.com/", "b=2; Path=/", jar_key="k")
+        assert self._sent_cookies(mw, "http://example.com/", jar_key="k") == b"b=2"
+
+    def test_quotas_are_per_jar(self):
+        mw, _ = self._make_mw({"COOKIES_MAX_COUNT_PER_JAR": 1})
+        self._set_cookie(mw, "http://example.com/", "a=1; Path=/", jar_key="one")
+        self._set_cookie(mw, "http://example.com/", "b=2; Path=/", jar_key="two")
+        self._set_cookie(mw, "http://example.com/", "c=3; Path=/", jar_key="two")
+        assert self._sent_cookies(mw, "http://example.com/", jar_key="one") == b"a=1"
+        assert self._sent_cookies(mw, "http://example.com/", jar_key="two") == b"c=3"
+
+    def test_dont_merge_cookies_skips_quota_enforcement(self):
+        mw, _ = self._make_mw({"COOKIES_MAX_COUNT_PER_JAR": 1})
+        self._set_cookie(mw, "http://example.com/", "a=1; Path=/")
+        req = Request("http://example.com/", meta={"dont_merge_cookies": True})
+        mw.process_request(req)
+        res = Response("http://example.com/", headers={"Set-Cookie": "b=2; Path=/"})
+        mw.process_response(req, res)
+        assert self._sent_cookies(mw, "http://example.com/") == b"a=1"

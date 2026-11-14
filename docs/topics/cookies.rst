@@ -129,6 +129,43 @@ header)::
     [...]
 
 
+.. setting:: COOKIES_MAX_COUNT_PER_JAR
+
+COOKIES_MAX_COUNT_PER_JAR
+=========================
+
+.. versionadded:: VERSION
+
+Default: ``0``
+
+Maximum number of cookies kept in each cookie jar. ``0`` (the default)
+means no limit.
+
+When storing a cookie would exceed the limit, expired cookies are
+discarded first, and then the least recently used cookies are evicted
+until the jar is within the limit. A cookie counts as used when it is
+sent in a request.
+
+
+.. setting:: COOKIES_MAX_BYTES_PER_JAR
+
+COOKIES_MAX_BYTES_PER_JAR
+=========================
+
+.. versionadded:: VERSION
+
+Default: ``0``
+
+Maximum total size, in bytes, of the cookies kept in each cookie jar.
+``0`` (the default) means no limit.
+
+The size of a cookie is the sum of the UTF-8 encoded lengths of its
+stored name, value, domain and path. A cookie whose own size exceeds the
+limit is discarded and counted in the ``cookies/jar_quota_rejected``
+stat. Otherwise, cookies are evicted as described in
+:setting:`COOKIES_MAX_COUNT_PER_JAR`.
+
+
 CookiesMiddleware
 =================
 

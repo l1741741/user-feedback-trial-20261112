@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Self, cast
 from scrapy.utils.httpobj import urlparse_cached
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from scrapy import Request
     from scrapy.http import Response
@@ -47,14 +47,127 @@ class _CreationOrderCookieJar(_CookieJar):
         return super()._cookie_attrs(cookies)  # type: ignore[misc,no-any-return]
 
 
+class _QuotaCookieJar(_CreationOrderCookieJar):
+    """Cookie jar that enforces optional cookie count and byte size quotas.
+
+    The byte size of a cookie is the sum of the UTF-8 encoded lengths of
+    its stored name, value, domain and path. When storing a cookie would
+    exceed a quota, expired cookies are discarded first and then cookies
+    are evicted in least-recently-used order. A cookie that on its own
+    exceeds the byte quota is rejected and reported through *on_reject*.
+    """
+
+    def __init__(
+        self,
+        policy: CookiePolicy | None = None,
+        max_count: int | None = None,
+        max_bytes: int | None = None,
+        on_reject: Callable[[Cookie], None] | None = None,
+    ):
+        super().__init__(policy)
+        self.max_count: int | None = max_count
+        self.max_bytes: int | None = max_bytes
+        self.on_reject: Callable[[Cookie], None] | None = on_reject
+        self._count: int = 0
+        self._bytes: int = 0
+        self._use_counter = itertools.count()
+        self._last_used: dict[tuple[str, str, str], int] = {}
+
+    @staticmethod
+    def _cookie_size(cookie: Cookie) -> int:
+        size = (
+            len(cookie.name.encode("utf-8"))
+            + len(cookie.domain.encode("utf-8"))
+            + len(cookie.path.encode("utf-8"))
+        )
+        if cookie.value:
+            size += len(cookie.value.encode("utf-8"))
+        return size
+
+    def _over_quota(self) -> bool:
+        return (
+            self.max_count is not None and self._count > self.max_count
+        ) or (self.max_bytes is not None and self._bytes > self.max_bytes)
+
+    def set_cookie(self, cookie: Cookie) -> None:
+        key = (cookie.domain, cookie.path, cookie.name)
+        size = self._cookie_size(cookie)
+        if (self.max_bytes is not None and size > self.max_bytes) or (
+            self.max_count is not None and self.max_count < 1
+        ):
+            if self.on_reject is not None:
+                self.on_reject(cookie)
+            return
+        try:
+            old = self._cookies[cookie.domain][cookie.path][cookie.name]  # type: ignore[attr-defined]
+        except KeyError:
+            self._count += 1
+        else:
+            self._bytes -= self._cookie_size(old)
+        super().set_cookie(cookie)
+        self._bytes += size
+        self._last_used[key] = next(self._use_counter)
+        if not self._over_quota():
+            return
+        self.clear_expired_cookies()
+        while self._over_quota():
+            # The cookie just stored has the most recent use stamp, so the
+            # victim is always another cookie.
+            victim = min(self._last_used, key=lambda k: self._last_used[k])
+            self.clear(*victim)
+
+    def note_used(self, cookies: list[Cookie]) -> None:
+        """Mark *cookies* as used now, for least-recently-used eviction."""
+        for cookie in cookies:
+            key = (cookie.domain, cookie.path, cookie.name)
+            self._last_used[key] = next(self._use_counter)
+
+    def clear(
+        self,
+        domain: str | None = None,
+        path: str | None = None,
+        name: str | None = None,
+    ) -> None:
+        super().clear(domain, path, name)
+        self._resync()
+
+    def clear_expired_cookies(self) -> None:
+        super().clear_expired_cookies()
+        self._resync()
+
+    def clear_session_cookies(self) -> None:
+        super().clear_session_cookies()
+        self._resync()
+
+    def _resync(self) -> None:
+        """Recompute quota usage and drop use stamps of removed cookies."""
+        self._count = 0
+        self._bytes = 0
+        keys = set()
+        for cookie in self:
+            self._count += 1
+            self._bytes += self._cookie_size(cookie)
+            keys.add((cookie.domain, cookie.path, cookie.name))
+        for key in list(self._last_used):
+            if key not in keys:
+                del self._last_used[key]
+
+
 class CookieJar:
     def __init__(
         self,
         policy: CookiePolicy | None = None,
         check_expired_frequency: int = 10000,
+        max_count: int | None = None,
+        max_bytes: int | None = None,
+        on_reject: Callable[[Cookie], None] | None = None,
     ):
         self.policy: CookiePolicy = policy or DefaultCookiePolicy()
-        self.jar: _CookieJar = _CreationOrderCookieJar(self.policy)
+        self.jar: _CookieJar
+        if max_count is None and max_bytes is None:
+            self.jar = _CreationOrderCookieJar(self.policy)
+        else:
+            self.jar = _QuotaCookieJar(self.policy, max_count, max_bytes, on_reject)
         self.jar._cookies_lock = _DummyLock()  # type: ignore[attr-defined]
         self.check_expired_frequency: int = check_expired_frequency
         self.processed: int = 0
@@ -85,6 +198,11 @@ class CookieJar:
         for host in hosts:
             if host in self.jar._cookies:  # type: ignore[attr-defined]
                 cookies.extend(self.jar._cookies_for_domain(host, wreq))  # type: ignore[attr-defined]
+
+        if isinstance(self.jar, _QuotaCookieJar):
+            # Only cookies matching this request count as used, so that
+            # requests to other domains do not refresh them.
+            self.jar.note_used(cookies)
 
         attrs = self.jar._cookie_attrs(cookies)  # type: ignore[attr-defined]
         if attrs and not wreq.has_header("Cookie"):
