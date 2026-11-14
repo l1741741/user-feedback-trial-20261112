@@ -2385,6 +2385,43 @@ Example:
 
 .. note:: This is a :ref:`pre-crawler setting <pre-crawler-settings>`.
 
+.. setting:: SPIDER_STATE_ATOMIC
+
+SPIDER_STATE_ATOMIC
+-------------------
+
+.. versionadded:: 2.21.0
+
+Default: ``False``
+
+When ``True``, the :class:`~scrapy.extensions.spiderstate.SpiderState`
+extension writes the ``spider.state`` file of :setting:`JOBDIR` atomically:
+the state is first fully serialized into a temporary file in the same
+directory, flushed and fsynced, and only then atomically moved over the
+previous file. If serialization, writing or the final move fails, the
+previous state file is left untouched and the temporary file is removed, so
+a crash or a serialization error can no longer truncate the last resumable
+state.
+
+.. setting:: SPIDER_STATE_BACKUP
+
+SPIDER_STATE_BACKUP
+-------------------
+
+.. versionadded:: 2.21.0
+
+Default: ``False``
+
+When ``True``, the :class:`~scrapy.extensions.spiderstate.SpiderState`
+extension keeps the previous valid spider state in a ``spider.state.bak``
+file next to ``spider.state`` in :setting:`JOBDIR`, updating it before each
+save. If ``spider.state`` cannot be deserialized into a dict when the spider
+opens, the state is restored from a valid ``spider.state.bak`` instead, and
+a warning pointing to both files is logged. If neither file can be
+deserialized into a dict, a
+:class:`~scrapy.extensions.spiderstate.SpiderStateError` is raised and both
+files are left untouched.
+
 .. setting:: STATS_CLASS
 
 STATS_CLASS

@@ -229,6 +229,8 @@ __all__ = [
     "SPIDER_MIDDLEWARES",
     "SPIDER_MIDDLEWARES_BASE",
     "SPIDER_MODULES",
+    "SPIDER_STATE_ATOMIC",
+    "SPIDER_STATE_BACKUP",
     "STATSMAILER_RCPTS",
     "STATS_CLASS",
     "STATS_DUMP",
@@ -645,6 +647,9 @@ SPIDER_MIDDLEWARES_BASE = {
 }
 
 SPIDER_MODULES: list[str] = []
+
+SPIDER_STATE_ATOMIC = False
+SPIDER_STATE_BACKUP = False
 
 STATS_CLASS = "scrapy.statscollectors.MemoryStatsCollector"
 STATS_DUMP = True

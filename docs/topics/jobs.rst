@@ -92,6 +92,24 @@ is omitted for brevity):
         # parse item here
         self.state["items_count"] = self.state.get("items_count", 0) + 1
 
+Protecting the spider state file
+--------------------------------
+
+By default, the ``spider.state`` file is overwritten in place when the spider
+closes, so a crash or a serialization error during the write can destroy the
+last resumable state. Two opt-in settings reduce that risk:
+
+-   :setting:`SPIDER_STATE_ATOMIC` writes the state to a temporary file in
+    the job directory first, fsyncs it, and then atomically replaces
+    ``spider.state``. A failed save leaves the previous state file untouched.
+
+-   :setting:`SPIDER_STATE_BACKUP` additionally keeps the previous valid
+    state in ``spider.state.bak``. If ``spider.state`` is corrupt when the
+    spider opens, the state is restored from a valid backup and a warning
+    pointing to both files is logged. If both files are invalid, a
+    :class:`~scrapy.extensions.spiderstate.SpiderStateError` is raised and
+    neither file is modified, so you can inspect or repair them by hand.
+
 Persistence gotchas
 ===================
 
@@ -203,4 +221,5 @@ Where:
     file.
 
 -   :class:`~scrapy.extensions.spiderstate.SpiderState` creates the
-    ``spider.state`` file.
+    ``spider.state`` file and, with :setting:`SPIDER_STATE_BACKUP`, the
+    ``spider.state.bak`` file.

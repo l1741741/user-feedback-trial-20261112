@@ -207,6 +207,9 @@ attribute of your :class:`~scrapy.Spider` instance:
     ``spider.state`` file exists in the :setting:`JOBDIR` folder, it is loaded
     into the :attr:`~scrapy.Spider.state` attribute.
 
+The :setting:`SPIDER_STATE_ATOMIC` and :setting:`SPIDER_STATE_BACKUP`
+settings make saving and loading the state file more resilient to crashes
+and corruption.
 
 For an example, see :ref:`topics-keeping-persistent-state-between-batches`.
 
