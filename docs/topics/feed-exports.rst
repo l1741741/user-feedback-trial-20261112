@@ -147,6 +147,30 @@ Here are some examples to illustrate:
           space or percent-encoded FTP credentials) and :class:`pathlib.Path`
           keys containing ``%(...)s`` parameters both work as expected.
 
+When a parameter value comes from an untrusted source, such as a tenant
+identifier in a multi-tenant spider, set the ``safe_uri_params`` :ref:`feed
+option <feed-options>` to the list of parameter names that the feed URI may
+use, on top of the built-in ``batch_id``, ``batch_time`` and ``time``
+parameters:
+
+.. code-block:: python
+
+    FEEDS = {
+        "feeds/%(tenant)s/%(batch_id)02d.jsonl": {
+            "format": "jsonlines",
+            "safe_uri_params": ["tenant"],
+        },
+    }
+
+With ``safe_uri_params`` set, parameter values are encoded before they are
+placed into the URI: values used in the URI path are percent-encoded as a
+single path segment, so characters like ``/``, ``%`` or non-ASCII characters
+cannot change the directory structure, while values used in the URI query
+string are form-urlencoded. Values that would resolve to a ``.`` or ``..``
+path segment or to an absolute URI, parameters missing from the list, and
+parameters without a value cause an error instead of being written into the
+URI.
+
 
 .. _topics-feed-storage-backends:
 
@@ -623,6 +647,13 @@ as a fallback value if that key is not provided for a specific feed definition:
 -   ``store_empty``: falls back to :setting:`FEED_STORE_EMPTY`.
 
 -   ``uri_params``: falls back to :setting:`FEED_URI_PARAMS`.
+
+-   ``safe_uri_params``: list of :ref:`storage URI parameter
+    <topics-feed-uri-params>` names allowed in the feed URI, on top of the
+    built-in ``batch_id``, ``batch_time`` and ``time`` parameters. If set,
+    parameter values are safely encoded into the feed URI.
+
+    .. versionadded:: VERSION
 
 -   ``postprocessing``: list of :ref:`plugins <post-processing>` to use for post-processing.
 

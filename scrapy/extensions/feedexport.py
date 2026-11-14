@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 from tempfile import NamedTemporaryFile
 from typing import IO, TYPE_CHECKING, Any, Protocol, Self, TypeAlias, cast
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, quote_plus, unquote, urlparse
 from uuid import uuid4
 
 from twisted.internet.defer import Deferred, DeferredList, DeferredLock
@@ -78,6 +78,90 @@ def apply_uri_params(uri_template: str, uri_params: dict[str, Any]) -> str:
         last = match.end()
     parts.append(uri_template[last:].replace("%", "%%"))
     return "".join(parts) % uri_params
+
+
+#: Placeholder fields that are always allowed when the ``safe_uri_params``
+#: feed option is used, because the feed exporter itself sets them to
+#: filesystem-safe values.
+_SAFE_URI_BUILTIN_FIELDS: frozenset[str] = frozenset(
+    {"batch_id", "batch_time", "time"}
+)
+
+_ABSOLUTE_URI_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
+
+def apply_safe_uri_params(
+    uri_template: str,
+    uri_params: dict[str, Any],
+    allowed_fields: Iterable[str],
+) -> str:
+    """Return *uri_template* with its ``%(...)s`` placeholders replaced by
+    the corresponding *uri_params* values, deterministically encoded.
+
+    Only placeholders for *allowed_fields* (on top of the built-in
+    ``batch_id``, ``batch_time`` and ``time`` fields) are replaced; any
+    other placeholder, or a placeholder without a value in *uri_params*,
+    raises :exc:`ValueError`. Values used before the first ``?`` or ``#``
+    of *uri_template* are percent-encoded as a single URI path segment
+    (so ``/``, ``%``, ``:`` and non-ASCII characters cannot alter the
+    directory structure), while values used afterward are encoded with
+    form-urlencoding rules. Values that would resolve to a ``.`` or
+    ``..`` path segment or to an absolute URI are rejected as well.
+
+    *uri_params* is only read, never modified, and placeholder values are
+    encoded, not re-scanned, so a value that itself looks like a
+    placeholder is kept as inert data.
+    """
+    allowed = _SAFE_URI_BUILTIN_FIELDS | set(allowed_fields)
+    boundary = min(
+        (
+            pos
+            for pos in (uri_template.find("?"), uri_template.find("#"))
+            if pos != -1
+        ),
+        default=-1,
+    )
+    parts: list[str] = []
+    last = 0
+    for match in _FEED_URI_PLACEHOLDER_RE.finditer(uri_template):
+        token = match.group(0)
+        name = token[2 : token.index(")")]
+        if name not in allowed:
+            raise ValueError(
+                f"Placeholder {token!r} in feed URI {uri_template!r} is not "
+                f"one of the fields allowed by the safe_uri_params feed "
+                f"option: {sorted(allowed)}."
+            )
+        if name not in uri_params:
+            raise ValueError(
+                f"Placeholder {token!r} in feed URI {uri_template!r} has no "
+                f"value: {name!r} is not a spider attribute and was not "
+                f"provided by the uri_params function."
+            )
+        formatted = token % {name: uri_params[name]}
+        if boundary != -1 and match.start() > boundary:
+            encoded = quote_plus(formatted, safe="")
+        else:
+            _check_safe_path_value(name, formatted, uri_template)
+            encoded = quote(formatted, safe="")
+        parts.append(uri_template[last : match.start()])
+        parts.append(encoded)
+        last = match.end()
+    parts.append(uri_template[last:])
+    return "".join(parts)
+
+
+def _check_safe_path_value(name: str, value: str, uri_template: str) -> None:
+    if value in (".", ".."):
+        raise ValueError(
+            f"Value of {name!r} in feed URI {uri_template!r} would resolve "
+            f"to the {value!r} path segment."
+        )
+    if _ABSOLUTE_URI_RE.match(value):
+        raise ValueError(
+            f"Value of {name!r} in feed URI {uri_template!r} must not be "
+            f"an absolute URI: {value!r}."
+        )
 
 
 UriParamsCallableT: TypeAlias = Callable[
@@ -760,7 +844,7 @@ class FeedExporter:
         for uri, feed_options in self.feeds.items():
             uri_params = self._get_uri_params(spider, feed_options["uri_params"])
             try:
-                resolved_uri = apply_uri_params(uri, uri_params)
+                resolved_uri = self._apply_uri_params(uri, uri_params, feed_options)
             except KeyError as exc:
                 logger.error(
                     f"Feed {uri!r} could not be opened: it contains a "
@@ -795,11 +879,15 @@ class FeedExporter:
                 if saved_id == 0:
                     continue
                 batch_id = saved_id
-                uri_params = self._get_uri_params(
-                    spider, self.feeds[slot.uri_template]["uri_params"]
+                uri_params = {
+                    **self._get_uri_params(
+                        spider, self.feeds[slot.uri_template]["uri_params"]
+                    ),
+                    "batch_id": batch_id,
+                }
+                uri = self._apply_uri_params(
+                    slot.uri_template, uri_params, self.feeds[slot.uri_template]
                 )
-                uri_params["batch_id"] = batch_id
-                uri = apply_uri_params(slot.uri_template, uri_params)
                 slot.batch_id = batch_id
                 slot.uri = uri
                 slot.storage = self._get_storage(uri, self.feeds[slot.uri_template])
@@ -1011,7 +1099,11 @@ class FeedExporter:
                     self._schedule_slot_close(slot, spider)
                     slot = self._start_new_batch(  # noqa: PLW2901
                         batch_id=slot.batch_id + 1,
-                        uri=apply_uri_params(slot.uri_template, uri_params),
+                        uri=self._apply_uri_params(
+                            slot.uri_template,
+                            uri_params,
+                            self.feeds[slot.uri_template],
+                        ),
                         feed_options=self.feeds[slot.uri_template],
                         spider=spider,
                         uri_template=slot.uri_template,
@@ -1099,6 +1191,23 @@ class FeedExporter:
         *feed_options*."""
         cls = self.storages.get(urlparse(uri).scheme, self.storages["file"])
         return build_from_crawler(cls, self.crawler, uri, feed_options=feed_options)
+
+    def _apply_uri_params(
+        self,
+        uri_template: str,
+        uri_params: dict[str, Any],
+        feed_options: dict[str, Any],
+    ) -> str:
+        """Return *uri_template* with its placeholders replaced using
+        *uri_params*, safely if the ``safe_uri_params`` feed option is set.
+
+        Called before the storage for the resolved URI is built, so a
+        rejected value never reaches a storage.
+        """
+        safe_fields = feed_options.get("safe_uri_params")
+        if safe_fields is None:
+            return apply_uri_params(uri_template, uri_params)
+        return apply_safe_uri_params(uri_template, uri_params, safe_fields)
 
     def _get_uri_params(
         self,
