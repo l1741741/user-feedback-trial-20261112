@@ -517,7 +517,7 @@ JsonItemExporter
 JsonLinesItemExporter
 ---------------------
 
-.. class:: JsonLinesItemExporter(file, **kwargs)
+.. class:: JsonLinesItemExporter(file, record_commit=False, **kwargs)
 
    Exports items in JSON format to the specified file-like object, writing one
    JSON-encoded item per line. The additional ``__init__`` method arguments are passed
@@ -528,6 +528,25 @@ JsonLinesItemExporter
    :param file: the file-like object to use for exporting the data. Its
       ``write`` method should accept ``bytes`` (a disk file opened in binary
       mode, an ``io.BytesIO`` object, etc)
+
+   :param record_commit: If ``True``, each record is committed atomically.
+      All fields are serialized, JSON-encoded and terminated with a newline
+      before anything is written, and the record is then written with a
+      single ``write`` call. If that write raises or is short (returns fewer
+      bytes than given), the record is rolled back:
+
+      * On a *seekable* binary stream the file position and contents are
+        restored to the start of the record, so the stream never contains a
+        partial record and later records can still be exported.
+      * On a *non-seekable* stream rollback is impossible, so
+        :class:`~scrapy.exporters.UnrecoverableWriteError` is raised and the
+        exporter refuses to write any further records, instead of claiming
+        atomic success over a stream that may already hold half a record.
+
+      Serialization or encoding errors happen before any write in both
+      modes, so they never touch the stream. The default (``False``) keeps
+      the historical behavior: a single ``write`` per record with no
+      short-write check and no rollback.
 
    A typical output of this exporter would be:
 

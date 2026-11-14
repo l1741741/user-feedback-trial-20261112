@@ -39,8 +39,20 @@ __all__ = [
     "MarshalItemExporter",
     "PickleItemExporter",
     "PprintItemExporter",
+    "UnrecoverableWriteError",
     "XmlItemExporter",
 ]
+
+
+class UnrecoverableWriteError(OSError):
+    """A record could not be written atomically and the output stream cannot
+    be rolled back to a known-good position.
+
+    Raised by :class:`JsonLinesItemExporter` in per-record commit mode when a
+    write fails (or is short) on a non-seekable stream, or when rolling back
+    a seekable stream itself fails. Once raised, the exporter refuses to
+    write further records instead of silently emitting corrupt output.
+    """
 
 
 class BaseItemExporter(ABC):
@@ -186,16 +198,89 @@ class BaseItemExporter(ABC):
 
 
 class JsonLinesItemExporter(BaseItemExporter):
-    def __init__(self, file: BytesIO, **kwargs: Any):
+    """Exports items as one JSON-encoded object per line.
+
+    :param record_commit: If ``True``, each record is committed atomically:
+        all fields are serialized, JSON-encoded and terminated with a newline
+        *before* anything is written, and the record is then written with a
+        single ``write`` call. If that write raises or is short (returns
+        fewer bytes than given), the record is rolled back:
+
+        * On a **seekable** binary stream the file position and contents are
+          restored to the start of the record (``seek`` + ``truncate``), so
+          the stream never contains a partial record and later records can
+          still be exported.
+        * On a **non-seekable** stream rollback is impossible, so an
+          :class:`UnrecoverableWriteError` is raised and the exporter refuses
+          to write any further records, rather than claiming atomic success
+          over a stream that may already hold half a record.
+
+        If rolling back a seekable stream itself fails,
+        :class:`UnrecoverableWriteError` is raised as well.
+
+        Serialization or encoding errors (e.g. a field serializer raising, or
+        a :exc:`UnicodeEncodeError`) happen before any write in both modes,
+        so they never touch the stream. The default (``record_commit=False``)
+        keeps the historical behavior: a single ``write`` per record with no
+        short-write check and no rollback.
+    """
+
+    def __init__(self, file: BytesIO, record_commit: bool = False, **kwargs: Any):
         super().__init__(dont_fail=True, **kwargs)
         self.file: BytesIO = file
+        self.record_commit: bool = record_commit
+        self._write_broken: bool = False
         self._kwargs.setdefault("ensure_ascii", not self.encoding)
         self.encoder: JSONEncoder = ScrapyJSONEncoder(**self._kwargs)
 
     def export_item(self, item: Any) -> None:
         itemdict = dict(self.get_serialized_fields(item))
         data = self.encoder.encode(itemdict) + "\n"
-        self.file.write(data.encode(self.encoding or "utf-8"))
+        payload = data.encode(self.encoding or "utf-8")
+        if not self.record_commit:
+            self.file.write(payload)
+            return
+        self._commit_record(payload)
+
+    def _commit_record(self, payload: bytes) -> None:
+        if self._write_broken:
+            raise UnrecoverableWriteError(
+                "the output stream was left in an unrecoverable state by a "
+                "previous failed write; refusing to write more records"
+            )
+        try:
+            start = self.file.tell()
+        except (AttributeError, OSError):
+            start = None
+        try:
+            written = self.file.write(payload)
+        except Exception:
+            self._rollback_record(start)
+            raise
+        if written is not None and written != len(payload):
+            self._rollback_record(start)
+            raise OSError(
+                f"short write: {written} of {len(payload)} bytes written; "
+                f"the record was rolled back"
+            )
+
+    def _rollback_record(self, start: int | None) -> None:
+        if start is None:
+            self._write_broken = True
+            raise UnrecoverableWriteError(
+                "a record write failed on a non-seekable stream and cannot "
+                "be rolled back; the stream may contain a partial record"
+            )
+        try:
+            self.file.seek(start)
+            self.file.truncate(start)
+        except Exception as rollback_error:
+            self._write_broken = True
+            raise UnrecoverableWriteError(
+                "a record write failed and rolling the stream back to the "
+                "start of the record failed too; the stream may contain a "
+                "partial record"
+            ) from rollback_error
 
 
 class JsonItemExporter(BaseItemExporter):

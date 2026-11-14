@@ -22,6 +22,7 @@ from scrapy.exporters import (
     PickleItemExporter,
     PprintItemExporter,
     PythonItemExporter,
+    UnrecoverableWriteError,
     XmlItemExporter,
 )
 from scrapy.item import Field, Item
@@ -614,6 +615,226 @@ class TestJsonLinesItemExporter(TestBaseItemExporter):
 class TestJsonLinesItemExporterDataclass(TestJsonLinesItemExporter):
     item_class = MyDataClass
     custom_field_item_class = CustomFieldDataclass
+
+
+def failing_serializer(value):
+    raise ValueError("cannot serialize this field")
+
+
+class FailingFieldItem(Item):
+    name = Field()
+    bad = Field(serializer=failing_serializer)
+
+
+class ShortWriteStream(BytesIO):
+    """A seekable binary stream that writes at most ``limit`` bytes per call
+    and truthfully reports the short count."""
+
+    def __init__(self):
+        super().__init__()
+        self.limit = 1 << 20
+
+    def write(self, data):
+        return super().write(data[: self.limit])
+
+
+class PartialThenFailingWriteStream(BytesIO):
+    """A seekable binary stream whose write stores ``partial`` bytes and then
+    raises, leaving half a record behind."""
+
+    def __init__(self, partial):
+        super().__init__()
+        self.partial = partial
+
+    def write(self, data):
+        super().write(data[: self.partial])
+        raise OSError("simulated write failure")
+
+
+class UnrollbackableStream(BytesIO):
+    """A stream whose write fails and whose seek/truncate (rollback) fails too."""
+
+    def __init__(self):
+        super().__init__()
+        self.write_attempts = 0
+
+    def write(self, data):
+        self.write_attempts += 1
+        raise OSError("simulated write failure")
+
+    def seek(self, *args, **kwargs):
+        raise OSError("simulated seek failure")
+
+    def truncate(self, *args, **kwargs):
+        raise OSError("simulated truncate failure")
+
+
+class NonSeekableStream:
+    """A minimal non-seekable binary stream with fault injection."""
+
+    def __init__(self):
+        self.data = bytearray()
+        self.fail_with = None
+        self.short_limit = None
+        self.write_attempts = 0
+
+    def write(self, data):
+        self.write_attempts += 1
+        if self.fail_with is not None:
+            raise self.fail_with
+        chunk = data if self.short_limit is None else data[: self.short_limit]
+        self.data += chunk
+        return len(chunk)
+
+    def seekable(self):
+        return False
+
+    def tell(self):
+        raise OSError("stream is not seekable")
+
+
+class TestJsonLinesItemExporterRecordCommit(TestJsonLinesItemExporter):
+    """Run the whole JsonLines suite in per-record commit mode (default
+    behavior must be preserved), plus commit-specific guarantees."""
+
+    def _get_exporter(self, **kwargs: Any) -> BaseItemExporter:
+        kwargs["record_commit"] = True
+        return JsonLinesItemExporter(self.output, **kwargs)
+
+    def test_record_commit_exact_bytes_sorted_escaped(self):
+        self.ie = self._get_exporter(sort_keys=True)
+        self.ie.start_exporting()
+        self.ie.export_item(self.i)
+        self.ie.finish_exporting()
+        assert self.output.getvalue() == b'{"age": "22", "name": "John\\u00a3"}\n'
+
+    def test_record_commit_utf8_multibyte(self):
+        self.ie = self._get_exporter(encoding="utf-8", ensure_ascii=False)
+        self.ie.start_exporting()
+        self.ie.export_item(self.i)
+        self.ie.finish_exporting()
+        assert self.output.getvalue() == '{"name": "John\xa3", "age": "22"}\n'.encode(
+            "utf-8"
+        )
+
+    def test_record_commit_does_not_mutate_item(self):
+        item = {"name": "John\xa3", "age": "22"}
+        snapshot = dict(item)
+        self.ie.start_exporting()
+        self.ie.export_item(item)
+        self.ie.finish_exporting()
+        assert item == snapshot
+
+    def test_record_commit_serializer_failure_leaves_stream_untouched(self):
+        good = self.item_class(name="John\xa3", age="22")
+        self.ie.start_exporting()
+        self.ie.export_item(good)
+        pos = self.output.tell()
+        before = self.output.getvalue()
+        with pytest.raises(ValueError, match="cannot serialize this field"):
+            self.ie.export_item(FailingFieldItem(name="x", bad="boom"))
+        assert self.output.tell() == pos
+        assert self.output.getvalue() == before
+        # Later valid records can still be exported.
+        self.ie.export_item(good)
+        self.ie.finish_exporting()
+        lines = self.output.getvalue().splitlines()
+        assert [json.loads(line) for line in lines] == [
+            ItemAdapter(good).asdict(),
+            ItemAdapter(good).asdict(),
+        ]
+
+    def test_record_commit_encoding_failure_leaves_stream_untouched(self):
+        self.ie = self._get_exporter(encoding="ascii", ensure_ascii=False)
+        self.ie.start_exporting()
+        with pytest.raises(UnicodeEncodeError):
+            self.ie.export_item(self.i)  # "John\xa3" is not ASCII-encodable
+        assert self.output.getvalue() == b""
+        assert self.output.tell() == 0
+        # Later valid records can still be exported.
+        ascii_item = self.item_class(name="John", age="22")
+        self.ie.export_item(ascii_item)
+        self.ie.finish_exporting()
+        assert self.output.getvalue() == b'{"name": "John", "age": "22"}\n'
+
+    def test_record_commit_short_write_rolls_back(self):
+        stream = ShortWriteStream()
+        ie = JsonLinesItemExporter(stream, record_commit=True)
+        ie.start_exporting()
+        ie.export_item(self.i)
+        good = stream.getvalue()
+        pos = stream.tell()
+        stream.limit = 5
+        with pytest.raises(OSError, match="short write"):
+            ie.export_item(self.i)
+        # The partial record was rolled back: bytes and position are restored.
+        assert stream.getvalue() == good
+        assert stream.tell() == pos
+        # Later records can still be exported once the stream works again.
+        stream.limit = 1 << 20
+        ie.export_item(self.i)
+        ie.finish_exporting()
+        assert stream.getvalue() == good + good
+
+    def test_record_commit_write_error_rolls_back_partial_bytes(self):
+        stream = PartialThenFailingWriteStream(partial=7)
+        ie = JsonLinesItemExporter(stream, record_commit=True)
+        ie.start_exporting()
+        with pytest.raises(OSError, match="simulated write failure"):
+            ie.export_item(self.i)
+        assert stream.getvalue() == b""
+        assert stream.tell() == 0
+
+    def test_record_commit_rollback_failure_is_unrecoverable(self):
+        stream = UnrollbackableStream()
+        ie = JsonLinesItemExporter(stream, record_commit=True)
+        ie.start_exporting()
+        with pytest.raises(UnrecoverableWriteError):
+            ie.export_item(self.i)
+        attempts = stream.write_attempts
+        # The exporter refuses to write further records.
+        with pytest.raises(UnrecoverableWriteError):
+            ie.export_item(self.i)
+        assert stream.write_attempts == attempts
+
+    def test_record_commit_non_seekable_write_failure_is_unrecoverable(self):
+        stream = NonSeekableStream()
+        stream.fail_with = OSError("simulated write failure")
+        ie = JsonLinesItemExporter(stream, record_commit=True)
+        ie.start_exporting()
+        with pytest.raises(UnrecoverableWriteError):
+            ie.export_item(self.i)
+        # The exporter refuses to write further records.
+        with pytest.raises(UnrecoverableWriteError):
+            ie.export_item(self.i)
+        assert stream.write_attempts == 1
+
+    def test_record_commit_non_seekable_short_write_is_unrecoverable(self):
+        stream = NonSeekableStream()
+        stream.short_limit = 4
+        ie = JsonLinesItemExporter(stream, record_commit=True)
+        ie.start_exporting()
+        with pytest.raises(UnrecoverableWriteError):
+            ie.export_item(self.i)
+        # The partial record could not be rolled back.
+        assert len(stream.data) == 4
+        stream.short_limit = None
+        with pytest.raises(UnrecoverableWriteError):
+            ie.export_item(self.i)
+        assert len(stream.data) == 4
+
+    def test_record_commit_non_seekable_success(self):
+        stream = NonSeekableStream()
+        ie = JsonLinesItemExporter(stream, record_commit=True)
+        ie.start_exporting()
+        ie.export_item(self.i)
+        ie.export_item(self.i)
+        ie.finish_exporting()
+        lines = bytes(stream.data).splitlines()
+        assert [json.loads(line) for line in lines] == [
+            ItemAdapter(self.i).asdict(),
+            ItemAdapter(self.i).asdict(),
+        ]
 
 
 class TestJsonItemExporter(TestJsonLinesItemExporter):
