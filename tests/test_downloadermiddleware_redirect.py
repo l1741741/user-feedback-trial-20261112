@@ -579,6 +579,64 @@ def test_response_referrer_policy(policy, source_url, target_url, expected_refer
     assert target_request.headers.get("Referer") == expected_referrer
 
 
+def test_strict_chain_referrer_policy_carries_over_redirects():
+    crawler = get_crawler(settings_dict={"REFERER_STRICT_CHAIN": True})
+    referrer_mw = build_from_crawler(RefererMiddleware, crawler)
+    redirect_mw = build_from_crawler(RedirectMiddleware, crawler)
+    redirect_mw._referer_spider_middleware = referrer_mw
+
+    request = Request("https://a.example/start")
+    response1 = Response(
+        "https://a.example/start",
+        status=301,
+        headers={
+            "Location": "https://b.example/hop2",
+            "Referrer-Policy": POLICY_ORIGIN,
+        },
+    )
+    request2 = redirect_mw.process_response(request, response1)
+    assert isinstance(request2, Request)
+    assert request2.headers.get("Referer") == b"https://a.example/"
+
+    # No policy header on this response: the origin policy selected at the
+    # previous hop still governs the next request.
+    response2 = Response(
+        "https://b.example/hop2",
+        status=301,
+        headers={"Location": "https://c.example/hop3"},
+    )
+    request3 = redirect_mw.process_response(request2, response2)
+    assert isinstance(request3, Request)
+    assert request3.headers.get("Referer") == b"https://b.example/"
+
+    # A no-referrer policy removes the header, including one set explicitly,
+    # and stays in effect for the rest of the chain.
+    request3.headers["Referer"] = b"https://b.example/leaked"
+    response3 = Response(
+        "https://c.example/hop3",
+        status=301,
+        headers={
+            "Location": "https://d.example/hop4",
+            "Referrer-Policy": POLICY_NO_REFERRER,
+        },
+    )
+    request4 = redirect_mw.process_response(request3, response3)
+    assert isinstance(request4, Request)
+    assert request4.headers.get("Referer") is None
+    response4 = Response(
+        "https://d.example/hop4",
+        status=301,
+        headers={"Location": "https://e.example/final"},
+    )
+    request5 = redirect_mw.process_response(request4, response4)
+    assert isinstance(request5, Request)
+    assert request5.headers.get("Referer") is None
+
+    # The chain state never leaks into the request that started the chain.
+    assert request.headers.get("Referer") is None
+    assert "_referrer_policy_chain" not in request.meta
+
+
 def test_no_warning_when_referer_middleware_present(caplog):
     crawler = get_crawler()
     crawler.get_spider_middleware = MagicMock(  # type: ignore[method-assign]

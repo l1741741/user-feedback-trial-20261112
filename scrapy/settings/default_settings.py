@@ -194,6 +194,7 @@ __all__ = [
     "REDIRECT_MAX_TIMES",
     "REDIRECT_PRIORITY_ADJUST",
     "REFERER_ENABLED",
+    "REFERER_STRICT_CHAIN",
     "REFERRER_POLICIES",
     "REFERRER_POLICY",
     "REMOTE_CONTROL_ENABLED",
@@ -567,6 +568,7 @@ REDIRECT_MAX_TIMES = 20  # uses Firefox default setting
 REDIRECT_PRIORITY_ADJUST = +2
 
 REFERER_ENABLED = True
+REFERER_STRICT_CHAIN = False
 REFERRER_POLICY = "scrapy.spidermiddlewares.referer.DefaultReferrerPolicy"
 REFERRER_POLICIES: dict[str, str | None] = {}
 

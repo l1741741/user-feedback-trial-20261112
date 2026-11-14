@@ -1144,3 +1144,394 @@ def test_not_configured_when_disabled():
     crawler = get_crawler(settings_dict={"REFERER_ENABLED": False})
     with pytest.raises(NotConfigured):
         build_from_crawler(RefererMiddleware, crawler)
+
+
+# A single hop of a locally simulated redirect chain: the response at
+# response_url answers with response_headers, and request_kwargs describe the
+# request that follows it.
+ChainHop: TypeAlias = tuple[str, dict[str, str], str, dict[str, Any]]
+
+
+def _chain_requests(mw: RefererMiddleware, hops: list[ChainHop]) -> list[Request]:
+    """Run *hops* through the middleware the way redirect middlewares do:
+
+    every next request is built with :meth:`Request.replace` (so meta and
+    headers are copied, and the previous request object is never modified),
+    then passed to :meth:`RefererMiddleware.get_processed_request`.
+    """
+    request = Request(hops[0][0])
+    requests: list[Request] = []
+    for response_url, response_headers, next_url, request_meta in hops:
+        response = Response(response_url, headers=response_headers, status=302)
+        request = request.replace(url=next_url, meta={**request.meta, **request_meta})
+        mw.get_processed_request(request, response)
+        requests.append(request)
+    return requests
+
+
+def _referers(requests: list[Request]) -> list[bytes | None]:
+    return [request.headers.get("Referer") for request in requests]
+
+
+class TestStrictChain:
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_setting_default_and_override(self, enabled: bool) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": enabled}))
+        assert mw.strict_chain is enabled
+
+    def test_default_is_disabled(self) -> None:
+        crawler = get_crawler()
+        mw = build_from_crawler(RefererMiddleware, crawler)
+        assert mw.strict_chain is False
+
+    def test_multi_hop_policy_state_carries_forward(self) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        requests = _chain_requests(
+            mw,
+            [
+                (
+                    "https://a.example/1",
+                    {"Referrer-Policy": POLICY_ORIGIN},
+                    "https://b.example/2",
+                    {},
+                ),
+                # No header and no meta: the origin policy from the previous
+                # hop still applies.
+                ("https://b.example/2", {}, "https://c.example/3", {}),
+                ("https://c.example/3", {}, "https://d.example/4", {}),
+            ],
+        )
+        assert _referers(requests) == [
+            b"https://a.example/",
+            b"https://b.example/",
+            b"https://c.example/",
+        ]
+
+    def test_no_referrer_persists_over_the_whole_chain(self) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        requests = _chain_requests(
+            mw,
+            [
+                (
+                    "https://a.example/secret",
+                    {"Referrer-Policy": POLICY_NO_REFERRER},
+                    "https://b.example/2",
+                    {},
+                ),
+                ("https://b.example/2", {}, "https://c.example/3", {}),
+                ("https://c.example/3", {}, "http://d.example/4", {}),
+            ],
+        )
+        assert _referers(requests) == [None, None, None]
+
+    def test_later_header_replaces_carried_policy(self) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        requests = _chain_requests(
+            mw,
+            [
+                (
+                    "https://a.example/1",
+                    {"Referrer-Policy": POLICY_ORIGIN},
+                    "https://b.example/2",
+                    {},
+                ),
+                (
+                    "https://b.example/2",
+                    {"Referrer-Policy": POLICY_NO_REFERRER},
+                    "https://c.example/3",
+                    {},
+                ),
+                ("https://c.example/3", {}, "https://d.example/4", {}),
+            ],
+        )
+        assert _referers(requests) == [
+            b"https://a.example/",
+            None,
+            None,
+        ]
+
+    def test_request_meta_overrides_response_header(self) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        requests = _chain_requests(
+            mw,
+            [
+                (
+                    "https://a.example/1",
+                    {"Referrer-Policy": POLICY_NO_REFERRER},
+                    "https://b.example/2",
+                    {"referrer_policy": POLICY_UNSAFE_URL},
+                ),
+            ],
+        )
+        assert _referers(requests) == [b"https://a.example/1"]
+
+    def test_invalid_meta_suppresses_header_and_uses_default(self) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        with pytest.warns(RuntimeWarning, match="Could not load referrer policy"):
+            requests = _chain_requests(
+                mw,
+                [
+                    (
+                        "https://a.example/1",
+                        {"Referrer-Policy": POLICY_ORIGIN},
+                        "https://b.example/2",
+                        {"referrer_policy": "typo-policy"},
+                    ),
+                ],
+            )
+        # An invalid but set meta value suppresses the response header, as
+        # with policy(), and the default policy applies.
+        assert _referers(requests) == [b"https://a.example/1"]
+
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [
+            # Last supported token wins.
+            (
+                f"unknown-policy, {POLICY_ORIGIN}, {POLICY_NO_REFERRER}",
+                None,
+            ),
+            (
+                f"{POLICY_ORIGIN}, unknown-policy, {POLICY_UNSAFE_URL}",
+                b"https://a.example/1",
+            ),
+            # Unknown tokens never make a no-referrer policy fall back to
+            # unsafe-url.
+            (f"unknown-policy, {POLICY_NO_REFERRER}", None),
+            # Only unknown tokens: the settings' default policy is used.
+            ("unknown-policy, another-unknown-policy", b"https://a.example/1"),
+        ],
+    )
+    def test_multiple_header_tokens(self, header: str, expected: bytes | None) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            requests = _chain_requests(
+                mw,
+                [
+                    (
+                        "https://a.example/1",
+                        {"Referrer-Policy": header},
+                        "https://b.example/2",
+                        {},
+                    ),
+                ],
+            )
+        assert _referers(requests) == [expected]
+
+    def test_invalid_header_uses_carried_chain_policy(self) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            requests = _chain_requests(
+                mw,
+                [
+                    (
+                        "https://a.example/1",
+                        {"Referrer-Policy": POLICY_ORIGIN},
+                        "https://b.example/2",
+                        {},
+                    ),
+                    (
+                        "https://b.example/2",
+                        {"Referrer-Policy": "unknown-policy"},
+                        "https://c.example/3",
+                        {},
+                    ),
+                ],
+            )
+        assert _referers(requests) == [
+            b"https://a.example/",
+            b"https://b.example/",
+        ]
+
+    def test_explicit_referer_cannot_bypass_no_referrer(self) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        response = Response(
+            "https://a.example/1",
+            headers={"Referrer-Policy": POLICY_NO_REFERRER},
+            status=302,
+        )
+        request = Request(
+            "https://b.example/2",
+            headers={"Referer": "https://a.example/leaked-path"},
+        )
+        mw.get_processed_request(request, response)
+        assert request.headers.get("Referer") is None
+
+    def test_explicit_referer_replaced_with_policy_value(self) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        response = Response("https://a.example/1", status=302)
+        request = Request(
+            "https://b.example/2",
+            headers={"Referer": "https://other.example/stale"},
+        )
+        mw.get_processed_request(request, response)
+        assert request.headers.get("Referer") == b"https://a.example/1"
+
+    def test_default_mode_keeps_explicit_referer(self) -> None:
+        # The historical setdefault() behavior is preserved when strict chain
+        # mode is disabled.
+        mw = RefererMiddleware(Settings())
+        response = Response(
+            "https://a.example/1",
+            headers={"Referrer-Policy": POLICY_NO_REFERRER},
+            status=302,
+        )
+        request = Request(
+            "https://b.example/2",
+            headers={"Referer": "https://a.example/kept"},
+        )
+        mw.get_processed_request(request, response)
+        assert request.headers.get("Referer") == b"https://a.example/kept"
+
+    @pytest.mark.parametrize(
+        ("response_url", "request_url", "expected"),
+        [
+            # HTTPS downgrade: no referrer with the default policy.
+            ("https://a.example/secret", "http://b.example/2", None),
+            # Upgrade and same-level requests keep the full URL.
+            ("http://a.example/1", "https://b.example/2", b"http://a.example/1"),
+            ("https://a.example/1", "https://b.example/2", b"https://a.example/1"),
+            ("http://a.example/1", "http://b.example/2", b"http://a.example/1"),
+        ],
+    )
+    def test_downgrade(
+        self, response_url: str, request_url: str, expected: bytes | None
+    ) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        requests = _chain_requests(mw, [(response_url, {}, request_url, {})])
+        assert _referers(requests) == [expected]
+
+    @pytest.mark.parametrize("scheme_url", ["data:,foo", "file:///tmp/secret.html"])
+    def test_non_network_response_scheme(self, scheme_url: str) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        response = Response(scheme_url, status=302)
+        request = Request("https://b.example/2")
+        mw.get_processed_request(request, response)
+        assert request.headers.get("Referer") is None
+
+    def test_relative_location_resolves_same_origin(self) -> None:
+        # Redirect middlewares resolve relative Location values before calling
+        # the referer middleware, so the request URL is already absolute.
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        requests = _chain_requests(
+            mw,
+            [
+                ("https://a.example/path", {}, "https://a.example/path/next", {}),
+                (
+                    "https://a.example/path/next",
+                    {},
+                    "https://a.example/other",
+                    {},
+                ),
+            ],
+        )
+        assert _referers(requests) == [
+            b"https://a.example/path",
+            b"https://a.example/path/next",
+        ]
+
+    def test_source_request_and_response_are_not_modified(self) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        source = Request("https://a.example/1")
+        response = Response(
+            "https://a.example/1",
+            headers={"Referrer-Policy": POLICY_NO_REFERRER},
+            status=302,
+        )
+        redirected = source.replace(url="https://b.example/2")
+        mw.get_processed_request(redirected, response)
+        assert "Referer" not in source.headers
+        assert RefererMiddleware._CHAIN_POLICY_META not in source.meta
+        assert response.headers.get("Referrer-Policy") == b"no-referrer"
+
+    def test_chains_do_not_share_policy_state(self) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        first = _chain_requests(
+            mw,
+            [
+                (
+                    "https://a.example/1",
+                    {"Referrer-Policy": POLICY_NO_REFERRER},
+                    "https://b.example/2",
+                    {},
+                ),
+            ],
+        )
+        assert _referers(first) == [None]
+        second = _chain_requests(
+            mw,
+            [("https://c.example/1", {}, "https://d.example/2", {})],
+        )
+        assert _referers(second) == [b"https://c.example/1"]
+
+    def test_chain_state_stored_on_request_meta(self) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        requests = _chain_requests(
+            mw,
+            [
+                (
+                    "https://a.example/1",
+                    {"Referrer-Policy": POLICY_ORIGIN},
+                    "https://b.example/2",
+                    {},
+                ),
+            ],
+        )
+        assert (
+            requests[0].meta[RefererMiddleware._CHAIN_POLICY_META].__name__
+            == "OriginPolicy"
+        )
+
+    def test_start_request_untouched(self) -> None:
+        mw = RefererMiddleware(Settings({"REFERER_STRICT_CHAIN": True}))
+        request = Request("https://start.example/")
+        assert mw.get_processed_request(request, None) is request
+        assert "Referer" not in request.headers
+
+
+class TestOriginComparison:
+    @pytest.mark.parametrize(
+        ("url1", "url2"),
+        [
+            ("https://h.example/a", "https://h.example/b"),
+            # Default ports are normalized away.
+            ("https://h.example:443/a", "https://h.example/b"),
+            ("http://h.example:80/a", "http://h.example/b"),
+            ("ftp://h.example:21/a", "ftp://h.example/b"),
+            # Explicit non-default ports must match exactly.
+            ("http://h.example:8080/a", "http://h.example:8080/b"),
+            # Scheme and host case are normalized.
+            ("HTTPS://H.Example/a", "https://h.example/b"),
+            # User info and fragments are ignored.
+            ("https://user:pass@h.example/a#frag", "https://h.example/b"),
+            # IDNA: Unicode and punycode hosts are the same origin.
+            ("http://bücher.example/a", "http://xn--bcher-kva.example/b"),
+            ("http://例え.jp/a", "http://xn--r8jz45g.jp/b"),
+        ],
+    )
+    def test_same_origin(self, url1: str, url2: str) -> None:
+        assert SameOriginPolicy().same_origin(url1, url2)
+
+    @pytest.mark.parametrize(
+        ("url1", "url2"),
+        [
+            ("https://h.example/a", "http://h.example/b"),
+            ("https://h.example:444/a", "https://h.example/b"),
+            ("https://h.example/a", "https://other.example/b"),
+            ("http://h.example:8080/a", "http://h.example:8081/b"),
+            ("http://bücher.example/a", "http://other.example/b"),
+        ],
+    )
+    def test_different_origin(self, url1: str, url2: str) -> None:
+        assert not SameOriginPolicy().same_origin(url1, url2)
+
+    @pytest.mark.parametrize(
+        "url",
+        ["data:,foo", "file:///tmp/page.html", "blob:https://h.example/uuid"],
+    )
+    def test_non_network_schemes_match_each_other_only(self, url: str) -> None:
+        policy = SameOriginPolicy()
+        assert policy.same_origin(url, url)
+        assert not policy.same_origin(url, "https://h.example/")

@@ -367,6 +367,45 @@ Default: ``True``
 
 Whether to enable referer middleware.
 
+.. setting:: REFERER_STRICT_CHAIN
+
+REFERER_STRICT_CHAIN
+^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 2.20.0
+
+Default: ``False``
+
+Whether the referer middleware enforces the referrer policy of each hop of a
+redirect chain.
+
+When disabled, the "Referer" header of a request is computed once from the
+response that yielded the request, and a "Referer" header set explicitly on a
+:class:`~scrapy.Request` is kept whenever the middleware would not set one
+itself.
+
+When enabled, each hop of a redirect chain (HTTP redirects and meta-refresh
+redirects) is handled according to the `Referrer Policy`_ in effect for that
+hop:
+
+- the request's ``referrer_policy`` :ref:`Request.meta <topics-request-meta>`
+  key takes precedence over the response's ``Referrer-Policy`` header, which
+  itself takes precedence over the policy carried from the previous hop and,
+  finally, the :setting:`REFERRER_POLICY` setting;
+- when a header or meta value lists several comma-separated policies, the last
+  supported value is used; values that are not known policy names are ignored,
+  they never make a ``no-referrer`` policy fall back to ``unsafe-url``;
+- an explicitly set "Referer" header is removed or replaced whenever the
+  policy of the hop does not allow sending it, so it cannot bypass a
+  ``no-referrer`` policy;
+- origins are compared on their scheme, host and port only: hosts are
+  lowercased and IDNA-encoded, default ports, user info and fragments are
+  ignored.
+
+The policy state of a chain is carried along by the requests of that chain
+only, so different chains never influence one another, and the responses and
+earlier requests of a chain are not modified.
+
 .. setting:: REFERRER_POLICY
 
 REFERRER_POLICY

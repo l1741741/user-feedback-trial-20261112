@@ -24,6 +24,7 @@ class MetaCopyDetectionMiddleware(BaseSpiderMiddleware):
         {
             "_auth_proxy",
             "_dont_cache",
+            "_referrer_policy_chain",
             "_scheme_proxy",
             "cache_timestamp",
             "download_latency",

@@ -5,6 +5,7 @@ originated it.
 
 from __future__ import annotations
 
+import contextlib
 import warnings
 from abc import ABC, abstractmethod
 from functools import lru_cache
@@ -32,6 +33,39 @@ if TYPE_CHECKING:
 @lru_cache
 def _strip_url(url: str, origin_only: bool) -> str:
     return strip_url(url, origin_only=origin_only)
+
+
+# Default ports of the schemes whose origins can be compared. A port that is
+# the default port of its scheme is omitted from the comparison.
+_DEFAULT_PORTS: dict[str, int] = {
+    "http": 80,
+    "https": 443,
+    "ftp": 21,
+    "ftps": 990,
+}
+
+
+@lru_cache
+def _origin_tuple(url: str) -> tuple[str, str, int | None] | None:
+    """Return the normalized (scheme, host, port) origin tuple of *url*.
+
+    The scheme and host are lowercased, non-ASCII hosts are encoded with IDNA,
+    user info and fragments are ignored, and a port that is the default port
+    of the scheme is treated as absent. Return ``None`` for URLs without an
+    origin, such as ``data:`` or ``file:`` URLs.
+    """
+    parsed = urlparse_cached(url)
+    host = parsed.hostname
+    if host is None:
+        return None
+    with contextlib.suppress(UnicodeError):
+        # Keep a host that IDNA does not encode, comparison still works when
+        # both URLs carry the same non-encodable host name.
+        host = host.encode("idna").decode("ascii")
+    port = parsed.port
+    if port == _DEFAULT_PORTS.get(parsed.scheme):
+        port = None
+    return parsed.scheme.lower(), host, port
 
 
 LOCAL_SCHEMES: tuple[str, ...] = (
@@ -93,6 +127,19 @@ class ReferrerPolicy(ABC):
     def origin(self, url: str) -> str | None:
         """Return serialized origin (scheme, host, port) for a request or response URL."""
         return self.strip_url(url, origin_only=True)
+
+    def same_origin(self, url1: str, url2: str) -> bool:
+        """Whether *url1* and *url2* share a normalized origin.
+
+        Origins are compared on scheme, host and port, with hosts lowercased
+        and IDNA-encoded, default ports normalized away, and user info as well
+        as fragments ignored. URLs without an origin, such as ``data:`` or
+        ``file:`` URLs, only match each other when their origin tuple is
+        identical.
+        """
+        origin1 = _origin_tuple(url1)
+        origin2 = _origin_tuple(url2)
+        return origin1 == origin2
 
     def potentially_trustworthy(self, url: str) -> bool:
         # Note: this does not follow https://w3c.github.io/webappsec-secure-contexts/#is-url-trustworthy
@@ -288,6 +335,10 @@ class DefaultReferrerPolicy(NoReferrerWhenDowngradePolicy):
 
 
 class RefererMiddleware(BaseSpiderMiddleware):
+    # Per-chain state, carried in Request.meta so that each redirect chain
+    # keeps its own policy state and chains never share any.
+    _CHAIN_POLICY_META = "_referrer_policy_chain"
+
     def __init__(self, settings: BaseSettings | None = None):  # pylint: disable=super-init-not-called
         self.default_policy: type[ReferrerPolicy] = DefaultReferrerPolicy
         self.policies: dict[str, type[ReferrerPolicy]] = {
@@ -306,6 +357,7 @@ class RefererMiddleware(BaseSpiderMiddleware):
         }
         # Reference: https://www.w3.org/TR/referrer-policy/#referrer-policy-empty-string
         self.policies[""] = NoReferrerWhenDowngradePolicy
+        self.strict_chain: bool = False
         if settings is None:
             warn(
                 "Instantiating RefererMiddleware without a 'settings' argument is "
@@ -325,6 +377,7 @@ class RefererMiddleware(BaseSpiderMiddleware):
         )
         assert settings_policy
         self.default_policy = settings_policy
+        self.strict_chain = settings.getbool("REFERER_STRICT_CHAIN")
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
@@ -438,7 +491,57 @@ class RefererMiddleware(BaseSpiderMiddleware):
         if response is None:
             # start requests
             return request
+        if self.strict_chain:
+            return self._get_strict_chain_request(request, response)
         referrer = self.policy(response, request).referrer(response.url, request.url)
         if referrer is not None:
             request.headers.setdefault("Referer", referrer)
         return request
+
+    def _get_strict_chain_request(
+        self, request: Request, response: Response
+    ) -> Request:
+        """Set the Referer of *request* following one redirect chain strictly.
+
+        Unlike the default behavior, a Referer header already present on
+        *request* can never bypass the policy: it is removed whenever the
+        policy of this hop yields no referrer. The referrer policy selected
+        for this hop is stored on the new request, so the next hop of the
+        chain can fall back to it when its own response does not define a
+        valid one.
+        """
+        policy = self._chain_policy(request, response)
+        referrer = policy.referrer(response.url, request.url)
+        if referrer is None:
+            request.headers.pop("Referer", None)
+        else:
+            request.headers["Referer"] = referrer
+        request.meta[self._CHAIN_POLICY_META] = type(policy)
+        return request
+
+    def _chain_policy(self, request: Request, response: Response) -> ReferrerPolicy:
+        """Return the referrer policy governing the hop from *response* to
+        *request*.
+
+        An explicit policy from Request meta wins, followed by a valid policy
+        from the response Referrer-Policy header. If neither provides one, the
+        policy carried by the chain so far, or the settings' default policy,
+        is used.
+        """
+        policy_name = request.meta.get("referrer_policy")
+        allow_import_path = True
+        if policy_name is None and isinstance(response, Response):
+            policy_header = response.headers.get("Referrer-Policy")
+            if policy_header is not None:
+                policy_name = policy_header.decode("latin1")
+                allow_import_path = False
+        if policy_name is not None:
+            policy_cls = self._load_policy_class(
+                policy_name, warning_only=True, allow_import_path=allow_import_path
+            )
+            if policy_cls is not None:
+                return policy_cls()
+        previous = request.meta.get(self._CHAIN_POLICY_META)
+        if isinstance(previous, type) and issubclass(previous, ReferrerPolicy):
+            return previous()
+        return self.default_policy()
