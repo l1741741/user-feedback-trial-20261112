@@ -171,6 +171,18 @@ specify a path (e.g. ``/tmp/export.csv``). Alternatively, you can use a
 Supported :ref:`modes <feed-mode>`: ``"append"``, ``"create"`` and
 ``"overwrite"``. If :setting:`FEED_MODE` is ``None``, ``"append"`` is used.
 
+Set the ``atomic`` :ref:`feed option <feed-options>` to ``True`` to write the
+feed to a temporary file in the same directory and replace the target with it
+only once the exporter and all post-processing plugins have finished
+successfully. A failed export then leaves any file already at the target path
+untouched, instead of truncating or overwriting it with partial data. The
+``atomic`` option requires the ``"overwrite"`` mode and is ignored by the
+other storage backends.
+
+.. versionadded:: 2.21.0
+
+    The ``atomic`` feed option.
+
 .. _topics-feed-storage-ftp:
 .. _feed-storage-ftp:
 
@@ -619,6 +631,13 @@ as a fallback value if that key is not provided for a specific feed definition:
 -   ``mode``: falls back to :setting:`FEED_MODE`.
 
     .. versionadded:: 2.20.0
+
+-   ``atomic``: whether the feed is written to a temporary file and moved to
+    its target path only once it is complete. Only supported by the
+    :ref:`local filesystem <topics-feed-storage-fs>` storage backend, where it
+    requires the ``"overwrite"`` mode. Defaults to ``False``.
+
+    .. versionadded:: 2.21.0
 
 -   ``store_empty``: falls back to :setting:`FEED_STORE_EMPTY`.
 

@@ -203,6 +203,7 @@ class TestFeedExportConfig:
             "store_empty": True,
             "uri_params": (1, 2, 3, 4),
             "batch_item_count": 2,
+            "atomic": False,
             "item_export_kwargs": {},
         }
 
@@ -229,6 +230,7 @@ class TestFeedExportConfig:
             "store_empty": True,
             "uri_params": None,
             "batch_item_count": 2,
+            "atomic": False,
             "item_export_kwargs": {},
         }
 

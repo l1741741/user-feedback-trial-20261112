@@ -418,7 +418,9 @@ feed_slot_closed
 .. signal:: feed_slot_closed
 .. function:: feed_slot_closed(slot)
 
-    Sent when a :ref:`feed exports <topics-feed-exports>` slot is closed.
+    Sent when a :ref:`feed exports <topics-feed-exports>` slot has been
+    closed and its feed has been stored successfully. The signal is not sent
+    when storing the feed fails.
 
     This signal supports :ref:`asynchronous handlers <signal-deferred>`.
 

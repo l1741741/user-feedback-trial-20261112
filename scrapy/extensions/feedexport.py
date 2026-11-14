@@ -260,19 +260,65 @@ class FileFeedStorage:
 
     def __init__(self, uri: str, *, feed_options: dict[str, Any] | None = None):
         self.path: str = file_uri_to_path(uri) if uri.startswith("file:") else uri
+        feed_options = feed_options or {}
         self.write_mode: OpenBinaryMode = _WRITE_MODES[
             _get_mode(self, feed_options, "append")
         ]
+        self.atomic: bool = bool(feed_options.get("atomic", False))
+        if self.atomic and self.write_mode != "wb":
+            raise ValueError(
+                "The atomic feed option requires the 'overwrite' feed mode "
+                f"(feed URI: {uri})."
+            )
+        # Set by open() in atomic mode, so that an unfinished feed can be
+        # discarded without ever touching the target path.
+        self._temp_path: Path | None = None
 
     def open(self, spider: Spider) -> IO[bytes]:
         dirname = Path(self.path).parent
         if dirname and not dirname.exists():
             dirname.mkdir(parents=True)
+        if self.atomic:
+            # The temporary file lives next to the target, so that replacing
+            # the target with it is an atomic rename rather than a copy.
+            temp_file = NamedTemporaryFile(
+                mode="wb",
+                dir=dirname,
+                prefix=f".{Path(self.path).name}.",
+                suffix=".tmp",
+                delete=False,
+            )
+            self._temp_path = Path(temp_file.name)
+            return temp_file
         return Path(self.path).open(self.write_mode)
 
     def store(self, file: IO[bytes]) -> Deferred[None] | None:
+        if self.atomic:
+            assert self._temp_path is not None
+            try:
+                file.close()
+                self._temp_path.replace(self.path)
+            except OSError:
+                self._discard_temp_file(file)
+                raise
+            self._temp_path = None
+            return None
         file.close()
         return None
+
+    def _abort(self, file: IO[bytes]) -> None:
+        """Discard a feed that could not be exported, keeping any file at the
+        target path untouched. Only relevant in atomic mode."""
+        self._discard_temp_file(file)
+        self._temp_path = None
+
+    def _discard_temp_file(self, file: IO[bytes]) -> None:
+        if not file.closed:
+            with contextlib.suppress(OSError):
+                file.close()
+        if self._temp_path is not None:
+            with contextlib.suppress(OSError):
+                self._temp_path.unlink()
 
 
 class S3FeedStorage(BlockingFeedStorage):
@@ -892,14 +938,7 @@ class FeedExporter:
         if slot._skipped:
             return
 
-        if slot.itemcount:
-            # Normal case
-            await slot.finish_exporting()
-        elif slot.store_empty and slot.batch_id == 1:
-            # Need to store the empty file
-            await slot.start_exporting()
-            await slot.finish_exporting()
-        else:
+        if not slot.itemcount and not (slot.store_empty and slot.batch_id == 1):
             # In this case, the file is not stored, so no processing is required.
             return
 
@@ -909,10 +948,18 @@ class FeedExporter:
             f"feedexport/item_count/{slot_type}", slot.itemcount
         )
         try:
+            if slot.itemcount:
+                # Normal case
+                await slot.finish_exporting()
+            else:
+                # Need to store the empty file
+                await slot.start_exporting()
+                await slot.finish_exporting()
             await ensure_awaitable(slot.storage.store(self._get_file(slot)))
         except FileExistsError:
             self._skip(slot)
             self.crawler.stats.inc_value(f"feedexport/failed_count/{slot_type}")
+            self._discard_slot(slot)
         except Exception:
             logger.exception(
                 "Error storing %s",
@@ -920,13 +967,34 @@ class FeedExporter:
                 extra={"spider": spider},
             )
             self.crawler.stats.inc_value(f"feedexport/failed_count/{slot_type}")
+            self._discard_slot(slot)
         else:
             logger.info("Stored %s", logmsg, extra={"spider": spider})
             self.crawler.stats.inc_value(f"feedexport/success_count/{slot_type}")
+            # The slot is reported as closed only once its feed has been
+            # committed, so that recipients never observe a failed delivery.
+            await self.crawler.signals.send_catch_log_async(
+                signals.feed_slot_closed, slot=slot
+            )
 
-        await self.crawler.signals.send_catch_log_async(
-            signals.feed_slot_closed, slot=slot
-        )
+    def _discard_slot(self, slot: FeedSlot) -> None:
+        """Close and remove what a failed export left behind, leaving the
+        target path of the feed untouched."""
+        if slot.file is None:
+            return
+        if isinstance(slot.file, PostProcessingManager):
+            with contextlib.suppress(Exception):
+                slot.file.close()
+            file = slot.file.file
+        else:
+            file = slot.file
+        abort = getattr(slot.storage, "_abort", None)
+        if callable(abort):
+            with contextlib.suppress(Exception):
+                abort(file)
+        elif not file.closed:
+            with contextlib.suppress(Exception):
+                file.close()
 
     def _start_new_batch(
         self,
@@ -1065,6 +1133,7 @@ class FeedExporter:
             try:
                 storage = self._get_storage(uri, feed_options)
                 self._check_storage_mode(uri, storage, feed_options)
+                self._check_storage_atomic(uri, storage, feed_options)
                 return True
             except NotConfigured as e:
                 logger.error(
@@ -1074,6 +1143,16 @@ class FeedExporter:
         else:
             logger.error("Unknown feed storage scheme: %(scheme)s", {"scheme": scheme})
         return False
+
+    @staticmethod
+    def _check_storage_atomic(
+        uri: str, storage: FeedStorageProtocol, feed_options: dict[str, Any]
+    ) -> None:
+        if feed_options.get("atomic") and not isinstance(storage, FileFeedStorage):
+            logger.warning(
+                f"The atomic feed option of the {uri} feed is ignored: only the "
+                f"local filesystem storage ({FileFeedStorage.__name__}) supports it."
+            )
 
     @staticmethod
     def _check_storage_mode(
