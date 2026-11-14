@@ -31,6 +31,64 @@ logger = logging.getLogger(__name__)
 
 _SCALAR_TYPES: frozenset[type] = frozenset({bool, bytes, float, int, str, type(None)})
 
+
+def _validate_fields_to_export(
+    fields_to_export: Mapping[str, str] | Iterable[str | tuple[str, str]],
+) -> dict[str, str]:
+    """Return *fields_to_export* as a new dict mapping field names to output
+    names, raising :exc:`TypeError` or :exc:`ValueError` on invalid entries.
+
+    Used when :attr:`BaseItemExporter.strict_fields_to_export` is set. The
+    input object is never modified, and one-shot iterables are consumed once
+    so that the returned dict can be used for the whole export.
+    """
+    entries: Iterable[Any]
+    if isinstance(fields_to_export, Mapping):
+        entries = list(fields_to_export.items())
+    elif isinstance(fields_to_export, (str, bytes)) or not isinstance(
+        fields_to_export, Iterable
+    ):
+        raise TypeError(
+            "fields_to_export must be a mapping or an iterable of field "
+            "names and (field name, output name) pairs, got "
+            f"{fields_to_export!r}"
+        )
+    else:
+        entries = list(fields_to_export)
+    result: dict[str, str] = {}
+    for entry in entries:
+        if isinstance(entry, str):
+            field_name, output_name = entry, entry
+        elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+            field_name, output_name = entry
+        else:
+            raise TypeError(
+                "fields_to_export entries must be field names or "
+                f"(field name, output name) pairs, got {entry!r}"
+            )
+        for name in (field_name, output_name):
+            if not isinstance(name, str):
+                raise TypeError(
+                    "fields_to_export field names and output names must be "
+                    f"strings, got {name!r}"
+                )
+            if not name:
+                raise ValueError(
+                    "fields_to_export field names and output names must not "
+                    "be empty strings"
+                )
+        if field_name in result:
+            raise ValueError(
+                f"fields_to_export maps field {field_name!r} more than once"
+            )
+        if output_name in result.values():
+            raise ValueError(
+                "fields_to_export maps multiple fields to output name "
+                f"{output_name!r}"
+            )
+        result[field_name] = output_name
+    return result
+
 __all__ = [
     "BaseItemExporter",
     "CsvItemExporter",
@@ -54,11 +112,16 @@ class BaseItemExporter(ABC):
         (useful for using with keyword arguments in subclasses ``__init__`` methods)
         """
         self.encoding: str | None = options.pop("encoding", None)
-        self.fields_to_export: Mapping[str, str] | Iterable[str] | None = options.pop(
-            "fields_to_export", None
-        )
+        self.fields_to_export: (
+            Mapping[str, str] | Iterable[str | tuple[str, str]] | None
+        ) = options.pop("fields_to_export", None)
         self.export_empty_fields: bool = options.pop("export_empty_fields", False)
         self.indent: int | None = options.pop("indent", None)
+        self.strict_fields_to_export: bool = options.pop(
+            "strict_fields_to_export", False
+        )
+        if self.strict_fields_to_export and self.fields_to_export is not None:
+            self.fields_to_export = _validate_fields_to_export(self.fields_to_export)
         if not dont_fail and options:
             raise TypeError(f"Unexpected options: {', '.join(options.keys())}")
 

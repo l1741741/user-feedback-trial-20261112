@@ -751,3 +751,274 @@ class TestCustomExporterItem:
 
 class TestCustomExporterDataclass(TestCustomExporterItem):
     item_class = MyDataClass
+
+
+class TestStrictFieldsToExport:
+    """Tests for the strict_fields_to_export option of BaseItemExporter."""
+
+    def _export_csv(self, items: list[Any], **kwargs: Any) -> bytes:
+        output = BytesIO()
+        ie = CsvItemExporter(output, **kwargs)
+        ie.start_exporting()
+        for item in items:
+            ie.export_item(item)
+        ie.finish_exporting()
+        return output.getvalue()
+
+    def _export_json(self, items: list[Any], **kwargs: Any) -> Any:
+        output = BytesIO()
+        ie = JsonItemExporter(output, **kwargs)
+        ie.start_exporting()
+        for item in items:
+            ie.export_item(item)
+        ie.finish_exporting()
+        return json.loads(output.getvalue())
+
+    def test_csv_headers_and_rows_interleaved_items_and_dicts(self):
+        items = [
+            MyItem(name="John", age="22"),
+            {"name": "Mary", "age": "33"},
+            MyItem(name="Paul", age="44"),
+        ]
+        result = self._export_csv(
+            items,
+            fields_to_export={"name": "姓名", "age": "年龄"},
+            strict_fields_to_export=True,
+        )
+        assert result == "姓名,年龄\r\nJohn,22\r\nMary,33\r\nPaul,44\r\n".encode()
+
+    def test_csv_sequence_of_pairs(self):
+        result = self._export_csv(
+            [MyItem(name="John", age="22")],
+            fields_to_export=[("name", "姓名"), ("age", "年龄")],
+            strict_fields_to_export=True,
+        )
+        assert result == "姓名,年龄\r\nJohn,22\r\n".encode()
+
+    def test_json_interleaved_items_and_dicts(self):
+        items = [
+            MyItem(name="John", age="22"),
+            {"name": "Mary", "age": "33"},
+            MyItem(name="Paul", age="44"),
+        ]
+        exported = self._export_json(
+            items,
+            fields_to_export={"name": "姓名", "age": "年龄"},
+            strict_fields_to_export=True,
+        )
+        assert exported == [
+            {"姓名": "John", "年龄": "22"},
+            {"姓名": "Mary", "年龄": "33"},
+            {"姓名": "Paul", "年龄": "44"},
+        ]
+
+    def test_jsonlines_interleaved_items_and_dicts(self):
+        output = BytesIO()
+        ie = JsonLinesItemExporter(
+            output,
+            fields_to_export={"name": "姓名", "age": "年龄"},
+            strict_fields_to_export=True,
+        )
+        ie.start_exporting()
+        ie.export_item(MyItem(name="John", age="22"))
+        ie.export_item({"name": "Mary", "age": "33"})
+        ie.finish_exporting()
+        lines = [json.loads(line) for line in output.getvalue().splitlines()]
+        assert lines == [
+            {"姓名": "John", "年龄": "22"},
+            {"姓名": "Mary", "年龄": "33"},
+        ]
+
+    def test_serializer_call_count(self):
+        calls: list[Any] = []
+
+        def counting_serializer(value: Any) -> str:
+            calls.append(value)
+            return f"#{value}"
+
+        class CountedItem(Item):
+            name = Field()
+            age = Field(serializer=counting_serializer)
+
+        exported = self._export_json(
+            [
+                CountedItem(name="John", age="22"),
+                {"name": "Mary", "age": "33"},
+                CountedItem(name="Paul", age="44"),
+            ],
+            fields_to_export={"name": "n", "age": "a"},
+            strict_fields_to_export=True,
+        )
+        assert calls == ["22", "44"]
+        assert exported == [
+            {"n": "John", "a": "#22"},
+            {"n": "Mary", "a": "33"},
+            {"n": "Paul", "a": "#44"},
+        ]
+
+    @pytest.mark.parametrize(
+        "exporter_class",
+        [CsvItemExporter, JsonItemExporter, JsonLinesItemExporter],
+    )
+    @pytest.mark.parametrize(
+        "fields_to_export",
+        [
+            {"name": "x", "age": "x"},
+            [("name", "x"), ("age", "x")],
+        ],
+        ids=["mapping", "pairs"],
+    )
+    def test_duplicate_output_names_fail_before_any_output(
+        self, exporter_class: type, fields_to_export: Any
+    ) -> None:
+        output = BytesIO()
+        with pytest.raises(ValueError, match="output name 'x'"):
+            exporter_class(
+                output,
+                fields_to_export=fields_to_export,
+                strict_fields_to_export=True,
+            )
+        assert output.getvalue() == b""
+
+    def test_duplicate_field_names_fail(self):
+        output = BytesIO()
+        with pytest.raises(ValueError, match="maps field 'name' more than once"):
+            JsonItemExporter(
+                output,
+                fields_to_export=[("name", "a"), ("name", "b")],
+                strict_fields_to_export=True,
+            )
+        assert output.getvalue() == b""
+
+    @pytest.mark.parametrize(
+        "fields_to_export",
+        [
+            {"name": ""},
+            {"": "x"},
+            ["name", ""],
+            [("name", "n"), ("age", "")],
+        ],
+        ids=[
+            "empty-output-name",
+            "empty-field-name",
+            "empty-entry",
+            "empty-pair-alias",
+        ],
+    )
+    def test_empty_names_fail(self, fields_to_export: Any) -> None:
+        output = BytesIO()
+        with pytest.raises(ValueError, match="must not be empty"):
+            CsvItemExporter(
+                output,
+                fields_to_export=fields_to_export,
+                strict_fields_to_export=True,
+            )
+        assert output.getvalue() == b""
+
+    @pytest.mark.parametrize(
+        "fields_to_export",
+        [
+            "name",
+            b"name",
+            42,
+            ["name", 1],
+            [("name",)],
+            [("name", "n", "extra")],
+            {"name": 1},
+            {1: "n"},
+        ],
+        ids=[
+            "str",
+            "bytes",
+            "int",
+            "non-str-entry",
+            "short-pair",
+            "long-pair",
+            "non-str-output-name",
+            "non-str-field-name",
+        ],
+    )
+    def test_invalid_types_fail(self, fields_to_export: Any) -> None:
+        output = BytesIO()
+        with pytest.raises(TypeError, match="fields_to_export"):
+            JsonItemExporter(
+                output,
+                fields_to_export=fields_to_export,
+                strict_fields_to_export=True,
+            )
+        assert output.getvalue() == b""
+
+    def test_one_shot_iterator_is_not_exhausted_by_validation(self):
+        fields = (pair for pair in [("name", "n"), ("age", "a")])
+        result = self._export_csv(
+            [MyItem(name="John", age="22"), MyItem(name="Mary", age="33")],
+            fields_to_export=fields,
+            strict_fields_to_export=True,
+        )
+        assert result == b"n,a\r\nJohn,22\r\nMary,33\r\n"
+
+    def test_shared_config_is_not_mutated_or_shared(self):
+        config = {"name": "n", "age": "a"}
+        csv_output = BytesIO()
+        json_output = BytesIO()
+        csv_ie = CsvItemExporter(
+            csv_output, fields_to_export=config, strict_fields_to_export=True
+        )
+        json_ie = JsonItemExporter(
+            json_output, fields_to_export=config, strict_fields_to_export=True
+        )
+        csv_ie.start_exporting()
+        csv_ie.export_item(MyItem(name="John", age="22"))
+        csv_ie.finish_exporting()
+        json_ie.start_exporting()
+        json_ie.export_item({"name": "Mary", "age": "33"})
+        json_ie.finish_exporting()
+        assert config == {"name": "n", "age": "a"}
+        assert csv_output.getvalue() == b"n,a\r\nJohn,22\r\n"
+        assert json.loads(json_output.getvalue()) == [{"n": "Mary", "a": "33"}]
+
+    def test_unknown_fields_are_skipped_without_include_empty(self):
+        exported = self._export_json(
+            [{"name": "John"}, MyItem(name="Mary", age="22")],
+            fields_to_export={"name": "n", "missing": "m"},
+            strict_fields_to_export=True,
+        )
+        assert exported == [{"n": "John"}, {"n": "Mary"}]
+
+    def test_unknown_fields_get_default_value_with_include_empty(self):
+        exported = self._export_json(
+            [{"name": "John"}],
+            fields_to_export={"name": "n", "missing": "m"},
+            export_empty_fields=True,
+            strict_fields_to_export=True,
+        )
+        assert exported == [{"n": "John", "m": None}]
+
+    def test_dynamic_item_fields(self):
+        items = [
+            {"name": "John", "extra": "e1"},
+            MyItem(name="Mary", age="22"),
+            {"name": "Paul", "extra": "e2"},
+        ]
+        exported = self._export_json(
+            items,
+            fields_to_export={"name": "n", "extra": "e"},
+            strict_fields_to_export=True,
+        )
+        assert exported == [
+            {"n": "John", "e": "e1"},
+            {"n": "Mary"},
+            {"n": "Paul", "e": "e2"},
+        ]
+
+    def test_non_strict_mode_keeps_duplicate_aliases(self):
+        result = self._export_csv(
+            [MyItem(name="John", age="22")],
+            fields_to_export={"name": "x", "age": "x"},
+        )
+        assert result == b"x,x\r\nJohn,22\r\n"
+        exported = self._export_json(
+            [MyItem(name="John", age="22")],
+            fields_to_export={"name": "x", "age": "x"},
+        )
+        assert exported == [{"x": "22"}]

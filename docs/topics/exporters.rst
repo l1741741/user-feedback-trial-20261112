@@ -225,7 +225,7 @@ output examples, which assume you're exporting these two items:
 BaseItemExporter
 ----------------
 
-.. class:: BaseItemExporter(fields_to_export=None, export_empty_fields=False, encoding=None, indent=None, dont_fail=False)
+.. class:: BaseItemExporter(fields_to_export=None, export_empty_fields=False, encoding=None, indent=None, dont_fail=False, strict_fields_to_export=False)
 
    This is the (abstract) base class for all Item Exporters. It provides
    support for common features used by all (concrete) Item Exporters, such as
@@ -306,6 +306,32 @@ BaseItemExporter
              all their possible fields, exporters that do not support exporting
              a different subset of fields per item will only export the fields
              found in the first item exported.
+
+   .. attribute:: strict_fields_to_export
+
+      .. versionadded:: VERSION
+
+      Whether to validate :attr:`fields_to_export` when the exporter is
+      created, before anything is written to the output. Defaults to
+      ``False``.
+
+      When enabled, :attr:`fields_to_export` must be a mapping or an
+      iterable of field names and ``(field name, output name)`` pairs, where
+      field names and output names are non-empty strings, and no two entries
+      map to the same output name. An invalid value raises :exc:`TypeError`
+      or :exc:`ValueError` right away, instead of causing duplicate output
+      columns or silently dropped fields during the export.
+
+      A one-shot iterable (e.g. a generator) is consumed once during
+      validation, and the validated mapping is used for the whole export.
+      The passed object is never modified, so multiple exporters can safely
+      share the same :attr:`fields_to_export` object.
+
+      Field names missing from an exported item are allowed, to support
+      items with dynamic fields: they are skipped for items that do not have
+      them, unless empty fields are exported (see
+      :attr:`export_empty_fields`), in which case they are exported with
+      the default value.
 
    .. attribute:: export_empty_fields
 
