@@ -480,7 +480,6 @@ RFC2616 policy
     What is missing:
 
     * ``Pragma: no-cache`` support https://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.9.1
-    * ``Vary`` header support https://www.w3.org/Protocols/rfc2616/rfc2616-sec13.html#sec13.6
     * Invalidation after updates or deletes https://www.w3.org/Protocols/rfc2616/rfc2616-sec13.html#sec13.10
     * ... probably others ..
 
@@ -521,6 +520,10 @@ Filesystem storage backend (default)
     folder that :setting:`HTTPCACHE_SCOPE` selects, ``my_spider`` below::
 
         /path/to/cache/dir/my_spider/72/72811f648e718090f041317756c03adb0ada46c7
+
+    With :setting:`HTTPCACHE_RESPECT_VARY`, each variant of a response gets
+    its own such directory, and a ``<fingerprint>_vary`` file next to them
+    records the ``Vary`` header names that define those variants.
 
 .. _httpcache-storage-dbm:
 
@@ -743,6 +746,37 @@ Default: ``False``
 
 If enabled, will compress all cached data with gzip.
 This setting is specific to the Filesystem backend.
+
+.. setting:: HTTPCACHE_RESPECT_VARY
+
+HTTPCACHE_RESPECT_VARY
+^^^^^^^^^^^^^^^^^^^^^^
+
+Default: ``False``
+
+.. versionadded:: VERSION
+
+Whether to cache each variant of a response separately, based on the
+``Vary`` response header.
+
+When enabled, the built-in cache storage backends
+(:class:`~scrapy.extensions.httpcache.FilesystemCacheStorage` and
+:class:`~scrapy.extensions.httpcache.DbmCacheStorage`) keep a separate
+cached response for each combination of values of the request headers
+listed in the ``Vary`` response header, so that, for example, responses
+for different ``Accept-Language`` values can coexist in the cache for the
+same URL, and a request only gets a cached response whose variant matches
+its own headers.
+
+Header names listed in ``Vary`` are matched case-insensitively and their
+order does not matter. A request header that is missing altogether and
+one present with an empty value count as different values, and multiple
+values of a single header are joined with commas. Responses with
+``Vary: *`` are not cached.
+
+Cached responses are looked up differently depending on this setting, so
+toggling it for an existing cache directory can make some cached
+responses unreachable.
 
 .. setting:: HTTPCACHE_ALWAYS_STORE
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import logging
+import os
 import pickle
+import tempfile
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from importlib import import_module
@@ -21,7 +24,6 @@ from scrapy.utils.python import to_unicode
 from scrapy.utils.response import response_from_dict
 
 if TYPE_CHECKING:
-    import os
     from collections.abc import Callable
     from types import ModuleType
 
@@ -32,6 +34,44 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_vary(response: Response) -> tuple[bytes, ...]:
+    """Return the sorted, deduplicated, lowercased field names listed in the
+    Vary header of *response*."""
+    names: set[bytes] = set()
+    for value in response.headers.getlist(b"Vary"):
+        for name in value.split(b","):
+            name = name.strip().lower()
+            if name:
+                names.add(name)
+    return tuple(sorted(names))
+
+
+def _variant_key(request: Request, vary: tuple[bytes, ...]) -> str:
+    """Return a digest identifying the variant that *request* matches out of
+    those of a resource that varies on the *vary* header names.
+
+    A request header that is missing altogether is a different value than one
+    present with an empty value. Multiple values of a header are joined with
+    commas.
+    """
+    values: list[bytes | None] = []
+    for name in vary:
+        value = request.headers.getlist(name)
+        values.append(b",".join(value) if value else None)
+    return hashlib.sha1(repr((vary, values)).encode()).hexdigest()
+
+
+def _load_vary(data: bytes) -> tuple[bytes, ...]:
+    """Unpickle Vary header names recorded by a cache storage, raising
+    ValueError if they do not have the expected structure."""
+    vary = pickle.loads(data)  # noqa: S301
+    if not isinstance(vary, tuple) or not all(
+        isinstance(name, bytes) for name in vary
+    ):
+        raise ValueError(f"Invalid Vary data: {vary!r}")
+    return cast("tuple[bytes, ...]", vary)
 
 
 def _get_scope(settings: BaseSettings, supported: tuple[str, ...]) -> str:
@@ -262,6 +302,7 @@ class DbmCacheStorage:
         self.cachedir: str = data_path(settings["HTTPCACHE_DIR"], createdir=True)
         self.expiration_secs: int = settings.getint("HTTPCACHE_EXPIRATION_SECS")
         self.dbmodule: ModuleType = import_module(settings["HTTPCACHE_DBM_MODULE"])
+        self.respect_vary: bool = settings.getbool("HTTPCACHE_RESPECT_VARY")
         self.db: Any = None  # the real type is private
         self._scope = _get_scope(settings, ("spider", "none"))
 
@@ -295,13 +336,32 @@ class DbmCacheStorage:
         self, spider: Spider, request: Request, response: Response
     ) -> None:
         key = self._fingerprinter.fingerprint(request).hex()
+        vary_key = f"{key}_vary"
+        vary = _parse_vary(response) if self.respect_vary else ()
+        if b"*" in vary:
+            return  # Vary: * responses can never be reused
+        if vary:
+            key = f"{key}_v{_variant_key(request, vary)}"
+        elif self.respect_vary and vary_key in self.db:
+            # The response no longer varies, earlier variants are unreachable.
+            del self.db[vary_key]
         self.db[f"{key}_data"] = pickle.dumps(response.to_dict(), protocol=4)
         self.db[f"{key}_time"] = str(time())
+        if vary:
+            # Point to the current Vary header names only after the variant
+            # data is in place, so the entry is never half-written.
+            self.db[vary_key] = pickle.dumps(vary, protocol=4)
 
     def _read_data(
         self, spider: Spider, request: Request
     ) -> tuple[dict[str, Any], float] | None:
         key = self._fingerprinter.fingerprint(request).hex()
+        if self.respect_vary:
+            vary_key = f"{key}_vary"
+            if vary_key in self.db:
+                vary = _load_vary(self.db[vary_key])
+                if vary:
+                    key = f"{key}_v{_variant_key(request, vary)}"
         db = self.db
         tkey = f"{key}_time"
         if tkey not in db:
@@ -320,7 +380,10 @@ class FilesystemCacheStorage:
         self.cachedir: str = data_path(settings["HTTPCACHE_DIR"])
         self.expiration_secs: int = settings.getint("HTTPCACHE_EXPIRATION_SECS")
         self.use_gzip: bool = settings.getbool("HTTPCACHE_GZIP")
+        self.respect_vary: bool = settings.getbool("HTTPCACHE_RESPECT_VARY")
         self._scope = _get_scope(settings, ("spider", "none", "domain"))
+        # Temporary files of in-flight atomic writes, removed on close.
+        self._tmp_paths: set[Path] = set()
         # https://github.com/python/mypy/issues/10740
         self._open: Callable[
             Concatenate[str | os.PathLike[str], str, ...], IO[bytes]
@@ -338,14 +401,16 @@ class FilesystemCacheStorage:
         self._fingerprinter = spider.crawler.request_fingerprinter
 
     def close_spider(self, spider: Spider) -> None:
-        pass
+        for tmp_path in self._tmp_paths:
+            tmp_path.unlink(missing_ok=True)
+        self._tmp_paths.clear()
 
     def retrieve_response(self, spider: Spider, request: Request) -> Response | None:
         """Return response if present in cache, or None otherwise."""
-        metadata = self._read_meta(spider, request)
+        rpath = Path(self._resolve_request_path(spider, request))
+        metadata = self._read_meta(rpath)
         if metadata is None:
             return None  # not cached
-        rpath = Path(self._get_request_path(spider, request))
         with self._open(rpath / "response_body", "rb") as f:
             body = f.read()
         with self._open(rpath / "response_headers", "rb") as f:
@@ -367,7 +432,13 @@ class FilesystemCacheStorage:
         self, spider: Spider, request: Request, response: Response
     ) -> None:
         """Store the given response in the cache."""
-        rpath = Path(self._get_request_path(spider, request))
+        vary = _parse_vary(response) if self.respect_vary else ()
+        if b"*" in vary:
+            return  # Vary: * responses can never be reused
+        key = self._fingerprinter.fingerprint(request).hex()
+        if vary:
+            key = f"{key}_v{_variant_key(request, vary)}"
+        rpath = Path(self._get_request_path(spider, request, key=key))
         if not rpath.exists():
             rpath.mkdir(parents=True)
         metadata = {
@@ -396,11 +467,56 @@ class FilesystemCacheStorage:
             f.write(headers_dict_to_raw(request.headers))
         with self._open(rpath / "request_body", "wb") as f:
             f.write(request.body)
+        if self.respect_vary:
+            pointer = Path(self._get_request_path(spider, request) + "_vary")
+            if vary:
+                # Point to the current Vary header names only after the
+                # variant data is in place, so the entry is never
+                # half-written.
+                self._write_vary_pointer(pointer, vary)
+            else:
+                # The response no longer varies, earlier variants are
+                # unreachable.
+                pointer.unlink(missing_ok=True)
 
-    def _get_request_path(self, spider: Spider, request: Request) -> str:
-        key = self._fingerprinter.fingerprint(request).hex()
+    def _write_vary_pointer(self, pointer: Path, vary: tuple[bytes, ...]) -> None:
+        fd, tmpname = tempfile.mkstemp(dir=pointer.parent, prefix=f"{pointer.name}.")
+        os.close(fd)
+        tmp = Path(tmpname)
+        self._tmp_paths.add(tmp)
+        try:
+            with self._open(tmp, "wb") as f:
+                f.write(pickle.dumps(vary, protocol=4))
+            tmp.replace(pointer)
+        finally:
+            self._tmp_paths.discard(tmp)
+
+    def _get_request_path(
+        self, spider: Spider, request: Request, key: str | None = None
+    ) -> str:
+        key = key or self._fingerprinter.fingerprint(request).hex()
         scope_path = self._get_scope_path(spider, request)
         return str(Path(self.cachedir, scope_path, key[0:2], key))
+
+    def _resolve_request_path(self, spider: Spider, request: Request) -> str:
+        path = self._get_request_path(spider, request)
+        vary = self._read_vary(path)
+        if vary:
+            key = self._fingerprinter.fingerprint(request).hex()
+            variant_key = f"{key}_v{_variant_key(request, vary)}"
+            path = self._get_request_path(spider, request, key=variant_key)
+        return path
+
+    def _read_vary(self, base_path: str) -> tuple[bytes, ...] | None:
+        """Return the Vary header names recorded for the cache entry at
+        *base_path*, or None if they are not known."""
+        if not self.respect_vary:
+            return None
+        pointer = Path(f"{base_path}_vary")
+        if not pointer.exists():
+            return None
+        with self._open(pointer, "rb") as f:
+            return _load_vary(f.read())
 
     def _get_scope_path(self, spider: Spider, request: Request) -> str:
         if self._scope == "spider":
@@ -411,8 +527,7 @@ class FilesystemCacheStorage:
             return quote(urlparse_cached(request).hostname or "_", safe="")
         return ""
 
-    def _read_meta(self, spider: Spider, request: Request) -> dict[str, Any] | None:
-        rpath = Path(self._get_request_path(spider, request))
+    def _read_meta(self, rpath: Path) -> dict[str, Any] | None:
         metapath = rpath / "pickled_meta"
         if not metapath.exists():
             return None  # not found
