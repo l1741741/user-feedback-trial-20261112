@@ -9,16 +9,26 @@ RETRY_HTTP_CODES - which HTTP response codes to retry
 
 from __future__ import annotations
 
+import math
+import time
+from email.utils import parsedate_to_datetime
 from logging import Logger, getLevelNamesMapping, getLogger
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
-from scrapy.exceptions import NotConfigured
+from twisted.internet.defer import Deferred
+
+from scrapy import signals
+from scrapy.exceptions import DownloadCancelledError, NotConfigured
+from scrapy.utils.asyncio import CallLaterResult, call_later
 from scrapy.utils.decorators import _warn_spider_arg
+from scrapy.utils.defer import maybe_deferred_to_future
 from scrapy.utils.misc import _load_objects
-from scrapy.utils.python import global_object_name
+from scrapy.utils.python import global_object_name, to_unicode
 from scrapy.utils.response import response_status_message
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
     import scrapy
     from scrapy.crawler import Crawler
     from scrapy.http import Response
@@ -27,6 +37,12 @@ if TYPE_CHECKING:
 
 
 retry_logger = getLogger(__name__)
+
+# Status codes for which a Retry-After response header is defined (RFC 9110).
+_RETRY_AFTER_STATUSES = frozenset({429, 503})
+# The header field is a single line; anything much longer than an HTTP date is
+# not a value worth parsing.
+_RETRY_AFTER_MAX_HEADER_LENGTH = 256
 
 
 def get_retry_request(
@@ -136,10 +152,50 @@ def get_retry_request(
     return None
 
 
+class _PendingRetryDelay:
+    """A non-blocking wait scheduled for one retried request.
+
+    The timer and the shutdown cleanup settle the wait at most once: a timer
+    that fires after the wait was cancelled can neither schedule the request
+    nor fire the deferred twice.
+    """
+
+    def __init__(
+        self,
+        delay: float,
+        deferred: Deferred[None],
+        call_later_function: Callable[..., CallLaterResult],
+    ) -> None:
+        self.deferred = deferred
+        self._settled = False
+        self._timer: CallLaterResult = call_later_function(delay, self._fire)
+
+    def _fire(self) -> None:
+        if self._settled:
+            return
+        self._settled = True
+        self.deferred.callback(None)
+
+    def cancel(self) -> None:
+        """Cancel the timer and fail the wait so its request is not retried."""
+        if self._settled:
+            return
+        self._settled = True
+        self._timer.cancel()
+        if not self.deferred.called:
+            self.deferred.errback(DownloadCancelledError("Retry-After wait cancelled"))
+
+
 class RetryMiddleware:
     crawler: Crawler
 
-    def __init__(self, settings: BaseSettings):
+    def __init__(
+        self,
+        settings: BaseSettings,
+        *,
+        wall_clock: Callable[[], float] = time.time,
+        call_later_function: Callable[..., CallLaterResult] = call_later,
+    ) -> None:
         if not settings.getbool("RETRY_ENABLED"):
             raise NotConfigured
         self.max_retry_times = settings.getint("RETRY_TIMES")
@@ -147,12 +203,35 @@ class RetryMiddleware:
         self.priority_adjust = settings.getint("RETRY_PRIORITY_ADJUST")
         self.give_up_log_level = settings["RETRY_GIVE_UP_LOG_LEVEL"]
         self.exceptions_to_retry = _load_objects(settings.getlist("RETRY_EXCEPTIONS"))
+        self.retry_after_enabled = settings.getbool("RETRY_AFTER_ENABLED")
+        # Keep the parsed value around to reject non-finite settings too.
+        self.retry_after_max_delay = settings.getfloat("RETRY_AFTER_MAX_DELAY")
+        if self.retry_after_enabled and (
+            not math.isfinite(self.retry_after_max_delay)
+            or self.retry_after_max_delay <= 0
+        ):
+            raise ValueError(
+                "RETRY_AFTER_MAX_DELAY must be a finite positive number when"
+                f" RETRY_AFTER_ENABLED is True, got {self.retry_after_max_delay!r}"
+            )
+        self._wall_clock = wall_clock
+        self._call_later = call_later_function
+        self._pending_delays: set[_PendingRetryDelay] = set()
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
         o = cls(crawler.settings)
         o.crawler = crawler
+        crawler.signals.connect(o.spider_closed, signal=signals.spider_closed)
         return o
+
+    def spider_closed(self, spider: scrapy.Spider) -> None:
+        # A timer that fires after this must not schedule any request: every
+        # pending wait fails instead, so the awaiting download gets cancelled
+        # without a retry being counted.
+        for pending in list(self._pending_delays):
+            pending.cancel()
+        self._pending_delays.clear()
 
     @_warn_spider_arg
     def process_response(
@@ -160,11 +239,15 @@ class RetryMiddleware:
         request: Request,
         response: Response,
         spider: scrapy.Spider | None = None,
-    ) -> Request | Response:
+    ) -> Request | Response | Coroutine[Any, Any, Request | Response]:
         if request.meta.get("dont_retry", False):
             return response
         if response.status in self.retry_http_codes:
             reason = response_status_message(response.status)
+            delay = self._get_retry_after_delay(response)
+            # A request with no retries left must not wait before giving up.
+            if delay is not None and self._can_retry(request):
+                return self._retry_after_response(request, reason, delay)
             return self._retry(request, reason) or response
         return response
 
@@ -180,6 +263,17 @@ class RetryMiddleware:
         ):
             return self._retry(request, exception)
         return None
+
+    def _can_retry(self, request: Request) -> bool:
+        """Whether at least one retry is still available for *request*.
+
+        Mirrors the budget logic of :func:`get_retry_request` without
+        counting a retry, so a wait is only scheduled for requests that the
+        regular retry path will be able to reschedule.
+        """
+        max_retry_times = request.meta.get("max_retry_times", self.max_retry_times)
+        retry_times = request.meta.get("retry_times", 0) + 1
+        return retry_times <= max_retry_times
 
     def _retry(
         self, request: Request, reason: str | Exception | type[Exception]
@@ -198,3 +292,80 @@ class RetryMiddleware:
             priority_adjust=priority_adjust,
             give_up_log_level=give_up_log_level,
         )
+
+    def _get_retry_after_delay(self, response: Response) -> float | None:
+        """Parse the Retry-After header of *response* into a non-negative
+        number of seconds, or return ``None`` when the retry must not wait.
+
+        The header is only honored for 429 and 503 responses when
+        :setting:`RETRY_AFTER_ENABLED` is set. Integer seconds and HTTP-date
+        values are supported. Missing, empty, overlong, malformed or
+        unparseable values fall back to an immediate retry. A negative
+        delta-seconds value, and an HTTP date in the past, mean no wait.
+        A valid delay above :setting:`RETRY_AFTER_MAX_DELAY` is truncated.
+        """
+        if (
+            not self.retry_after_enabled
+            or response.status not in _RETRY_AFTER_STATUSES
+        ):
+            return None
+        raw_value = response.headers.get("Retry-After")
+        if raw_value is None:
+            return None
+        value = to_unicode(raw_value, encoding="latin-1").strip()
+        if not value or len(value) > _RETRY_AFTER_MAX_HEADER_LENGTH:
+            self._record_invalid_retry_after(value)
+            return None
+        delay = self._parse_retry_after_value(value)
+        if delay is None:
+            self._record_invalid_retry_after(value)
+            return None
+        if delay < 0:
+            self.crawler.stats.inc_value("retry/retry_after/ignored")
+            retry_logger.debug(
+                f"Ignoring a Retry-After delay of {delay} seconds for"
+                " a response in the past"
+            )
+            return None
+        if delay > self.retry_after_max_delay:
+            self.crawler.stats.inc_value("retry/retry_after/truncated")
+            retry_logger.debug(
+                f"Truncating a Retry-After delay of {delay} seconds to"
+                f" {self.retry_after_max_delay} seconds"
+            )
+            delay = self.retry_after_max_delay
+        return delay
+
+    def _parse_retry_after_value(self, value: str) -> float | None:
+        # delta-seconds: an optional sign followed by digits only.
+        if value.lstrip("-").isdigit():
+            return float(int(value))
+        try:
+            retry_date = parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+        if retry_date.tzinfo is None:
+            # RFC 9110 HTTP dates always carry a time zone (GMT).
+            return None
+        return retry_date.timestamp() - self._wall_clock()
+
+    def _record_invalid_retry_after(self, value: str) -> None:
+        self.crawler.stats.inc_value("retry/retry_after/invalid")
+        retry_logger.debug(f"Ignoring a malformed Retry-After header: {value!r}")
+
+    async def _retry_after_response(
+        self,
+        request: Request,
+        reason: str | Exception | type[Exception],
+        delay: float,
+    ) -> Request | Response:
+        pending = _PendingRetryDelay(delay, Deferred(), self._call_later)
+        self._pending_delays.add(pending)
+        try:
+            await maybe_deferred_to_future(pending.deferred)
+        finally:
+            self._pending_delays.discard(pending)
+        # The retry request, its priority adjustment and retry_times are all
+        # produced by the regular retry path once the wait is over.
+        self.crawler.stats.inc_value("retry/retry_after/delayed")
+        return self._retry(request, reason) or response

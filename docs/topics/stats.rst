@@ -705,6 +705,50 @@ one per actual value of the placeholder.
     custom *stats_base_key*, in which case ``retry`` is replaced with that key
     in the 3 stats above.
 
+.. stat:: retry/retry_after/delayed
+
+``retry/retry_after/delayed``
+    Number of requests that were retried after waiting according to a valid
+    ``Retry-After`` header.
+
+    .. versionadded:: 2.20.0
+
+    Set by :class:`~scrapy.downloadermiddlewares.retry.RetryMiddleware` when
+    :setting:`RETRY_AFTER_ENABLED` is enabled.
+
+.. stat:: retry/retry_after/invalid
+
+``retry/retry_after/invalid``
+    Number of responses whose ``Retry-After`` header was empty, overlong or
+    malformed, and so could not be honored.
+
+    .. versionadded:: 2.20.0
+
+    Set by :class:`~scrapy.downloadermiddlewares.retry.RetryMiddleware` when
+    :setting:`RETRY_AFTER_ENABLED` is enabled.
+
+.. stat:: retry/retry_after/ignored
+
+``retry/retry_after/ignored``
+    Number of responses whose ``Retry-After`` header pointed to the past,
+    i.e. contained a negative number of seconds or an expired HTTP date.
+
+    .. versionadded:: 2.20.0
+
+    Set by :class:`~scrapy.downloadermiddlewares.retry.RetryMiddleware` when
+    :setting:`RETRY_AFTER_ENABLED` is enabled.
+
+.. stat:: retry/retry_after/truncated
+
+``retry/retry_after/truncated``
+    Number of responses whose ``Retry-After`` delay was larger than
+    :setting:`RETRY_AFTER_MAX_DELAY` and was truncated to that value.
+
+    .. versionadded:: 2.20.0
+
+    Set by :class:`~scrapy.downloadermiddlewares.retry.RetryMiddleware` when
+    :setting:`RETRY_AFTER_ENABLED` is enabled.
+
 .. stat:: robotstxt/exception_count/{exception_type}
 
 ``robotstxt/exception_count/{exception_type}``

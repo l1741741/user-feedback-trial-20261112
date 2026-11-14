@@ -1218,6 +1218,47 @@ If you also cache responses (see :setting:`HTTPCACHE_ENABLED`), see
 :setting:`HTTPCACHE_IGNORE_HTTP_CODES` to keep retried responses out of the
 cache.
 
+.. setting:: RETRY_AFTER_ENABLED
+
+RETRY_AFTER_ENABLED
+^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 2.20.0
+
+Default: ``False``
+
+Whether the Retry middleware honors the ``Retry-After`` response header of
+responses with the 429 and 503 status codes. When enabled, the request that
+received such a response is delayed, without blocking the rest of the crawl,
+before it is handed back to the regular retry machinery.
+
+The header may contain either a number of seconds or an HTTP date. A
+missing, empty, malformed or overlong header is ignored, and the request is
+retried immediately. A negative number of seconds, or a date in the past,
+also means no wait. A valid delay longer than
+:setting:`RETRY_AFTER_MAX_DELAY` is truncated to that value.
+
+The retry itself is unchanged: :setting:`RETRY_TIMES`,
+:reqmeta:`max_retry_times`, :setting:`RETRY_PRIORITY_ADJUST`,
+:reqmeta:`dont_retry` and :setting:`RETRY_EXCEPTIONS` keep applying exactly
+as without the header, and the wait is not started when no retry is left.
+
+.. setting:: RETRY_AFTER_MAX_DELAY
+
+RETRY_AFTER_MAX_DELAY
+^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 2.20.0
+
+Default: ``60``
+
+The maximum delay, in seconds, that the Retry middleware waits according to
+a ``Retry-After`` response header when :setting:`RETRY_AFTER_ENABLED` is
+enabled. A larger valid delay is truncated to this value.
+
+It must be a finite positive number. The value is not validated while
+:setting:`RETRY_AFTER_ENABLED` is disabled.
+
 .. setting:: RETRY_EXCEPTIONS
 
 RETRY_EXCEPTIONS
