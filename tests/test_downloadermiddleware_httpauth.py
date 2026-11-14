@@ -290,3 +290,320 @@ def test_origin_setdefault(
         assert "_auth_origin" not in request.meta
     else:
         assert request.meta["_auth_origin"] == output_value
+
+
+def _mw(
+    settings: dict[str, Any] | None = None,
+    spidercls: type[Spider] | None = None,
+) -> HttpAuthMiddleware:
+    return build_from_crawler(
+        HttpAuthMiddleware,
+        get_crawler(spidercls or Spider, settings_dict=settings or {}),
+    )
+
+
+def _open(mw: HttpAuthMiddleware, spidercls: type[Spider] | None = None) -> None:
+    spider = (spidercls or Spider)("foo")
+    if getattr(spider, "http_user", "") or getattr(spider, "http_pass", ""):
+        with pytest.warns(ScrapyDeprecationWarning, match="spider attributes"):
+            mw.spider_opened(spider)
+    else:
+        mw.spider_opened(spider)
+
+
+def _spider(**attributes: Any) -> type[Spider]:
+    return type("TestSpider", (Spider,), {"name": "test", **attributes})
+
+
+@pytest.mark.parametrize(
+    ("origins", "url", "expected"),
+    [
+        # Scheme and port are part of the origin.
+        (["https://a.example"], "https://a.example", b"Basic Y3U6"),
+        (["https://a.example"], "https://a.example:443", b"Basic Y3U6"),
+        (["https://a.example:443"], "https://a.example", b"Basic Y3U6"),
+        (["https://a.example"], "https://a.example:8443", None),
+        (["https://a.example:8443"], "https://a.example:8443", b"Basic Y3U6"),
+        (["https://a.example:8443"], "https://a.example", None),
+        (["https://a.example"], "http://a.example", None),
+        (["http://a.example"], "https://a.example", None),
+        (["http://a.example"], "http://a.example:80", b"Basic Y3U6"),
+        (["http://a.example:80"], "https://a.example", None),
+        (["https://a.example"], "http://a.example:443", None),
+        # Hosts match exactly: no subdomains, prefixes or suffixes.
+        (["https://a.example"], "https://b.a.example", None),
+        (["https://a.example"], "https://a.example.evil.example", None),
+        (["https://a.example"], "https://aa.example", None),
+        (["https://a.example"], "https://evil.example/?host=a.example", None),
+        # Host normalization.
+        (["https://A.EXAMPLE"], "https://a.example", b"Basic Y3U6"),
+        (["https://a.example"], "https://A.EXAMPLE", b"Basic Y3U6"),
+        (["https://a.example."], "https://a.example", b"Basic Y3U6"),
+        (["https://a.example"], "https://a.example.", b"Basic Y3U6"),
+        # IPv6 addresses.
+        (["http://[2001:db8::1]"], "http://[2001:db8::1]", b"Basic Y3U6"),
+        (["http://[2001:DB8::1]"], "http://[2001:0db8:0:0:0:0:0:1]", b"Basic Y3U6"),
+        (["http://[2001:db8::1]"], "http://[2001:db8::2]", None),
+        (["http://[2001:db8::1]:8080"], "http://[2001:db8::1]:8080", b"Basic Y3U6"),
+        (["http://[2001:db8::1]:8080"], "http://[2001:db8::1]", None),
+        # Internationalized domain names.
+        (["https://bücher.example"], "https://xn--bcher-kva.example", b"Basic Y3U6"),
+        (["https://XN--BCHER-KVA.example"], "https://bücher.example", b"Basic Y3U6"),
+        (["https://bücher.example"], "https://bucher.example", None),
+        # Several entries.
+        (
+            ["http://a.example", "https://b.example:8443"],
+            "https://b.example:8443",
+            b"Basic Y3U6",
+        ),
+        (["http://a.example", "https://b.example:8443"], "https://a.example", None),
+        # The path, the query and the fragment are not part of the origin.
+        (["https://a.example"], "https://a.example/path?q=1#frag", b"Basic Y3U6"),
+        # Non-HTTP requests are left alone.
+        (["https://a.example"], "ftp://a.example", None),
+    ],
+)
+def test_origins_matching(
+    origins: list[str], url: str, expected: bytes | None
+) -> None:
+    mw = _mw({"HTTPAUTH_USER": "cu", "HTTPAUTH_ORIGINS": origins})
+    _open(mw)
+    request = Request(url)
+    assert mw.process_request(request) is None
+    assert request.headers.get("Authorization") == expected
+
+
+@pytest.mark.parametrize(
+    "origins",
+    [
+        "https://a.example",
+        b"https://a.example",
+        {"https://a.example": None},
+        [1],
+        [None],
+        [b"https://a.example"],
+        [""],
+        [" "],
+        [" a.example"],
+        ["a.example"],
+        ["//a.example"],
+        ["ftp://a.example"],
+        ["file:///a.example"],
+        ["https://user:pass@a.example"],
+        ["https://user@a.example"],
+        ["https://a.example/"],
+        ["https://a.example/path"],
+        ["https://a.example?x=1"],
+        ["https://a.example#frag"],
+        ["https://a.example:0"],
+        ["https://a.example:65536"],
+        ["https://a.example:abc"],
+        ["https://a.example:"],
+        ["https://"],
+        ["https:///a.example"],
+        ["https://a.example\\path"],
+        ["https://.example"],
+        ["http://a.example", "https://b.example:8443/x"],
+    ],
+)
+def test_origins_invalid(origins: Any) -> None:
+    with pytest.raises(ValueError):
+        _mw({"HTTPAUTH_ORIGINS": origins})
+
+
+def test_origins_satisfy_the_credentials_requirement() -> None:
+    mw = _mw({"HTTPAUTH_USER": "cu", "HTTPAUTH_ORIGINS": ["https://a.example"]})
+    _open(mw)
+    request = Request("https://a.example")
+    mw.process_request(request)
+    assert request.headers["Authorization"] == b"Basic Y3U6"
+
+
+def test_origins_empty_disable_authentication() -> None:
+    mw = _mw({"HTTPAUTH_USER": "cu", "HTTPAUTH_ORIGINS": []})
+    _open(mw)
+    request = Request("https://a.example")
+    assert mw.process_request(request) is None
+    assert "Authorization" not in request.headers
+
+
+def test_origins_spider_attribute_satisfy_the_credentials_requirement() -> None:
+    spidercls = _spider(http_user="su", http_auth_origins=["https://a.example"])
+    mw = _mw(spidercls=spidercls)
+    _open(mw, spidercls)
+    request = Request("https://a.example")
+    mw.process_request(request)
+    assert request.headers["Authorization"] == b"Basic c3U6"
+
+
+def test_origins_invalid_settings_fail_before_the_first_request() -> None:
+    with pytest.raises(ValueError, match="HTTPAUTH_ORIGINS"):
+        _mw({"HTTPAUTH_ORIGINS": ["https://a.example/path"]})
+
+
+def test_origins_invalid_spider_attribute_fail_before_the_first_request() -> None:
+    with pytest.raises(ValueError, match="http_auth_origins"):
+        _mw(spidercls=_spider(http_auth_origins=["a.example"]))
+
+
+def test_origins_do_not_override_an_explicit_header() -> None:
+    mw = _mw({"HTTPAUTH_USER": "cu", "HTTPAUTH_ORIGINS": ["https://a.example"]})
+    _open(mw)
+    request = Request("https://a.example", headers={"Authorization": "explicit"})
+    mw.process_request(request)
+    assert request.headers["Authorization"] == b"explicit"
+
+
+def test_origins_leave_other_requests_alone() -> None:
+    mw = _mw({"HTTPAUTH_USER": "cu", "HTTPAUTH_ORIGINS": ["https://a.example"]})
+    _open(mw)
+    other = Request("https://b.example", headers={"Authorization": "other"})
+    mw.process_request(other)
+    assert other.headers["Authorization"] == b"other"
+    no_auth = Request("https://b.example")
+    mw.process_request(no_auth)
+    assert "Authorization" not in no_auth.headers
+
+
+def test_origins_do_not_modify_the_configured_list() -> None:
+    origins = ["https://A.EXAMPLE.", "http://[2001:DB8::1]:8080"]
+    mw = _mw({"HTTPAUTH_USER": "cu", "HTTPAUTH_ORIGINS": origins})
+    _open(mw)
+    mw.process_request(Request("https://a.example"))
+    mw.process_request(Request("http://[2001:db8::1]:8080"))
+    assert origins == ["https://A.EXAMPLE.", "http://[2001:DB8::1]:8080"]
+
+
+def test_origins_judge_every_request_independently() -> None:
+    """A request sent after a cross-origin redirect is judged by its own
+    origin, not by the origin of the request seen before it."""
+    mw = _mw({"HTTPAUTH_USER": "cu", "HTTPAUTH_ORIGINS": ["https://a.example"]})
+    _open(mw)
+    for url, expected in [
+        ("https://a.example", b"Basic Y3U6"),
+        ("https://b.example", None),
+        ("https://a.example", b"Basic Y3U6"),
+        ("https://c.example", None),
+    ]:
+        request = Request(url)
+        mw.process_request(request)
+        if expected is None:
+            assert "Authorization" not in request.headers, url
+        else:
+            assert request.headers["Authorization"] == expected, url
+
+
+def test_origins_do_not_leak_between_spiders() -> None:
+    spider_a = _spider(http_user="su", http_auth_origins=["https://a.example"])
+    mw = _mw(spidercls=spider_a)
+    _open(mw, spider_a)
+    request = Request("https://a.example")
+    mw.process_request(request)
+    assert request.headers["Authorization"] == b"Basic c3U6"
+
+    _open(mw, _spider())
+    for url in ("https://a.example", "https://b.example"):
+        request = Request(url)
+        mw.process_request(request)
+        assert "Authorization" not in request.headers, url
+
+
+def test_origins_spider_attribute_overrides_the_settings() -> None:
+    mw = _mw({"HTTPAUTH_USER": "cu", "HTTPAUTH_ORIGINS": ["https://a.example"]})
+    _open(mw, _spider(http_auth_origins=["https://b.example"]))
+    request = Request("https://b.example")
+    mw.process_request(request)
+    assert request.headers["Authorization"] == b"Basic Y3U6"
+    _open(mw, _spider())
+    request = Request("https://a.example")
+    mw.process_request(request)
+    assert request.headers["Authorization"] == b"Basic Y3U6"
+
+
+def test_origins_spider_custom_settings() -> None:
+    class CustomSettingsSpider(Spider):
+        name = "custom"
+        custom_settings = {
+            "HTTPAUTH_USER": "cu",
+            "HTTPAUTH_ORIGINS": ["https://a.example:8443"],
+        }
+
+    mw = _mw(spidercls=CustomSettingsSpider)
+    _open(mw, CustomSettingsSpider)
+    request = Request("https://a.example:8443")
+    mw.process_request(request)
+    assert request.headers["Authorization"] == b"Basic Y3U6"
+    request = Request("https://a.example")
+    mw.process_request(request)
+    assert "Authorization" not in request.headers
+
+
+@pytest.mark.parametrize(
+    ("meta", "url", "expected"),
+    [
+        ({"_auth_origin": "https://b.example"}, "https://a.example", b"Basic Y3U6"),
+        ({"_auth_origin": "https://b.example"}, "https://b.example", None),
+        ({"_auth_origin": "https://a.example"}, "https://a.example", b"Basic Y3U6"),
+        ({"_auth_origin": "https://b.example"}, "https://a.example:8443", None),
+    ],
+)
+def test_origins_ignore_the_shared_last_origin(
+    meta: dict[str, Any], url: str, expected: bytes | None
+) -> None:
+    """Origins matching does not use the _auth_origin meta key that the
+    middleware sets for meta-level credentials."""
+    mw = _mw({"HTTPAUTH_USER": "cu", "HTTPAUTH_ORIGINS": ["https://a.example"]})
+    _open(mw)
+    request = Request(url, meta=meta)
+    mw.process_request(request)
+    assert request.headers.get("Authorization") == expected
+
+
+def test_origins_spider_instance_attribute() -> None:
+    class InstanceSpider(Spider):
+        name = "instance"
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.http_user = "iu"
+            self.http_auth_origins = ["https://a.example"]
+
+    crawler = get_crawler(InstanceSpider)
+    crawler.spider = InstanceSpider("foo")  # type: ignore[assignment]
+    mw = build_from_crawler(HttpAuthMiddleware, crawler)
+    _open(mw, InstanceSpider)
+    request = Request("https://a.example")
+    mw.process_request(request)
+    assert request.headers["Authorization"] == b"Basic aXU6"
+    request = Request("https://b.example")
+    mw.process_request(request)
+    assert "Authorization" not in request.headers
+
+
+def test_origins_empty_spider_list_disables_settings_origins() -> None:
+    spidercls = _spider(http_user="su", http_auth_origins=[])
+    mw = _mw(
+        {"HTTPAUTH_USER": "cu", "HTTPAUTH_ORIGINS": ["https://a.example"]},
+        spidercls=spidercls,
+    )
+    _open(mw, spidercls)
+    request = Request("https://a.example")
+    mw.process_request(request)
+    assert "Authorization" not in request.headers
+
+
+def test_origins_take_precedence_over_the_domain_setting() -> None:
+    mw = _mw(
+        {
+            "HTTPAUTH_USER": "cu",
+            "HTTPAUTH_DOMAIN": "a.example",
+            "HTTPAUTH_ORIGINS": ["https://a.example:8443"],
+        }
+    )
+    _open(mw)
+    request = Request("https://a.example")
+    mw.process_request(request)
+    assert "Authorization" not in request.headers
+    request = Request("https://a.example:8443")
+    mw.process_request(request)
+    assert request.headers["Authorization"] == b"Basic Y3U6"

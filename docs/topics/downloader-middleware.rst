@@ -301,9 +301,10 @@ HttpAuthMiddleware
     (aka. HTTP auth).
 
     Use the :setting:`HTTPAUTH_USER`, :setting:`HTTPAUTH_PASS`, and
-    :setting:`HTTPAUTH_DOMAIN` settings to configure it. You can also override
-    the credentials per request via :attr:`~scrapy.Request.meta` keys
-    :reqmeta:`http_user`, :reqmeta:`http_pass`, and :reqmeta:`http_auth_domain`.
+    :setting:`HTTPAUTH_DOMAIN` or :setting:`HTTPAUTH_ORIGINS` settings to
+    configure it. You can also override the credentials per request via
+    :attr:`~scrapy.Request.meta` keys :reqmeta:`http_user`,
+    :reqmeta:`http_pass`, and :reqmeta:`http_auth_domain`.
 
     Example using settings (e.g. in :attr:`~scrapy.Spider.custom_settings`):
 
@@ -318,6 +319,22 @@ HttpAuthMiddleware
                 "HTTPAUTH_USER": "someuser",
                 "HTTPAUTH_PASS": "somepass",
                 "HTTPAUTH_DOMAIN": "intranet.example.com",
+            }
+
+    When a crawl reaches several entry points that differ in scheme or port,
+    use :setting:`HTTPAUTH_ORIGINS` instead of :setting:`HTTPAUTH_DOMAIN`:
+
+    .. code-block:: python
+
+        class SomeMultiOriginSpider(CrawlSpider):
+            name = "multi-origin"
+            custom_settings = {
+                "HTTPAUTH_USER": "someuser",
+                "HTTPAUTH_PASS": "somepass",
+                "HTTPAUTH_ORIGINS": [
+                    "https://intranet.example.com",
+                    "http://intranet.example.com:8080",
+                ],
             }
 
     You can also let
@@ -349,7 +366,8 @@ HTTPAUTH_USER
 Default: ``""``
 
 The username to use for HTTP basic authentication, applied to all requests
-whose URL matches :setting:`HTTPAUTH_DOMAIN`.
+whose origin matches :setting:`HTTPAUTH_ORIGINS`, or, when that setting is
+unset, whose URL matches :setting:`HTTPAUTH_DOMAIN`.
 
 .. setting:: HTTPAUTH_PASS
 
@@ -376,7 +394,44 @@ are sent. Set to ``None`` to send credentials with all requests, but be aware
 that this risks leaking credentials to unrelated domains.
 
 This setting must be explicitly configured whenever :setting:`HTTPAUTH_USER`
-or :setting:`HTTPAUTH_PASS` is set.
+or :setting:`HTTPAUTH_PASS` is set, unless :setting:`HTTPAUTH_ORIGINS` is.
+
+.. seealso:: :ref:`security-credential-leakage`
+
+.. setting:: HTTPAUTH_ORIGINS
+
+HTTPAUTH_ORIGINS
+~~~~~~~~~~~~~~~~
+
+.. versionadded:: VERSION
+
+Default: ``None``
+
+A list of origins to which HTTP basic authentication credentials are sent.
+Each item must be an absolute origin, an ``http`` or ``https`` URL that
+contains only a scheme, a host and an optional port, e.g.
+``https://intranet.example.com`` or ``http://intranet.example.com:8080``.
+Items must not contain user information, a path, a query or a fragment.
+
+Hosts are compared case-insensitively, with internationalized domain names
+converted to punycode, IPv6 addresses compressed, and trailing dots ignored.
+Ports default to 80 for ``http`` and 443 for ``https``. A credential is sent
+only when the scheme, the host and the port of the request match an item
+exactly; subdomains of an item are not matched, and neither is a different
+scheme or port of the same host.
+
+An empty list disables automatic authentication, and :setting:`HTTPAUTH_USER`
+and :setting:`HTTPAUTH_PASS` are then allowed without
+:setting:`HTTPAUTH_DOMAIN`.
+
+Set to ``None`` to use :setting:`HTTPAUTH_DOMAIN` instead.
+
+The ``http_auth_origins`` spider attribute sets the origins for one spider,
+just like the ``http_user`` and ``http_pass`` spider attributes set its
+credentials.
+
+.. note:: This setting takes precedence over :setting:`HTTPAUTH_DOMAIN` when
+    both are set.
 
 .. seealso:: :ref:`security-credential-leakage`
 

@@ -302,9 +302,11 @@ and a crawl that spans multiple domains can leak them to unintended hosts:
 
 * HTTP authentication credentials set through
   :class:`~scrapy.downloadermiddlewares.httpauth.HttpAuthMiddleware` are only
-  sent to the domain set in :setting:`HTTPAUTH_DOMAIN`. Leave this set to the
-  intended domain rather than ``None`` so that credentials are not sent to
-  every domain you crawl.
+  sent to the domain set in :setting:`HTTPAUTH_DOMAIN`, or to the origins set
+  in :setting:`HTTPAUTH_ORIGINS`. Leave one of them configured so that
+  credentials are not sent to every domain you crawl. Prefer
+  :setting:`HTTPAUTH_ORIGINS` when the protected services differ in scheme or
+  port, since :setting:`HTTPAUTH_DOMAIN` ignores both.
 
 * The ``Referer`` header may disclose the URLs you crawl to other sites. The
   default :setting:`REFERRER_POLICY` already avoids sending the referrer from
