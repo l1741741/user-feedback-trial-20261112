@@ -597,6 +597,34 @@ as a fallback value if that key is not provided for a specific feed definition:
 
 -   ``fields``: falls back to :setting:`FEED_EXPORT_FIELDS`.
 
+-   ``schema_fields``: an ordered list of field names defining the
+    :ref:`schema strategy <feed-schema>` of the feed.
+
+    .. versionadded:: VERSION
+
+    When undefined, the feed keeps its historical behavior, regardless of the
+    other ``schema_`` keys.
+
+-   ``schema_missing``: what to do with an item that lacks one of the
+    ``schema_fields``. One of:
+
+    .. versionadded:: VERSION
+
+    -   ``"error"`` (default): reject the item for this feed, leaving no
+        output line for it.
+    -   ``"null"``: export the missing fields with a null value, without
+        modifying the item. Formats that cannot represent null values, such
+        as CSV, export an empty value instead.
+
+-   ``schema_extra``: what to do with an item that has fields not listed in
+    ``schema_fields``. One of:
+
+    .. versionadded:: VERSION
+
+    -   ``"error"`` (default): reject the item for this feed, leaving no
+        output line for it.
+    -   ``"drop"``: export only the fields listed in ``schema_fields``.
+
 -   ``item_classes``: list of :ref:`item classes <topics-items>` to export.
 
     If undefined or empty, all items are exported.
@@ -652,6 +680,65 @@ Default: ``None``
 Use the ``FEED_EXPORT_FIELDS`` setting to define the fields to export, their
 order and their output names. See :attr:`BaseItemExporter.fields_to_export
 <scrapy.exporters.BaseItemExporter.fields_to_export>` for more information.
+
+.. _feed-schema:
+
+Schema strategy
+---------------
+
+.. versionadded:: VERSION
+
+Downstream consumers of JSON Lines and CSV feeds usually expect every line to
+carry the same fields, while the items of a crawl may gain fields as it runs.
+The ``schema_fields`` feed option defines the ordered list of field names that
+every item written to that feed is checked against, using the exact decoded
+field names of the item. It takes precedence over the ``fields`` feed option
+and the :setting:`FEED_EXPORT_FIELDS` setting, and it also fixes the output
+field order, including the CSV header line.
+
+Two policies control what happens when an item does not match:
+
+-   ``schema_missing`` applies to fields listed in ``schema_fields`` that the
+    item does not provide. With ``"error"`` (the default), the item is
+    rejected for this feed; with ``"null"``, the missing fields are exported
+    with a null value (an empty value for CSV), without modifying the item.
+-   ``schema_extra`` applies to fields the item provides that are not listed
+    in ``schema_fields``. With ``"error"`` (the default), the item is
+    rejected for this feed; with ``"drop"``, the extra fields are not written
+    to this feed.
+
+Rejected items are logged and counted in the
+``feedexport/schema_rejected/<storage>`` stat, but they are not counted as
+exported items and they leave no partial output. A rejection only affects the
+feed whose schema was violated: the same item can still be written to other
+feeds, including another feed with a different schema, and item processing in
+the :ref:`item pipeline <topics-item-pipeline>` is unaffected. The schema is
+fixed when the crawl starts, so it cannot change between items, batches or the
+asynchronous storage of a previous batch.
+
+.. skip: next
+
+.. code-block:: python
+
+    {
+        "strict.jsonl": {
+            "format": "jsonlines",
+            # Reject items that lack a field or carry an unexpected one.
+            "schema_fields": ["name", "price"],
+        },
+        "tolerant.csv": {
+            "format": "csv",
+            # Fill missing fields and ignore fields that are not listed.
+            "schema_fields": ["name", "price", "currency"],
+            "schema_missing": "null",
+            "schema_extra": "drop",
+        },
+    }
+
+Invalid configurations, such as an empty list, duplicate or non-string field
+names, or an unknown policy, raise :exc:`ValueError` when the crawler is
+created. When ``schema_fields`` is not set, the other ``schema_`` keys are
+ignored and the feed behaves exactly as before.
 
 .. setting:: FEED_EXPORT_INDENT
 

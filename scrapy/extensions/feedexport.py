@@ -21,6 +21,7 @@ from typing import IO, TYPE_CHECKING, Any, Protocol, Self, TypeAlias, cast
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
+from itemadapter import ItemAdapter
 from twisted.internet.defer import Deferred, DeferredList, DeferredLock
 from w3lib.url import file_uri_to_path
 from zope.interface import Interface
@@ -117,6 +118,97 @@ def _check_mode(mode: str, storage: Any, uri: str | None = None) -> None:
             f"{type(storage).__name__} does not support the {mode!r} feed "
             f"mode{suffix}. Supported modes: {', '.join(sorted(supported))}."
         )
+
+
+_SCHEMA_MISSING_POLICIES: frozenset[str] = frozenset({"error", "null"})
+_SCHEMA_EXTRA_POLICIES: frozenset[str] = frozenset({"error", "drop"})
+
+
+class _FeedSchemaError(ValueError):
+    """An item does not match the schema strategy of its feed."""
+
+
+def _build_feed_schema(feed_options: dict[str, Any]) -> _FeedSchema | None:
+    """Build the immutable schema strategy described by *feed_options*, or
+    return ``None`` when no ``schema_fields`` key is configured.
+
+    Invalid configuration raises :class:`ValueError` before the crawl starts,
+    so it can never surface halfway through an export.
+    """
+    schema_fields = feed_options.get("schema_fields")
+    if schema_fields is None:
+        return None
+    if not isinstance(schema_fields, (list, tuple)) or isinstance(schema_fields, str):
+        raise ValueError(
+            "The schema_fields feed option must be a list or tuple of field names."
+        )
+    fields: list[str] = []
+    seen: set[str] = set()
+    for field_name in schema_fields:
+        if not isinstance(field_name, str) or not field_name:
+            raise ValueError(
+                "The schema_fields feed option must contain non-empty string "
+                "field names."
+            )
+        if field_name in seen:
+            raise ValueError(
+                f"The schema_fields feed option contains the field "
+                f"{field_name!r} more than once."
+            )
+        seen.add(field_name)
+        fields.append(field_name)
+    if not fields:
+        raise ValueError(
+            "The schema_fields feed option must contain at least one field."
+        )
+    missing = feed_options.get("schema_missing", "error")
+    if missing not in _SCHEMA_MISSING_POLICIES:
+        raise ValueError(
+            f"Invalid schema_missing policy: {missing!r}. Supported policies: "
+            f"{', '.join(sorted(_SCHEMA_MISSING_POLICIES))}."
+        )
+    extra = feed_options.get("schema_extra", "error")
+    if extra not in _SCHEMA_EXTRA_POLICIES:
+        raise ValueError(
+            f"Invalid schema_extra policy: {extra!r}. Supported policies: "
+            f"{', '.join(sorted(_SCHEMA_EXTRA_POLICIES))}."
+        )
+    return _FeedSchema(tuple(fields), missing, extra)
+
+
+class _FeedSchema:
+    """Immutable per-feed schema strategy.
+
+    *fields* is the ordered list of decoded field names every exported item
+    is checked against. *missing* and *extra* name the policies applied to
+    fields that are respectively absent from or additional to the item.
+    """
+
+    def __init__(self, fields: tuple[str, ...], missing: str, extra: str):
+        self.fields: tuple[str, ...] = fields
+        self.missing: str = missing
+        self.extra: str = extra
+
+    def validate(self, item: Any) -> None:
+        """Raise :class:`_FeedSchemaError` if *item* violates this schema.
+
+        Matching uses the exact decoded field names exposed by
+        :class:`~itemadapter.ItemAdapter`, so no value is read and no field
+        serializer can run as part of the check.
+        """
+        item_fields = set(ItemAdapter(item).keys())
+        if self.missing == "error":
+            missing = [name for name in self.fields if name not in item_fields]
+            if missing:
+                raise _FeedSchemaError(
+                    f"Item is missing schema field(s): {', '.join(missing)}."
+                )
+        if self.extra == "error":
+            extra = sorted(item_fields.difference(self.fields))
+            if extra:
+                raise _FeedSchemaError(
+                    f"Item has field(s) not in the schema: {', '.join(extra)}."
+                )
 
 
 class ItemFilter:
@@ -601,6 +693,7 @@ class FeedSlot:
         exporters: dict[str, type[BaseItemExporter]],
         settings: BaseSettings,
         crawler: Crawler,
+        schema: _FeedSchema | None = None,
     ):
         self.file: IO[bytes] | None = None
         self.exporter: BaseItemExporter | None = None
@@ -618,6 +711,7 @@ class FeedSlot:
         self.exporters: dict[str, type[BaseItemExporter]] = exporters
         self.settings: BaseSettings = settings
         self.crawler: Crawler = crawler
+        self.schema: _FeedSchema | None = schema
         # flags
         self.itemcount: int = 0
         self._skipped: bool = False
@@ -636,13 +730,24 @@ class FeedSlot:
                         self.feed_options,
                     ),
                 )
+            item_export_kwargs = dict(self.feed_options["item_export_kwargs"])
+            fields_to_export = self.feed_options["fields"]
+            if self.schema is not None:
+                # The schema defines the output field set and order, taking
+                # precedence over the fields feed option and
+                # FEED_EXPORT_FIELDS. Filling missing fields with null requires
+                # exporting empty fields; the null policy is an explicit
+                # request, so it wins over a conflicting item_export_kwargs.
+                fields_to_export = list(self.schema.fields)
+                if self.schema.missing == "null":
+                    item_export_kwargs["export_empty_fields"] = True
             self.exporter = self._get_exporter(
                 file=self.file,
                 format_=self.feed_options["format"],
-                fields_to_export=self.feed_options["fields"],
+                fields_to_export=fields_to_export,
                 encoding=self.feed_options["encoding"],
                 indent=self.feed_options["indent"],
-                **self.feed_options["item_export_kwargs"],
+                **item_export_kwargs,
             )
             self._fileloaded = True
 
@@ -684,6 +789,7 @@ class FeedExporter:
         self.slots: list[FeedSlot] = []
         self.filters: dict[str, ItemFilter] = {}
         self.processors: dict[str, _ItemProcessor | None] = {}
+        self.schemas: dict[str, _FeedSchema | None] = {}
         self._pending_close_tasks: list[asyncio.Task[None] | Deferred[None]] = []
         # Item export may await user-defined code (e.g. an async def
         # export_item() method), while item_scraped signals are sent
@@ -710,6 +816,7 @@ class FeedExporter:
             self.feeds[uri] = feed_complete_default_values_from_settings(
                 feed_options, self.settings, uri
             )
+            self.schemas[uri] = _build_feed_schema(self.feeds[uri])
             self.filters[uri] = self._load_filter(feed_options)
             self.processors[uri] = self._load_processor(feed_options)
         # End: Backward compatibility for FEED_URI and FEED_FORMAT settings
@@ -725,6 +832,7 @@ class FeedExporter:
             self.feeds[uri] = feed_complete_default_values_from_settings(
                 feed_options, self.settings, uri
             )
+            self.schemas[uri] = _build_feed_schema(self.feeds[uri])
             self.filters[uri] = self._load_filter(feed_options)
             self.processors[uri] = self._load_processor(feed_options)
 
@@ -959,6 +1067,7 @@ class FeedExporter:
             exporters=self.exporters,
             settings=self.settings,
             crawler=self.crawler,
+            schema=self.schemas[uri_template],
         )
 
     async def item_scraped(self, item: Any, spider: Spider) -> None:
@@ -983,18 +1092,39 @@ class FeedExporter:
 
             processor = self.processors[slot.uri_template]
             for exported_item in processor(item) if processor else (item,):
-                if not slot._skipped:
-                    try:
-                        await slot.start_exporting()
-                    except FileExistsError:
-                        self._skip(slot)
-                if not slot._skipped:
-                    assert slot.exporter
-                    try:
-                        await _maybe_coroutine(slot.exporter.export_item, exported_item)
-                    except Exception as e:
-                        e.add_note(f"Item: {exported_item!r}")
-                        raise
+                try:
+                    if not slot._skipped and slot.schema is not None:
+                        # Strict validation happens before the exporter (and its
+                        # serializers) is touched, so a rejected item leaves no
+                        # partial line and counts nothing.
+                        slot.schema.validate(exported_item)
+                    if not slot._skipped:
+                        try:
+                            await slot.start_exporting()
+                        except FileExistsError:
+                            self._skip(slot)
+                    if not slot._skipped:
+                        assert slot.exporter
+                        try:
+                            await _maybe_coroutine(
+                                slot.exporter.export_item, exported_item
+                            )
+                        except Exception as e:
+                            e.add_note(f"Item: {exported_item!r}")
+                            raise
+                except _FeedSchemaError as exc:
+                    # The item does not match this feed's schema. Other items
+                    # of the same processor, other feeds, and the pipeline that
+                    # produced the item are unaffected.
+                    logger.error(
+                        f"Item rejected by the schema of feed {slot.uri!r}: {exc}",
+                        extra={"spider": spider},
+                    )
+                    assert self.crawler.stats
+                    self.crawler.stats.inc_value(
+                        f"feedexport/schema_rejected/{type(slot.storage).__name__}"
+                    )
+                    continue
                 # Skipped items are counted, so that the following files of
                 # this feed still cover the same items as those of any other
                 # feed.
@@ -1006,7 +1136,9 @@ class FeedExporter:
                     >= self.feeds[slot.uri_template]["batch_item_count"]
                 ):
                     uri_params = self._get_uri_params(
-                        spider, self.feeds[slot.uri_template]["uri_params"], slot
+                        spider,
+                        self.feeds[slot.uri_template]["uri_params"],
+                        slot,
                     )
                     self._schedule_slot_close(slot, spider)
                     slot = self._start_new_batch(  # noqa: PLW2901
