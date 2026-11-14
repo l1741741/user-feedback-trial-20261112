@@ -309,6 +309,33 @@ def test_alternate():
                 "http://www.example.com/schweiz-deutsch/",
                 "http://www.example.com/english/",
             ],
+            "alternate_hreflang": ["de", "de-ch", "en"],
+        }
+    ]
+
+
+def test_alternate_without_hreflang():
+    s = Sitemap(
+        b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+    xmlns:xhtml="http://www.w3.org/1999/xhtml">
+    <url>
+        <loc>http://www.example.com/english/</loc>
+        <xhtml:link rel="alternate" hreflang="de"
+            href="http://www.example.com/deutsch/"/>
+        <xhtml:link rel="alternate"
+            href="http://www.example.com/no-label/"/>
+    </url>
+</urlset>"""
+    )
+    assert list(s) == [
+        {
+            "loc": "http://www.example.com/english/",
+            "alternate": [
+                "http://www.example.com/deutsch/",
+                "http://www.example.com/no-label/",
+            ],
+            "alternate_hreflang": ["de", None],
         }
     ]
 

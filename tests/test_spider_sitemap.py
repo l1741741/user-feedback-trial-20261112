@@ -765,6 +765,528 @@ Sitemap: /sitemap-relative-url.xml
             "http://www.example.com/english/",
         ]
 
+    @pytest.mark.parametrize(
+        ("languages", "expected_url", "expected_label", "expected_match"),
+        [
+            # Exact matches are case-insensitive and never conflate en with
+            # en-US.
+            (["en-US"], "http://www.example.com/en-us/", "en-US", "exact"),
+            (["en-us"], "http://www.example.com/en-us/", "en-US", "exact"),
+            (["en"], "http://www.example.com/en/", "en", "exact"),
+            # Primary language fallback: regionless en first, then any en-* tag.
+            (["en-CA"], "http://www.example.com/en/", "en", "primary"),
+            (["de-AT"], "http://www.example.com/de/", "de", "primary"),
+            (["fr-FR"], "http://www.example.com/fr-ca/", "fr-CA", "primary"),
+            # Preferences are considered in order; the second one is used when
+            # the first one has no candidate at all.
+            (["ja", "en-US"], "http://www.example.com/en-us/", "en-US", "exact"),
+            # x-default is an explicit fallback after every preference failed.
+            (["ja"], "http://www.example.com/default/", "x-default", "x-default"),
+        ],
+    )
+    def test_sitemap_languages_priority(
+        self,
+        languages: list[str],
+        expected_url: str,
+        expected_label: str | None,
+        expected_match: str,
+    ):
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:xhtml="http://www.w3.org/1999/xhtml">
+        <url>
+            <loc>http://www.example.com/loc/</loc>
+            <xhtml:link rel="alternate" hreflang="en"
+                href="http://www.example.com/en/"/>
+            <xhtml:link rel="alternate" hreflang="en-US"
+                href="http://www.example.com/en-us/"/>
+            <xhtml:link rel="alternate" hreflang="de"
+                href="http://www.example.com/de/"/>
+            <xhtml:link rel="alternate" hreflang="fr-CA"
+                href="http://www.example.com/fr-ca/"/>
+            <xhtml:link rel="alternate" hreflang="x-default"
+                href="http://www.example.com/default/"/>
+        </url>
+    </urlset>"""
+        r = TextResponse(url="http://www.example.com/sitemap.xml", body=sitemap)
+
+        class _Spider(self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_languages = languages
+
+        spider = _Spider("example.com")
+        requests = list(spider._parse_sitemap(r))
+
+        assert len(requests) == 1
+        request = requests[0]
+        assert request.url == expected_url
+        assert request.callback == spider.parse
+        assert request.meta["sitemap_language"] == expected_label
+        assert request.meta["sitemap_language_match"] == expected_match
+
+    def test_sitemap_languages_string_attribute(self):
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:xhtml="http://www.w3.org/1999/xhtml">
+        <url>
+            <loc>http://www.example.com/loc/</loc>
+            <xhtml:link rel="alternate" hreflang="de"
+                href="http://www.example.com/de/"/>
+            <xhtml:link rel="alternate" hreflang="en"
+                href="http://www.example.com/en/"/>
+        </url>
+    </urlset>"""
+        r = TextResponse(url="http://www.example.com/sitemap.xml", body=sitemap)
+
+        class _Spider(self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_languages = "de"
+
+        spider = _Spider("example.com")
+        assert spider._language_preferences == ["de"]
+        requests = list(spider._parse_sitemap(r))
+        assert [request.url for request in requests] == ["http://www.example.com/de/"]
+
+    def test_sitemap_languages_order_independence(self):
+        """Shuffling the order of unrelated candidates never changes the
+        selected one; only the configured priorities decide."""
+        template = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:xhtml="http://www.w3.org/1999/xhtml">
+        <url>
+            <loc>http://www.example.com/loc/</loc>
+            {links}
+        </url>
+    </urlset>"""
+        links = [
+            (b"en", b"http://www.example.com/en/"),
+            (b"en-US", b"http://www.example.com/en-us/"),
+            (b"de", b"http://www.example.com/de/"),
+            (b"x-default", b"http://www.example.com/default/"),
+        ]
+
+        class _Spider(self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_languages = ["en-US"]
+
+        results = set()
+        for order in ((0, 1, 2, 3), (3, 2, 1, 0), (2, 0, 3, 1), (1, 3, 0, 2)):
+            link_xml = b"".join(
+                b'<xhtml:link rel="alternate" hreflang="'
+                + links[i][0]
+                + b'" href="'
+                + links[i][1]
+                + b'"/>'
+                for i in order
+            )
+            r = TextResponse(
+                url="http://www.example.com/sitemap.xml",
+                body=template.replace(b"{links}", link_xml),
+            )
+            spider = _Spider("example.com")
+            requests = list(spider._parse_sitemap(r))
+            assert len(requests) == 1
+            results.add(
+                (
+                    requests[0].url,
+                    requests[0].meta["sitemap_language"],
+                    requests[0].meta["sitemap_language_match"],
+                )
+            )
+        assert results == {("http://www.example.com/en-us/", "en-US", "exact")}
+
+    def test_sitemap_languages_duplicate_url_single_request(self):
+        """The same URL selected by several entries produces one request, and
+        the first entry wins the metadata."""
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:xhtml="http://www.w3.org/1999/xhtml">
+        <url>
+            <loc>http://www.example.com/a/</loc>
+            <xhtml:link rel="alternate" hreflang="en"
+                href="http://www.example.com/shared/"/>
+        </url>
+        <url>
+            <loc>http://www.example.com/b/</loc>
+            <xhtml:link rel="alternate" hreflang="en"
+                href="http://www.example.com/shared/"/>
+            <xhtml:link rel="alternate" hreflang="de"
+                href="http://www.example.com/de/"/>
+        </url>
+        <url>
+            <loc>http://www.example.com/c/</loc>
+            <xhtml:link rel="alternate" hreflang="de"
+                href="http://www.example.com/de/"/>
+        </url>
+    </urlset>"""
+        r = TextResponse(url="http://www.example.com/sitemap.xml", body=sitemap)
+
+        class _Spider(self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_languages = ["en", "de"]
+
+        spider = _Spider("example.com")
+        requests = list(spider._parse_sitemap(r))
+
+        assert [request.url for request in requests] == [
+            "http://www.example.com/shared/",
+            "http://www.example.com/de/",
+        ]
+        assert requests[0].meta["sitemap_language"] == "en"
+        assert requests[0].meta["sitemap_language_match"] == "exact"
+
+    def test_sitemap_languages_ignores_alternate_links_setting(self):
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:xhtml="http://www.w3.org/1999/xhtml">
+        <url>
+            <loc>http://www.example.com/loc/</loc>
+            <xhtml:link rel="alternate" hreflang="de"
+                href="http://www.example.com/de/"/>
+            <xhtml:link rel="alternate" hreflang="en"
+                href="http://www.example.com/en/"/>
+        </url>
+    </urlset>"""
+        r = TextResponse(url="http://www.example.com/sitemap.xml", body=sitemap)
+
+        class _Spider(self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_alternate_links = True
+            sitemap_languages = ["en"]
+
+        spider = _Spider("example.com")
+        requests = list(spider._parse_sitemap(r))
+        assert [request.url for request in requests] == ["http://www.example.com/en/"]
+
+    def test_sitemap_languages_missing_hreflang_and_invalid_labels(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """Alternates without a usable hreflang label can never be selected;
+        invalid labels are reported instead of being treated as languages."""
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:xhtml="http://www.w3.org/1999/xhtml">
+        <url>
+            <loc>http://www.example.com/loc/</loc>
+            <xhtml:link rel="alternate"
+                href="http://www.example.com/no-label/"/>
+            <xhtml:link rel="alternate" hreflang="not a tag!"
+                href="http://www.example.com/invalid/"/>
+            <xhtml:link rel="alternate" hreflang="x-default"
+                href="http://www.example.com/default/"/>
+        </url>
+    </urlset>"""
+        r = TextResponse(url="http://www.example.com/sitemap.xml", body=sitemap)
+
+        class _Spider(self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_languages = ["en"]
+
+        spider = _Spider("example.com")
+        caplog.clear()
+        with caplog.at_level("DEBUG", logger="scrapy.spiders.sitemap"):
+            requests = list(spider._parse_sitemap(r))
+
+        assert len(requests) == 1
+        assert requests[0].url == "http://www.example.com/default/"
+        assert requests[0].meta["sitemap_language"] == "x-default"
+        assert requests[0].meta["sitemap_language_match"] == "x-default"
+        assert "invalid hreflang label 'not a tag!'" in caplog.text
+        assert "http://www.example.com/no-label/" not in [
+            request.url for request in requests
+        ]
+
+    def test_sitemap_languages_invalid_preference_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:xhtml="http://www.w3.org/1999/xhtml">
+        <url>
+            <loc>http://www.example.com/loc/</loc>
+            <xhtml:link rel="alternate" hreflang="en"
+                href="http://www.example.com/en/"/>
+        </url>
+    </urlset>"""
+        r = TextResponse(url="http://www.example.com/sitemap.xml", body=sitemap)
+
+        class _Spider(self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_languages = ["", "bad tag", "x-default", "en", "EN"]
+
+        caplog.clear()
+        with caplog.at_level(WARNING, logger="scrapy.spiders.sitemap"):
+            spider = _Spider("example.com")
+
+        assert spider._language_preferences == ["en"]
+        warnings_text = caplog.text
+        assert "Ignoring invalid language tag ''" in warnings_text
+        assert "Ignoring invalid language tag 'bad tag'" in warnings_text
+        assert "'x-default'" in warnings_text
+        # Duplicate preferences (after normalization) are collapsed.
+        assert warnings_text.count("Ignoring invalid language tag") == 2
+
+        requests = list(spider._parse_sitemap(r))
+        assert [request.url for request in requests] == ["http://www.example.com/en/"]
+
+    def test_sitemap_languages_all_preferences_invalid_falls_back_to_loc(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+        <url><loc>http://www.example.com/loc/</loc></url>
+    </urlset>"""
+        r = TextResponse(url="http://www.example.com/sitemap.xml", body=sitemap)
+
+        class _Spider(self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_languages = ["nope!"]
+
+        caplog.clear()
+        with caplog.at_level(WARNING, logger="scrapy.spiders.sitemap"):
+            spider = _Spider("example.com")
+        assert spider._language_preferences == []
+
+        requests = list(spider._parse_sitemap(r))
+        assert len(requests) == 1
+        assert requests[0].url == "http://www.example.com/loc/"
+        assert requests[0].meta["sitemap_language"] is None
+        assert requests[0].meta["sitemap_language_match"] == "loc"
+
+    def test_sitemap_languages_respects_sitemap_rules(self):
+        """The selected URL still goes through sitemap_rules, and the request
+        keeps the matching callback."""
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:xhtml="http://www.w3.org/1999/xhtml">
+        <url>
+            <loc>http://www.example.com/page/1</loc>
+            <xhtml:link rel="alternate" hreflang="de"
+                href="http://www.example.com/product/1"/>
+            <xhtml:link rel="alternate" hreflang="en"
+                href="http://www.example.com/page/1"/>
+        </url>
+        <url>
+            <loc>http://www.example.com/page/2</loc>
+            <xhtml:link rel="alternate" hreflang="de"
+                href="http://www.example.com/other/2"/>
+        </url>
+    </urlset>"""
+        r = TextResponse(url="http://www.example.com/sitemap.xml", body=sitemap)
+
+        def parse_product(response):
+            yield {"url": response.url}
+
+        class _ProductSpider(self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_languages = ["de"]
+            sitemap_rules = [("/product/", parse_product)]
+
+        product_spider = _ProductSpider("example.com")
+        product_requests = list(product_spider._parse_sitemap(r))
+        assert [request.url for request in product_requests] == [
+            "http://www.example.com/product/1"
+        ]
+        assert product_requests[0].callback is parse_product
+        assert product_requests[0].meta["sitemap_language"] == "de"
+        assert product_requests[0].meta["sitemap_language_match"] == "exact"
+
+        class _PageSpider(self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_languages = ["de"]
+            sitemap_rules = [("/page/", "parse")]
+
+        page_spider = _PageSpider("example.com")
+        # The selected German URLs match no /page/ rule, so nothing is yielded.
+        assert list(page_spider._parse_sitemap(r)) == []
+
+    def test_sitemap_languages_does_not_modify_entries(self):
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:xhtml="http://www.w3.org/1999/xhtml">
+        <url>
+            <loc>http://www.example.com/loc/</loc>
+            <xhtml:link rel="alternate" hreflang="de"
+                href="http://www.example.com/de/"/>
+            <xhtml:link rel="alternate" hreflang="en"
+                href="http://www.example.com/en/"/>
+        </url>
+    </urlset>"""
+        r = TextResponse(url="http://www.example.com/sitemap.xml", body=sitemap)
+        seen_entries = []
+
+        class _Spider(self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_languages = ["en"]
+
+            def sitemap_filter(self, entries):
+                for entry in entries:
+                    seen_entries.append(entry)
+                    yield entry
+
+            def sitemap_request(self, loc, callback, entry, *, source, response):
+                # The entry handed to sitemap_request is the untouched entry.
+                assert entry["loc"] == "http://www.example.com/loc/"
+                assert entry["alternate"] == [
+                    "http://www.example.com/de/",
+                    "http://www.example.com/en/",
+                ]
+                return super().sitemap_request(
+                    loc, callback, entry, source=source, response=response
+                )
+
+        spider = _Spider("example.com")
+        requests = list(spider._parse_sitemap(r))
+
+        assert [request.url for request in requests] == ["http://www.example.com/en/"]
+        assert seen_entries[0]["loc"] == "http://www.example.com/loc/"
+        assert seen_entries[0]["alternate_hreflang"] == ["de", "en"]
+
+    def test_sitemap_languages_relative_urls_joined_before_dedup(self):
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:xhtml="http://www.w3.org/1999/xhtml">
+        <url>
+            <loc>/shared/</loc>
+            <xhtml:link rel="alternate" hreflang="en" href="/shared/"/>
+            <xhtml:link rel="alternate" hreflang="de" href="/de/"/>
+        </url>
+        <url>
+            <loc>/other/</loc>
+            <xhtml:link rel="alternate" hreflang="en" href="/shared/"/>
+        </url>
+    </urlset>"""
+        r = TextResponse(url="https://www.example.com/sitemap.xml", body=sitemap)
+
+        class _Spider(self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_languages = ["en", "de"]
+
+        spider = _Spider("example.com")
+        requests = list(spider._parse_sitemap(r))
+
+        # The relative loc and alternate resolve to the same absolute URL:
+        # only one request is produced for it.
+        assert [request.url for request in requests] == [
+            "https://www.example.com/shared/"
+        ]
+
+    def test_sitemap_languages_repeated_iteration_is_stable(self):
+        """Parsing the same sitemap twice yields identical, independent
+        request lists; selection state never leaks between iterations."""
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:xhtml="http://www.w3.org/1999/xhtml">
+        <url>
+            <loc>http://www.example.com/loc/</loc>
+            <xhtml:link rel="alternate" hreflang="en"
+                href="http://www.example.com/shared/"/>
+        </url>
+        <url>
+            <loc>http://www.example.com/other/</loc>
+            <xhtml:link rel="alternate" hreflang="en"
+                href="http://www.example.com/shared/"/>
+        </url>
+    </urlset>"""
+        r = TextResponse(url="http://www.example.com/sitemap.xml", body=sitemap)
+
+        class _Spider(self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_languages = ["en"]
+
+        spider = _Spider("example.com")
+        first = list(spider._parse_sitemap(r))
+        second = list(spider._parse_sitemap(r))
+
+        expected = [
+            (
+                "http://www.example.com/shared/",
+                "en",
+                "exact",
+            )
+        ]
+        for requests in (first, second):
+            assert [
+                (
+                    request.url,
+                    request.meta["sitemap_language"],
+                    request.meta["sitemap_language_match"],
+                )
+                for request in requests
+            ] == expected
+        assert first[0] is not second[0]
+
+    def test_sitemap_languages_skips_entry_without_loc(self):
+        """A custom sitemap_filter may yield entries without a loc; those are
+        skipped rather than crashing language selection."""
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:xhtml="http://www.w3.org/1999/xhtml">
+        <url>
+            <loc>http://www.example.com/loc/</loc>
+            <xhtml:link rel="alternate" hreflang="en"
+                href="http://www.example.com/en/"/>
+        </url>
+    </urlset>"""
+        r = TextResponse(url="http://www.example.com/sitemap.xml", body=sitemap)
+
+        class _Spider(self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_languages = ["en"]
+
+            def sitemap_filter(self, entries):
+                yield {"lastmod": "2010-01-01"}  # entry without a loc
+                yield from entries
+
+        spider = _Spider("example.com")
+        requests = list(spider._parse_sitemap(r))
+        assert [request.url for request in requests] == ["http://www.example.com/en/"]
+
+    def test_sitemap_languages_default_behavior_unchanged(self):
+        """Without sitemap_languages, requests carry no language metadata and
+        the alternate setting keeps its original behavior."""
+        sitemap = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:xhtml="http://www.w3.org/1999/xhtml">
+        <url>
+            <loc>http://www.example.com/loc/</loc>
+            <xhtml:link rel="alternate" hreflang="de"
+                href="http://www.example.com/de/"/>
+        </url>
+    </urlset>"""
+        r = TextResponse(url="http://www.example.com/sitemap.xml", body=sitemap)
+
+        spider = self.spider_class("example.com")
+        assert spider._language_preferences is None
+        requests = list(spider._parse_sitemap(r))
+        assert [request.url for request in requests] == ["http://www.example.com/loc/"]
+        assert "sitemap_language" not in requests[0].meta
+        assert "sitemap_language_match" not in requests[0].meta
+
+    @coroutine_test
+    async def test_sitemap_languages_crawl_meta(self, mockserver: MockServer):
+        class _Spider(RawSitemapSpider, self.spider_class):  # type: ignore[name-defined,misc]
+            sitemap_languages = ["en-GB", "de"]
+
+            def parse(self, response):
+                yield {
+                    "url": response.url,
+                    "language": response.meta["sitemap_language"],
+                    "match": response.meta["sitemap_language_match"],
+                }
+
+            def raw_body(self):
+                assert self.mockserver
+                en = self.mockserver.url("/en")
+                en_gb = self.mockserver.url("/en-gb")
+                de = self.mockserver.url("/de")
+                loc = self.mockserver.url("/loc")
+                return (
+                    '<?xml version="1.0" encoding="UTF-8"?>'
+                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
+                    'xmlns:xhtml="http://www.w3.org/1999/xhtml">'
+                    f"<url><loc>{loc}</loc>"
+                    f'<xhtml:link rel="alternate" hreflang="en" href="{en}"/>'
+                    f'<xhtml:link rel="alternate" hreflang="en-GB" href="{en_gb}"/>'
+                    f'<xhtml:link rel="alternate" hreflang="de" href="{de}"/>'
+                    "</url></urlset>"
+                )
+
+        items, _ = await crawl_items(_Spider, mockserver)
+        assert items == [
+            {
+                "url": mockserver.url("/en-gb"),
+                "language": "en-GB",
+                "match": "exact",
+            }
+        ]
+
     def test_compression_bomb_setting(self):
         settings = {"DOWNLOAD_MAXSIZE": 10_000_000}
         crawler = get_crawler(settings_dict=settings)

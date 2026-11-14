@@ -59,6 +59,7 @@ class Sitemap:
     ) -> dict[str, Any] | None:
         d: dict[str, Any] = {}
         alternate: list[str] = []
+        alternate_hreflang: list[str | None] = []
         has_loc = False
 
         for el in elem:
@@ -70,6 +71,7 @@ class Sitemap:
                 if tag_name == "link":
                     if el.get("rel") == "alternate" and (href := el.get("href")):
                         alternate.append(href)
+                        alternate_hreflang.append(el.get("hreflang"))
                 else:
                     d[tag_name] = el.text.strip() if el.text else ""
                     if not has_loc and tag_name == "loc":
@@ -87,6 +89,7 @@ class Sitemap:
 
         if alternate:
             d["alternate"] = alternate
+            d["alternate_hreflang"] = alternate_hreflang
 
         return d
 

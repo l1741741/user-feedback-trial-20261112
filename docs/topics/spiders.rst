@@ -529,6 +529,35 @@ callback:
         def parse_category(self, response):
             pass  # ... scrape category ...
 
+Crawl one language per page when a sitemap uses hreflang alternate links,
+instead of crawling every language variant:
+
+.. code-block:: python
+
+    from scrapy.spiders import SitemapSpider
+
+
+    class MySpider(SitemapSpider):
+        sitemap_urls = ["http://www.example.com/sitemap.xml"]
+        # Prefer Belgian French, fall back to any French variant, then Dutch.
+        sitemap_languages = ["fr-BE", "nl"]
+
+        def parse(self, response):
+            yield {
+                "url": response.url,
+                "language": response.meta["sitemap_language"],
+            }
+
+For every configured tag, an exact hreflang match is considered first and is
+case-insensitive (``en-us`` matches ``en-US``), but ``en`` and ``en-US`` are
+never treated as the same tag. If there is no exact match, a candidate with
+the same primary language subtag is used, preferring the regionless tag
+(``en`` before ``en-GB``). If no configured language is available, the
+``x-default`` alternate is used, and finally the ``loc`` URL. Each entry
+produces at most one request, and the selected hreflang label and match type
+(``"exact"``, ``"primary"``, ``"x-default"`` or ``"loc"``) are available in
+the ``sitemap_language`` and ``sitemap_language_match`` request meta keys.
+
 Follow sitemaps defined in the `robots.txt`_ file and only follow sitemaps
 whose url contains ``/sitemap_shop``:
 

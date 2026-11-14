@@ -29,6 +29,90 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Reserved hreflang value that does not name a language:
+# https://developers.google.com/search/docs/specialty/international/localized-versions
+_X_DEFAULT = "x-default"
+
+# Main syntax of a BCP 47 language tag, including private-use tags such as
+# "x-pig-latin". x-default is handled separately as it is not a language.
+_LANGUAGE_TAG_RE = re.compile(r"(?:[a-zA-Z]{2,8}|x)(?:-[a-zA-Z0-9]{1,8})*")
+
+_LANGUAGE_MATCH_EXACT = "exact"
+_LANGUAGE_MATCH_PRIMARY = "primary"
+_LANGUAGE_MATCH_X_DEFAULT = _X_DEFAULT
+_LANGUAGE_MATCH_LOC = "loc"
+
+
+def _normalize_language_tag(tag: str) -> str | None:
+    """Return the lowercased *tag* if it is a well-formed BCP 47 language
+    tag, otherwise ``None``."""
+    tag = tag.strip()
+    if not _LANGUAGE_TAG_RE.fullmatch(tag):
+        return None
+    return tag.lower()
+
+
+def _iter_language_candidates(
+    entry: dict[str, Any],
+) -> Iterable[tuple[str, str | None, str | None]]:
+    """Yield ``(url, raw_label, normalized_label)`` for the loc URL and every
+    alternate link of *entry*, in document order.
+
+    The loc URL has no label. Alternate links without a usable hreflang label
+    have a ``None`` normalized label and can never match a language
+    preference."""
+    yield entry["loc"], None, None
+    alternate = entry.get("alternate", ())
+    labels = entry.get("alternate_hreflang", ())
+    for index, url in enumerate(alternate):
+        label = labels[index] if index < len(labels) else None
+        if label:
+            normalized = _normalize_language_tag(label)
+            if normalized is None:
+                logger.debug(
+                    f"Ignoring alternate link {url!r} with invalid hreflang "
+                    f"label {label!r}"
+                )
+        else:
+            normalized = None
+        yield url, label, normalized
+
+
+def _select_language_candidate(
+    candidates: Sequence[tuple[str, str | None, str | None]],
+    preferences: Sequence[str],
+) -> tuple[str, str | None, str]:
+    """Select one candidate following the configured language *preferences*.
+
+    For every preference, in order, an exact (case-insensitive) hreflang
+    match wins first, then a match on the primary language subtag, preferring
+    regionless candidates (e.g. ``en`` over ``en-GB`` for preference
+    ``en-US``). Only then is the next preference considered. If none match,
+    the ``x-default`` alternate is used, and finally the entry loc URL.
+
+    Ties within a tier are resolved by document order, so the result does not
+    depend on the order of unrelated elements."""
+    for preference in preferences:
+        for url, label, normalized in candidates:
+            if normalized == preference:
+                return url, label, _LANGUAGE_MATCH_EXACT
+        primary = preference.split("-", 1)[0]
+        for url, label, normalized in candidates:
+            if normalized == primary:
+                return url, label, _LANGUAGE_MATCH_PRIMARY
+        for url, label, normalized in candidates:
+            if (
+                normalized is not None
+                and normalized != _X_DEFAULT
+                and normalized.startswith(f"{primary}-")
+            ):
+                return url, label, _LANGUAGE_MATCH_PRIMARY
+    for url, label, normalized in candidates:
+        if normalized == _X_DEFAULT:
+            return url, label, _LANGUAGE_MATCH_X_DEFAULT
+    # The first candidate is always the loc URL, which has no label.
+    return candidates[0][0], None, _LANGUAGE_MATCH_LOC
+
 
 class SitemapSpider(Spider):
     """Spider that crawls a site by discovering its URLs using `sitemaps
@@ -97,6 +181,32 @@ class SitemapSpider(Spider):
     ``http://example.com/`` would be retrieved.
     """
 
+    sitemap_languages: str | Sequence[str] | None = None
+    """Normalized language tags of the content to crawl, in order of
+    preference.
+
+    .. versionadded:: 2.21.0
+
+    When set, each ``url`` block yields a single request, for the candidate
+    whose hreflang best matches this list instead of every alternate URL. For
+    every configured language, an exact match is considered first (matching is
+    case-insensitive, but ``en`` and ``en-US`` are never treated as the same
+    tag), then any tag with the same primary language subtag, preferring the
+    regionless tag (``en`` before ``en-GB``). Only if no configured language
+    matches is the ``x-default`` alternate used, and finally the ``loc`` URL.
+
+    The label of the selected candidate and the way it was matched are kept on
+    the request under the ``sitemap_language`` and
+    ``sitemap_language_match`` meta keys. Identical URLs selected by several
+    entries produce a single request. When this is set,
+    :attr:`sitemap_alternate_links` is ignored for ``urlset`` entries.
+
+    A single tag may be given as a string. Invalid tags and ``x-default`` are
+    ignored with a warning; they never need to be configured because
+    ``x-default`` is already the explicit fallback. When every configured tag
+    is invalid, the ``x-default`` and ``loc`` fallbacks still apply.
+    """
+
     sitemap_schemes: Sequence[str] | None = None
     """URL schemes that the URLs found in sitemaps and :file:`robots.txt` files
     may use.
@@ -136,6 +246,38 @@ class SitemapSpider(Spider):
         self._follow: list[re.Pattern[str]] = [regex(x) for x in self.sitemap_follow]
         self._robots_sitemaps: dict[str, list[str]] = {}
         self._signal_only_netlocs: set[str] = set()
+        self._language_preferences = self._get_language_preferences()
+
+    def _get_language_preferences(self) -> Sequence[str] | None:
+        """Validate and normalize :attr:`sitemap_languages`.
+
+        Returns ``None`` when language selection is disabled, otherwise the
+        normalized tags, which may be an empty sequence if none of the
+        configured tags were usable."""
+        if self.sitemap_languages is None:
+            return None
+        tags = (
+            (self.sitemap_languages,)
+            if isinstance(self.sitemap_languages, str)
+            else tuple(self.sitemap_languages)
+        )
+        preferences: list[str] = []
+        for tag in tags:
+            if tag.strip().lower() == _X_DEFAULT:
+                logger.warning(
+                    f"Ignoring {tag!r} in sitemap_languages: x-default is "
+                    "already used as the fallback of language selection."
+                )
+                continue
+            normalized = _normalize_language_tag(tag)
+            if normalized is None:
+                logger.warning(
+                    f"Ignoring invalid language tag {tag!r} in sitemap_languages."
+                )
+                continue
+            if normalized not in preferences:
+                preferences.append(normalized)
+        return preferences
 
     def _robots_parsed(
         self, robotparser: RobotParser, request: Request, response: Response
@@ -229,7 +371,10 @@ class SitemapSpider(Spider):
         -   as the ``loc`` attribute is required, entries without this tag are
             discarded
         -   alternate links are stored in a list with the key ``alternate``
-            (see :attr:`sitemap_alternate_links`)
+            (see :attr:`sitemap_alternate_links`), and their hreflang labels,
+            aligned by index with ``alternate`` and ``None`` when missing, in
+            a list with the key ``alternate_hreflang`` (see
+            :attr:`sitemap_languages`)
         -   namespaces are removed, so lxml tags named as ``{namespace}tagname``
             become only ``tagname``
 
@@ -274,6 +419,12 @@ class SitemapSpider(Spider):
         file, where *entry* only has ``loc``.
 
         *response* is the response that *entry* was read from.
+
+        When :attr:`sitemap_languages` selects the URL, the returned request
+        is also given the ``sitemap_language`` (the raw hreflang label of the
+        selected candidate, or ``None`` for the unlabeled loc URL) and
+        ``sitemap_language_match`` (``"exact"``, ``"primary"``,
+        ``"x-default"`` or ``"loc"``) meta keys.
         """
         return Request(loc, callback=callback)
 
@@ -324,14 +475,33 @@ class SitemapSpider(Spider):
             )
 
         if s.type == "urlset":
-            urlset_entries = list(
-                self._get_urls_and_callbacks_from_urlset(
+            if self._language_preferences is None:
+                urlset_entries = list(
+                    self._get_urls_and_callbacks_from_urlset(
+                        self.sitemap_filter(s), response.url
+                    )
+                )
+                return (
+                    self.sitemap_request(
+                        loc, c, entry, source="urlset", response=response
+                    )
+                    for loc, c, entry in urlset_entries
+                )
+            language_entries = list(
+                self._get_language_urls_and_callbacks_from_urlset(
                     self.sitemap_filter(s), response.url
                 )
             )
             return (
-                self.sitemap_request(loc, c, entry, source="urlset", response=response)
-                for loc, c, entry in urlset_entries
+                self._language_sitemap_request(
+                    loc,
+                    c,
+                    entry,
+                    language,
+                    language_match,
+                    response=response,
+                )
+                for loc, c, entry, language, language_match in language_entries
             )
 
         logger.warning(
@@ -363,6 +533,55 @@ class SitemapSpider(Spider):
                 if r.search(loc):
                     yield loc, c, entry
                     break
+
+    def _get_language_urls_and_callbacks_from_urlset(
+        self, it: Iterable[dict[str, Any]], base_url: str
+    ) -> Iterable[tuple[str, CallbackT, dict[str, Any], str | None, str]]:
+        # Each entry yields at most one loc, and a loc selected again by a
+        # later entry is not requested a second time.
+        seen_locs: set[str] = set()
+        assert self._language_preferences is not None
+        for entry in it:
+            if not entry.get("loc"):
+                continue
+            candidates = [
+                (urljoin(base_url, url), label, normalized)
+                for url, label, normalized in _iter_language_candidates(entry)
+            ]
+            loc, language, language_match = _select_language_candidate(
+                candidates, self._language_preferences
+            )
+            if language_match != _LANGUAGE_MATCH_EXACT:
+                logger.debug(
+                    f"No exact language match for {entry['loc']!r}; selected "
+                    f"{loc!r} ({language_match}: {language!r})."
+                )
+            if not self._scheme_allowed(loc, base_url) or loc in seen_locs:
+                continue
+            seen_locs.add(loc)
+            for r, c in self._cbs:
+                if r.search(loc):
+                    yield loc, c, entry, language, language_match
+                    break
+
+    def _language_sitemap_request(
+        self,
+        loc: str,
+        callback: CallbackT,
+        entry: dict[str, Any],
+        language: str | None,
+        language_match: str,
+        *,
+        response: Response,
+    ) -> Request:
+        """Build the request for a language-selected *loc* and attach the
+        selected language metadata without changing the entry."""
+        request = self.sitemap_request(
+            loc, callback, entry, source="urlset", response=response
+        )
+        request.meta.setdefault("sitemap_language", language)
+        request.meta.setdefault("sitemap_language_match", language_match)
+        return request
 
     def _scheme_allowed(self, url: str, source_url: str) -> bool:
         if self.sitemap_schemes is None:
