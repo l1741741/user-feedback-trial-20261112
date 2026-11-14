@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from time import get_clock_info, monotonic, time
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
@@ -949,6 +950,488 @@ async def test_slot_gc() -> None:
     finally:
         downloader.close()
         await downloader.handlers._close()
+
+
+class _FakeTimerCall:
+    def __init__(
+        self, when: float, func: Callable[..., None], args: tuple[Any, ...]
+    ) -> None:
+        self.when = when
+        self.func = func
+        self.args = args
+        self.cancelled = False
+        self.called = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class FakeClock:
+    """Controllable monotonic clock with the slot idle clock interface of
+    :class:`~scrapy.core.downloader.Downloader`."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.calls: list[_FakeTimerCall] = []
+
+    def seconds(self) -> float:
+        return self.now
+
+    def call_later(
+        self, delay: float, func: Callable[..., None], *args: Any
+    ) -> _FakeTimerCall:
+        call = _FakeTimerCall(self.now + delay, func, args)
+        self.calls.append(call)
+        return call
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+        while True:
+            due = [
+                call
+                for call in self.calls
+                if not call.cancelled and not call.called and call.when <= self.now
+            ]
+            if not due:
+                return
+            for call in sorted(due, key=lambda c: c.when):
+                call.called = True
+                call.func(*call.args)
+
+    @property
+    def pending(self) -> list[_FakeTimerCall]:
+        return [call for call in self.calls if not call.cancelled and not call.called]
+
+
+class _ControlledHandler(BaseDownloadHandler):
+    """Download handler whose downloads complete when the test fires their
+    Deferred."""
+
+    def __init__(self, crawler: Crawler) -> None:
+        super().__init__(crawler)
+        self.deferreds: list[Deferred[Response]] = []
+
+    async def download_request(self, request: Request) -> Response:
+        d: Deferred[Response] = Deferred()
+        self.deferreds.append(d)
+        return await maybe_deferred_to_future(d)
+
+
+def _idle_ttl_downloader(
+    settings_dict: dict[str, Any], clock: FakeClock
+) -> Downloader:
+    crawler = get_crawler(DefaultSpider, settings_dict=settings_dict)
+    crawler.spider = crawler._create_spider()
+    return Downloader(crawler, clock=clock)
+
+
+async def _pump_until(
+    condition: Callable[[], bool], attempts: int = 1000, interval: float = 0
+) -> None:
+    for _ in range(attempts):
+        if condition():
+            return
+        await sleep(interval)
+    raise AssertionError("condition not met")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        True,
+        False,
+        0,
+        0.0,
+        -1,
+        -0.5,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        "abc",
+        {},
+    ],
+)
+def test_slot_idle_ttl_invalid(value: Any) -> None:
+    crawler = get_crawler(
+        DefaultSpider, settings_dict={"DOWNLOAD_SLOT_IDLE_TTL": value}
+    )
+    with pytest.raises(ValueError, match="DOWNLOAD_SLOT_IDLE_TTL"):
+        Downloader(crawler)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [(10, 10.0), (0.5, 0.5), ("2.5", 2.5)]
+)
+def test_slot_idle_ttl_valid(value: Any, expected: float) -> None:
+    crawler = get_crawler(
+        DefaultSpider, settings_dict={"DOWNLOAD_SLOT_IDLE_TTL": value}
+    )
+    downloader = Downloader(crawler)
+    try:
+        assert downloader._slot_idle_ttl == expected
+    finally:
+        downloader.close()
+
+
+@coroutine_test
+async def test_slot_idle_ttl_disabled_by_default() -> None:
+    """Without DOWNLOAD_SLOT_IDLE_TTL no idle timers are set and the periodic
+    slot GC keeps working."""
+    clock = FakeClock()
+    crawler = get_crawler(DefaultSpider)
+    crawler.spider = crawler._create_spider()
+    downloader = Downloader(crawler, clock=clock)
+    try:
+        assert downloader._slot_idle_ttl is None
+        await maybe_deferred_to_future(downloader.fetch(Request("data:,")))
+        slot = downloader.slots[""]
+        assert slot.idle_since is None
+        assert slot._reclaim_call is None
+        assert not clock.calls
+        assert crawler.stats.get_value("downloader/slot_created_count") == 1
+        downloader._slot_gc(age=0)
+        assert not downloader.slots
+    finally:
+        downloader.close()
+        await downloader.handlers._close()
+
+
+@coroutine_test
+async def test_slot_idle_ttl_reclaim() -> None:
+    """An idle slot is reclaimed exactly when its TTL elapses."""
+    clock = FakeClock()
+    downloader = _idle_ttl_downloader({"DOWNLOAD_SLOT_IDLE_TTL": 10}, clock)
+    crawler = downloader.crawler
+    try:
+        await maybe_deferred_to_future(
+            downloader.fetch(Request("data:,", meta={"download_slot": "a"}))
+        )
+        slot = downloader.slots["a"]
+        assert slot.idle_since == 0.0
+        assert slot._reclaim_call is not None
+        assert len(clock.pending) == 1
+        # The TTL replaces the periodic slot GC sweep.
+        assert downloader._slot_gc_loop is None
+        # Refreshing an idle slot that already has a timer is a no-op.
+        downloader._refresh_slot_idle(slot)
+        assert slot.idle_since == 0.0
+        assert len(clock.pending) == 1
+        clock.advance(9.999)
+        assert downloader.slots["a"] is slot
+        clock.advance(0.001)
+        assert "a" not in downloader.slots
+        assert crawler.stats.get_value("downloader/slot_created_count") == 1
+        assert crawler.stats.get_value("downloader/slot_reclaimed_count") == 1
+    finally:
+        downloader.close()
+        await downloader.handlers._close()
+
+
+@coroutine_test
+async def test_slot_idle_ttl_default_clock() -> None:
+    """Without an injected clock, idle slots are reclaimed in real time."""
+    crawler = get_crawler(
+        DefaultSpider, settings_dict={"DOWNLOAD_SLOT_IDLE_TTL": 0.05}
+    )
+    crawler.spider = crawler._create_spider()
+    downloader = Downloader(crawler)
+    try:
+        await maybe_deferred_to_future(
+            downloader.fetch(Request("data:,", meta={"download_slot": "a"}))
+        )
+        assert "a" in downloader.slots
+        await _pump_until(lambda: "a" not in downloader.slots, interval=0.01)
+        assert crawler.stats.get_value("downloader/slot_reclaimed_count") == 1
+    finally:
+        downloader.close()
+        await downloader.handlers._close()
+
+
+@coroutine_test
+async def test_slot_idle_ttl_active_download() -> None:
+    """A slot with a download in progress is not reclaimed; its countdown
+    starts when the download finishes."""
+    clock = FakeClock()
+    downloader = _idle_ttl_downloader(
+        {
+            "DOWNLOAD_SLOT_IDLE_TTL": 10,
+            "DOWNLOAD_HANDLERS": {"http": _ControlledHandler},
+        },
+        clock,
+    )
+    crawler = downloader.crawler
+    try:
+        request = Request("http://example.com/", meta={"download_slot": "a"})
+        fetch_dfd = downloader.fetch(request)
+        await _pump_until(lambda: "http" in downloader.handlers._handlers)
+        handler = cast(_ControlledHandler, downloader.handlers._handlers["http"])
+        await _pump_until(lambda: bool(handler.deferreds))
+        slot = downloader.slots["a"]
+        assert slot.transferring
+        assert slot.idle_since is None
+        assert slot._reclaim_call is None
+        clock.advance(100)
+        assert downloader.slots["a"] is slot
+        # A reclamation fired while the slot has a download in progress is
+        # rejected.
+        downloader._reclaim_slot(slot, 0.0)
+        assert downloader.slots["a"] is slot
+        assert crawler.stats.get_value("downloader/slot_reclaim_rejected_count") == 1
+        handler.deferreds[0].callback(Response(request.url))
+        await maybe_deferred_to_future(fetch_dfd)
+        assert slot.idle_since == 100.0
+        clock.advance(9.999)
+        assert downloader.slots["a"] is slot
+        clock.advance(0.001)
+        assert "a" not in downloader.slots
+        assert crawler.stats.get_value("downloader/slot_reclaimed_count") == 1
+    finally:
+        downloader.close()
+        await downloader.handlers._close()
+
+
+@coroutine_test
+async def test_slot_idle_ttl_queued_request() -> None:
+    """A slot with a queued request is not reclaimed."""
+    clock = FakeClock()
+    downloader = _idle_ttl_downloader(
+        {
+            "CONCURRENT_REQUESTS_PER_DOMAIN": 1,
+            "DOWNLOAD_SLOT_IDLE_TTL": 10,
+            "DOWNLOAD_HANDLERS": {"http": _ControlledHandler},
+        },
+        clock,
+    )
+    try:
+        request1 = Request("http://example.com/1", meta={"download_slot": "a"})
+        request2 = Request("http://example.com/2", meta={"download_slot": "a"})
+        fetch_dfd1 = downloader.fetch(request1)
+        await _pump_until(lambda: "http" in downloader.handlers._handlers)
+        handler = cast(_ControlledHandler, downloader.handlers._handlers["http"])
+        await _pump_until(lambda: bool(handler.deferreds))
+        fetch_dfd2 = downloader.fetch(request2)
+        slot = downloader.slots["a"]
+        await _pump_until(lambda: len(slot.queue) == 1)
+        clock.advance(100)
+        assert downloader.slots["a"] is slot
+        assert slot._reclaim_call is None
+        handler.deferreds[0].callback(Response(request1.url))
+        await _pump_until(lambda: len(handler.deferreds) == 2)
+        clock.advance(100)
+        assert downloader.slots["a"] is slot
+        handler.deferreds[1].callback(Response(request2.url))
+        await maybe_deferred_to_future(fetch_dfd1)
+        await maybe_deferred_to_future(fetch_dfd2)
+        assert slot.idle_since == 200.0
+        clock.advance(10)
+        assert "a" not in downloader.slots
+    finally:
+        downloader.close()
+        await downloader.handlers._close()
+
+
+@coroutine_test
+async def test_slot_idle_ttl_pending_delay() -> None:
+    """A slot with a download delay waiting to fire is not reclaimed."""
+    clock = FakeClock()
+    downloader = _idle_ttl_downloader(
+        {
+            "DOWNLOAD_DELAY": 5,
+            "DOWNLOAD_DELAY_JITTER": 0,
+            "DOWNLOAD_SLOT_IDLE_TTL": 10,
+        },
+        clock,
+    )
+    try:
+        await maybe_deferred_to_future(
+            downloader.fetch(Request("data:,", meta={"download_slot": "a"}))
+        )
+        slot = downloader.slots["a"]
+        # DOWNLOAD_DELAY keeps a delay call pending after the download.
+        assert slot.latercall is not None
+        assert slot.idle_since is None
+        assert slot._reclaim_call is None
+        # A second request within DOWNLOAD_DELAY waits on slot.latercall.
+        fetch_dfd = downloader.fetch(Request("data:,", meta={"download_slot": "a"}))
+        await _pump_until(lambda: len(slot.queue) == 1)
+        clock.advance(100)
+        assert downloader.slots["a"] is slot
+        assert slot._reclaim_call is None
+        dropped = await downloader.stop()
+        assert dropped == 1
+        with pytest.raises(DownloadCancelledError):
+            await maybe_deferred_to_future(fetch_dfd)
+    finally:
+        downloader.close()
+        await downloader.handlers._close()
+
+
+@coroutine_test
+async def test_slot_idle_ttl_starts_after_delay_call() -> None:
+    """The idle countdown of a slot with DOWNLOAD_DELAY starts once its
+    pending delay call fires, not when the last download finishes."""
+    clock = FakeClock()
+    downloader = _idle_ttl_downloader(
+        {
+            "DOWNLOAD_DELAY": 0.05,
+            "DOWNLOAD_DELAY_JITTER": 0,
+            "DOWNLOAD_SLOT_IDLE_TTL": 10,
+        },
+        clock,
+    )
+    try:
+        await maybe_deferred_to_future(
+            downloader.fetch(Request("data:,", meta={"download_slot": "a"}))
+        )
+        slot = downloader.slots["a"]
+        assert slot.latercall is not None
+        assert slot._reclaim_call is None
+        # Let the real delay call fire; the slot then becomes idle.
+        await _pump_until(lambda: slot.latercall is None, interval=0.01)
+        assert slot.idle_since == 0.0
+        assert slot._reclaim_call is not None
+        clock.advance(10)
+        assert "a" not in downloader.slots
+    finally:
+        downloader.close()
+        await downloader.handlers._close()
+
+
+@coroutine_test
+async def test_slot_idle_ttl_refreshed_by_activity() -> None:
+    """New activity of a slot cancels its pending reclamation and restarts
+    the countdown when the slot becomes idle again."""
+    clock = FakeClock()
+    downloader = _idle_ttl_downloader({"DOWNLOAD_SLOT_IDLE_TTL": 10}, clock)
+    crawler = downloader.crawler
+    try:
+        await maybe_deferred_to_future(
+            downloader.fetch(Request("data:,", meta={"download_slot": "a"}))
+        )
+        slot = downloader.slots["a"]
+        first_call = clock.pending[0]
+        clock.advance(6)
+        await maybe_deferred_to_future(
+            downloader.fetch(Request("data:,", meta={"download_slot": "a"}))
+        )
+        assert first_call.cancelled
+        assert slot.idle_since == 6.0
+        # A reclamation fired with the stale idle start is rejected.
+        downloader._reclaim_slot(slot, 0.0)
+        assert downloader.slots["a"] is slot
+        assert crawler.stats.get_value("downloader/slot_reclaim_rejected_count") == 1
+        clock.advance(9.999)
+        assert downloader.slots["a"] is slot
+        clock.advance(0.001)
+        assert "a" not in downloader.slots
+        assert crawler.stats.get_value("downloader/slot_reclaimed_count") == 1
+    finally:
+        downloader.close()
+        await downloader.handlers._close()
+
+
+@coroutine_test
+async def test_slot_idle_ttl_reclaim_and_reuse() -> None:
+    """Reclaiming a slot does not affect other slots, and a new request for
+    the reclaimed key gets a new slot that late callbacks of the old slot
+    cannot touch."""
+    clock = FakeClock()
+    downloader = _idle_ttl_downloader(
+        {
+            "DOWNLOAD_SLOT_IDLE_TTL": 10,
+            "DOWNLOAD_HANDLERS": {"http": _ControlledHandler},
+        },
+        clock,
+    )
+    crawler = downloader.crawler
+    try:
+        await maybe_deferred_to_future(
+            downloader.fetch(Request("data:,", meta={"download_slot": "a"}))
+        )
+        old_slot = downloader.slots["a"]
+        request = Request("http://example.com/", meta={"download_slot": "b"})
+        fetch_dfd = downloader.fetch(request)
+        await _pump_until(lambda: "http" in downloader.handlers._handlers)
+        handler = cast(_ControlledHandler, downloader.handlers._handlers["http"])
+        await _pump_until(lambda: bool(handler.deferreds))
+        clock.advance(10)
+        assert "a" not in downloader.slots
+        # The other slot and its in-flight download are untouched.
+        assert "b" in downloader.slots
+        assert not handler.deferreds[0].called
+        assert len(downloader.active) == 1
+        # A new request for the reclaimed key creates a new slot.
+        await maybe_deferred_to_future(
+            downloader.fetch(Request("data:,", meta={"download_slot": "a"}))
+        )
+        new_slot = downloader.slots["a"]
+        assert new_slot is not old_slot
+        assert crawler.stats.get_value("downloader/slot_created_count") == 3
+        # A late callback of the old slot cannot modify the new one.
+        downloader._reclaim_slot(old_slot, 0.0)
+        assert downloader.slots["a"] is new_slot
+        assert crawler.stats.get_value("downloader/slot_reclaim_rejected_count") == 1
+        # A slot that was never registered cannot be reclaimed either.
+        downloader._reclaim_slot(Slot(1, 0), 0.0)
+        assert crawler.stats.get_value("downloader/slot_reclaim_rejected_count") == 2
+        handler.deferreds[0].callback(Response(request.url))
+        await maybe_deferred_to_future(fetch_dfd)
+        assert crawler.stats.get_value("downloader/slot_reclaimed_count") == 1
+    finally:
+        downloader.close()
+        await downloader.handlers._close()
+
+
+@coroutine_test
+async def test_slot_idle_ttl_close_cancels_timers() -> None:
+    """Closing the downloader cancels all pending reclamation timers."""
+    clock = FakeClock()
+    downloader = _idle_ttl_downloader({"DOWNLOAD_SLOT_IDLE_TTL": 10}, clock)
+    try:
+        await maybe_deferred_to_future(
+            downloader.fetch(Request("data:,", meta={"download_slot": "a"}))
+        )
+        slot = downloader.slots["a"]
+        assert slot._reclaim_call is not None
+        downloader.close()
+        assert slot._reclaim_call is None
+        assert not clock.pending
+        clock.advance(100)
+        assert downloader.slots["a"] is slot
+    finally:
+        downloader.close()
+        await downloader.handlers._close()
+
+
+@coroutine_test
+async def test_slot_idle_ttl_multiple_crawlers() -> None:
+    """Each crawler reclaims the slots of its own downloader only."""
+    clock1, clock2 = FakeClock(), FakeClock()
+    downloader1 = _idle_ttl_downloader({"DOWNLOAD_SLOT_IDLE_TTL": 10}, clock1)
+    downloader2 = _idle_ttl_downloader({"DOWNLOAD_SLOT_IDLE_TTL": 20}, clock2)
+    try:
+        await maybe_deferred_to_future(
+            downloader1.fetch(Request("data:,", meta={"download_slot": "a"}))
+        )
+        await maybe_deferred_to_future(
+            downloader2.fetch(Request("data:,", meta={"download_slot": "a"}))
+        )
+        clock1.advance(10)
+        assert "a" not in downloader1.slots
+        assert "a" in downloader2.slots
+        clock2.advance(20)
+        assert "a" not in downloader2.slots
+        assert downloader1.crawler.stats.get_value(
+            "downloader/slot_reclaimed_count"
+        ) == 1
+        assert downloader2.crawler.stats.get_value(
+            "downloader/slot_reclaimed_count"
+        ) == 1
+    finally:
+        downloader1.close()
+        await downloader1.handlers._close()
+        downloader2.close()
+        await downloader2.handlers._close()
 
 
 @coroutine_test

@@ -1238,6 +1238,31 @@ key, in which case they keep that slot.
    In earlier versions, redirects and retries always kept the slot of their
    original request, even when they pointed to a different domain.
 
+.. setting:: DOWNLOAD_SLOT_IDLE_TTL
+
+DOWNLOAD_SLOT_IDLE_TTL
+----------------------
+
+.. versionadded:: VERSION
+
+Default: ``None``
+
+Amount of seconds that a download slot may stay idle before the downloader
+discards it, releasing its queue and timer state. A slot is idle while it has
+no downloads in progress, no queued requests and no pending download delay.
+New requests or downloads of a slot restart its countdown, and a slot that is
+discarded is created again, with the same settings, when a new request needs
+it.
+
+``None`` (default) disables idle slot reclamation. The value must be a
+positive, finite number of seconds.
+
+The ``downloader/slot_created_count``, ``downloader/slot_reclaimed_count``
+and ``downloader/slot_reclaim_rejected_count`` stats track, respectively, how
+many slots were created, how many were discarded after staying idle for the
+TTL, and how many times a pending reclamation was skipped because the slot
+had become active again.
+
 
 .. setting:: DOWNLOAD_TIMEOUT
 

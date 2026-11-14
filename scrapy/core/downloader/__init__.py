@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import math
 import random
 import warnings
 from collections import deque
@@ -9,7 +10,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from logging import getLogger
 from time import monotonic, perf_counter, time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from twisted.internet.defer import Deferred, DeferredList, inlineCallbacks
 
@@ -48,6 +49,33 @@ if TYPE_CHECKING:
     from scrapy.signalmanager import SignalManager
 
 logger = getLogger(__name__)
+
+
+class _Cancellable(Protocol):
+    def cancel(self) -> None: ...
+
+
+class _SlotIdleClock(Protocol):
+    """Monotonic clock and timer source for slot idle reclamation."""
+
+    def seconds(self) -> float: ...
+
+    def call_later(
+        self, delay: float, func: Callable[..., None], *args: Any
+    ) -> _Cancellable: ...
+
+
+class _MonotonicSlotIdleClock:
+    """Default :class:`_SlotIdleClock`, backed by :func:`time.monotonic` and
+    the event loop."""
+
+    def seconds(self) -> float:
+        return monotonic()
+
+    def call_later(
+        self, delay: float, func: Callable[..., None], *args: Any
+    ) -> CallLaterResult:
+        return call_later(delay, func, *args)
 
 
 # Request.meta key holding the delay of a request and the time before which it
@@ -97,6 +125,12 @@ class Slot:
     transferring: set[Request] = field(default_factory=set, init=False, repr=False)
     lastseen: float = field(default=0, init=False, repr=False)
     latercall: CallLaterResult | None = field(default=None, init=False, repr=False)
+    # Key of the slot in Downloader.slots, or None before it is registered.
+    key: str | None = field(default=None, init=False, repr=False)
+    # Monotonic time when the slot became idle (nothing active, queued or
+    # transferring, no pending delay), or None while it has activity.
+    idle_since: float | None = field(default=None, init=False, repr=False)
+    _reclaim_call: _Cancellable | None = field(default=None, init=False, repr=False)
     # Number of requests in queue not sent with
     # ExecutionEngine.download_async().
     _scheduled_queued: int = field(default=0, init=False, repr=False)
@@ -131,6 +165,9 @@ class Slot:
         self.transferring = set()
         self.lastseen = 0
         self.latercall = None
+        self.key = None
+        self.idle_since = None
+        self._reclaim_call = None
         self._scheduled_queued = 0
 
     @property
@@ -164,6 +201,9 @@ class Slot:
         if self.latercall:
             self.latercall.cancel()
             self.latercall = None
+        if self._reclaim_call is not None:
+            self._reclaim_call.cancel()
+            self._reclaim_call = None
 
     def __str__(self) -> str:
         return (
@@ -220,6 +260,32 @@ def _slot_jitter(slot_settings: dict[str, Any], default: float) -> float:
     return default
 
 
+def _slot_idle_ttl(settings: BaseSettings) -> float | None:
+    """Return the :setting:`DOWNLOAD_SLOT_IDLE_TTL` setting as a positive
+    finite float, or ``None`` if it is not set."""
+    value = settings.get("DOWNLOAD_SLOT_IDLE_TTL")
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(
+            f"DOWNLOAD_SLOT_IDLE_TTL must be a positive, finite number of "
+            f"seconds, got {value!r}."
+        )
+    try:
+        ttl = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"DOWNLOAD_SLOT_IDLE_TTL must be a positive, finite number of "
+            f"seconds, got {value!r}."
+        ) from None
+    if not math.isfinite(ttl) or ttl <= 0:
+        raise ValueError(
+            f"DOWNLOAD_SLOT_IDLE_TTL must be a positive, finite number of "
+            f"seconds, got {value!r}."
+        )
+    return ttl
+
+
 _STAMPED_SLOT_META_KEY = "_download_slot_stamp"
 
 
@@ -230,7 +296,7 @@ class Downloader:
     # release before one of them is let through.
     _SIZE_BYPASS_DELAY: float = 5.0
 
-    def __init__(self, crawler: Crawler):
+    def __init__(self, crawler: Crawler, *, clock: _SlotIdleClock | None = None):
         self.crawler: Crawler = crawler
         self.settings: BaseSettings = crawler.settings
         self.signals: SignalManager = crawler.signals
@@ -246,6 +312,10 @@ class Downloader:
         # AUTOTHROTTLE_START_DELAY.
         self._delay: float = self.settings.getfloat("DOWNLOAD_DELAY")
         self._jitter: float = _default_jitter(self.settings)
+        self._slot_idle_ttl: float | None = _slot_idle_ttl(self.settings)
+        self._idle_clock: _SlotIdleClock = (
+            clock if clock is not None else _MonotonicSlotIdleClock()
+        )
         self.middleware: DownloaderMiddlewareManager = build_from_crawler(
             DownloaderMiddlewareManager, crawler
         )
@@ -437,7 +507,10 @@ class Downloader:
             )
             delay = slot_settings.get("delay", self._delay)
             new_slot = Slot(conc, delay, _slot_jitter(slot_settings, self._jitter))
+            new_slot.key = key
             self.slots[key] = new_slot
+            assert self._stats is not None
+            self._stats.inc_value("downloader/slot_created_count")
             self._start_slot_gc()
 
         return key, self.slots[key]
@@ -493,6 +566,7 @@ class Downloader:
             request.meta[_STAMPED_SLOT_META_KEY] = key
         request.meta[self.DOWNLOAD_SLOT] = key
         slot.active.add(request)
+        self._refresh_slot_idle(slot)
         self.signals.send_catch_log(
             signal=signals.request_reached_downloader,
             request=request,
@@ -507,6 +581,7 @@ class Downloader:
             return await maybe_deferred_to_future(d)  # fired in _wait_for_download()
         finally:
             slot.active.remove(request)
+            self._refresh_slot_idle(slot)
 
     def _process_queue(self, slot: Slot) -> None:
         if slot.latercall:
@@ -572,6 +647,7 @@ class Downloader:
     def _latercall(self, slot: Slot) -> None:
         slot.latercall = None
         self._process_queue(slot)
+        self._refresh_slot_idle(slot)
 
     async def _download(self, slot: Slot, request: Request) -> Response:
         # The order is very important for the following logic. Do not change!
@@ -798,6 +874,55 @@ class Downloader:
         self.close()
         await self.handlers._close()
 
+    @staticmethod
+    def _slot_is_idle(slot: Slot) -> bool:
+        """Return whether *slot* has no download activity: nothing active,
+        queued or transferring, and no delay call waiting to fire."""
+        return not (
+            slot.active or slot.queue or slot.transferring or slot.latercall
+        )
+
+    def _refresh_slot_idle(self, slot: Slot) -> None:
+        """Update the idle reclamation timer of *slot* after its activity
+        changed.
+
+        Activity clears the idle start and cancels the timer; a slot that
+        becomes idle starts the :setting:`DOWNLOAD_SLOT_IDLE_TTL` countdown.
+        """
+        if self._slot_idle_ttl is None or not self._accepting_requests:
+            return
+        if not self._slot_is_idle(slot):
+            slot.idle_since = None
+            if slot._reclaim_call is not None:
+                slot._reclaim_call.cancel()
+                slot._reclaim_call = None
+            return
+        if slot.idle_since is None:
+            slot.idle_since = self._idle_clock.seconds()
+            slot._reclaim_call = self._idle_clock.call_later(
+                self._slot_idle_ttl, self._reclaim_slot, slot, slot.idle_since
+            )
+
+    def _reclaim_slot(self, slot: Slot, idle_since: float) -> None:
+        """Reclaim *slot* if it is still a registered slot and has been idle
+        since *idle_since*."""
+        key = slot.key
+        if (
+            key is None
+            or self.slots.get(key) is not slot
+            or slot.idle_since != idle_since
+            or not self._slot_is_idle(slot)
+        ):
+            # The slot got new activity or another slot took its key.
+            assert self._stats is not None
+            self._stats.inc_value("downloader/slot_reclaim_rejected_count")
+            return
+        slot._reclaim_call = None
+        del self.slots[key]
+        slot.close()
+        assert self._stats is not None
+        self._stats.inc_value("downloader/slot_reclaimed_count")
+
     def _slot_gc(self, age: float = 60) -> None:
         mintime = monotonic() - age
         for key, slot in list(self.slots.items()):
@@ -805,7 +930,9 @@ class Downloader:
                 self.slots.pop(key).close()
 
     def _start_slot_gc(self) -> None:
-        if self._slot_gc_loop:
+        if self._slot_gc_loop or self._slot_idle_ttl is not None:
+            # DOWNLOAD_SLOT_IDLE_TTL reclaims idle slots with per-slot timers
+            # instead of the periodic sweep.
             return
         self._slot_gc_loop = create_looping_call(self._slot_gc)
         self._slot_gc_loop.start(self._SLOT_GC_INTERVAL, now=False)
