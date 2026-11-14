@@ -27,6 +27,14 @@ from zope.interface import Interface
 
 from scrapy import Spider, signals
 from scrapy.exceptions import NotConfigured, ScrapyDeprecationWarning
+from scrapy.extensions._quarantine import (
+    _extract_item_id,
+    _RejectionManifest,
+    _sink_failed,
+    _SinkFailureMarker,
+    _track_field_path,
+    rejection_manifest_path,
+)
 from scrapy.extensions.postprocessing import PostProcessingManager
 from scrapy.utils._ftp import ftp_store_file
 from scrapy.utils.asyncio import is_asyncio_available, run_in_thread
@@ -623,6 +631,12 @@ class FeedSlot:
         self._skipped: bool = False
         self._exporting: bool = False
         self._fileloaded: bool = False
+        # Per-item isolation state. Counters are per slot, so every feed and
+        # every batch keeps its own attempt, success and isolation numbers.
+        self.item_attempts: int = 0
+        self.rejected_count: int = 0
+        self._sink_marker: _SinkFailureMarker | None = None
+        self._manifest: _RejectionManifest | None = None
 
     async def start_exporting(self) -> None:
         if not self._fileloaded:
@@ -636,6 +650,12 @@ class FeedSlot:
                         self.feed_options,
                     ),
                 )
+            if self.feed_options["isolate_invalid_items"]:
+                # Wrap the outermost output object so failures while writing
+                # encoded bytes (disk, storage, compression) stay
+                # distinguishable from field conversion failures.
+                self._sink_marker = _SinkFailureMarker(self.file)
+                self.file = cast("IO[bytes]", self._sink_marker)
             self.exporter = self._get_exporter(
                 file=self.file,
                 format_=self.feed_options["format"],
@@ -754,6 +774,17 @@ class FeedExporter:
                 raise NotConfigured
             if not self._exporter_supported(feed_options["format"]):
                 raise NotConfigured
+            if feed_options["isolate_invalid_items"]:
+                rejection_uri = feed_options["rejection_log_uri"]
+                target_scheme = urlparse(rejection_uri or uri).scheme
+                if target_scheme not in ("", "file"):
+                    logger.error(
+                        "The isolation of invalid items only supports local "
+                        "rejection manifests: set the rejection_log_uri feed "
+                        "option of %r to a local path or a file:// URI.",
+                        uri,
+                    )
+                    raise NotConfigured
 
     def open_spider(self, spider: Spider) -> None:
         self._slots_initialized = False
@@ -883,15 +914,68 @@ class FeedExporter:
     @staticmethod
     def _get_file(slot_: FeedSlot) -> IO[bytes]:
         assert slot_.file
-        if isinstance(slot_.file, PostProcessingManager):
-            slot_.file.close()
-            return slot_.file.file
-        return slot_.file
+        file = slot_.file
+        if slot_._sink_marker is not None:
+            file = slot_._sink_marker.file
+        if isinstance(file, PostProcessingManager):
+            file.close()
+            return file.file
+        return file
+
+    @staticmethod
+    def _close_unstored_file(slot_: FeedSlot) -> None:
+        """Close every layer of an output file that will not be stored.
+
+        A local file created only because an item was attempted (possibly
+        one that was then isolated) is removed again when it is empty, so
+        failed batches leave no empty feed behind.
+        """
+        assert slot_.file
+        file = slot_.file
+        if slot_._sink_marker is not None:
+            file = slot_._sink_marker.file
+        if isinstance(file, PostProcessingManager):
+            file.close()
+            target = file.file
+        else:
+            target = file
+        empty = not target.tell()
+        name = getattr(target, "name", None)
+        target.close()
+        if empty and isinstance(name, str):
+            with contextlib.suppress(OSError):
+                Path(name).unlink()
+
+    def _record_isolation_stats(self, slot: FeedSlot, slot_type: str) -> None:
+        """Record attempt and isolation counters for an isolating slot.
+
+        They describe the items seen rather than the stored file, so they
+        are recorded even when nothing ends up stored, and only when nonzero
+        to avoid creating empty stats keys.
+        """
+        if not slot.feed_options["isolate_invalid_items"]:
+            return
+        if slot.item_attempts:
+            self.crawler.stats.inc_value(
+                f"feedexport/attempted_count/{slot_type}", slot.item_attempts
+            )
+        if slot.rejected_count:
+            self.crawler.stats.inc_value(
+                f"feedexport/rejected_count/{slot_type}", slot.rejected_count
+            )
 
     async def _close_slot(self, slot: FeedSlot, spider: Spider) -> None:
+        if slot._manifest is not None:
+            # A manifest without entries leaves no file behind; a populated
+            # one is already flushed entry by entry.
+            slot._manifest.close(remove_if_empty=True)
+            slot._manifest = None
+
+        slot_type = type(slot.storage).__name__
+        self._record_isolation_stats(slot, slot_type)
+
         if slot._skipped:
             return
-
         if slot.itemcount:
             # Normal case
             await slot.finish_exporting()
@@ -900,11 +984,19 @@ class FeedExporter:
             await slot.start_exporting()
             await slot.finish_exporting()
         else:
-            # In this case, the file is not stored, so no processing is required.
+            # The file is not stored. Close it ourselves: the storage never
+            # gets it, and a slot can reach this point after every attempted
+            # item was isolated.
+            if slot._fileloaded:
+                self._close_unstored_file(slot)
             return
 
         logmsg = f"{slot.format} feed ({slot.itemcount} items) in: {slot.uri}"
-        slot_type = type(slot.storage).__name__
+        if slot.rejected_count:
+            logmsg += (
+                f"; {slot.rejected_count} item(s) isolated in the rejection "
+                f"manifest ({slot.item_attempts} attempted)"
+            )
         self.crawler.stats.inc_value(
             f"feedexport/item_count/{slot_type}", slot.itemcount
         )
@@ -988,17 +1080,13 @@ class FeedExporter:
                         await slot.start_exporting()
                     except FileExistsError:
                         self._skip(slot)
-                if not slot._skipped:
-                    assert slot.exporter
-                    try:
-                        await _maybe_coroutine(slot.exporter.export_item, exported_item)
-                    except Exception as e:
-                        e.add_note(f"Item: {exported_item!r}")
-                        raise
-                # Skipped items are counted, so that the following files of
-                # this feed still cover the same items as those of any other
-                # feed.
-                slot.itemcount += 1
+                if slot._skipped:
+                    # Skipped items are counted, so that the following files
+                    # of this feed still cover the same items as those of any
+                    # other feed.
+                    slot.itemcount += 1
+                else:
+                    await self._export_to_slot(slot, exported_item, spider)
                 # create new slot for each slot with itemcount == FEED_EXPORT_BATCH_ITEM_COUNT and close the old one
                 if (
                     self.feeds[slot.uri_template]["batch_item_count"]
@@ -1018,6 +1106,99 @@ class FeedExporter:
                     )
             slots.append(slot)
         self.slots = slots
+
+    async def _export_to_slot(
+        self, slot: FeedSlot, exported_item: Any, spider: Spider
+    ) -> None:
+        """Export one processed item to *slot*, isolating it when configured.
+
+        A successful export increments the success counter; an isolated
+        serialization failure increments the rejection counter instead.
+        Failures of the output chain propagate as without isolation.
+        """
+        assert slot.exporter
+        slot.item_attempts += 1
+        isolate = self.feeds[slot.uri_template]["isolate_invalid_items"]
+        field_state: dict[str, Any] | None = None
+        try:
+            if isolate:
+                with _track_field_path(slot.exporter) as field_state:
+                    await _maybe_coroutine(slot.exporter.export_item, exported_item)
+            else:
+                await _maybe_coroutine(slot.exporter.export_item, exported_item)
+        except Exception as e:
+            if (
+                isolate
+                and slot._sink_marker is not None
+                and not _sink_failed(e, slot._sink_marker)
+            ):
+                self._quarantine_item(
+                    slot,
+                    exported_item,
+                    e,
+                    field_state["path"] if field_state else None,
+                    spider,
+                )
+                return
+            # Output-chain failures (disk, storage, compression) and every
+            # failure when isolation is disabled keep their original
+            # propagation.
+            e.add_note(f"Item: {exported_item!r}")
+            raise
+        slot.itemcount += 1
+
+    def _quarantine_item(
+        self,
+        slot: FeedSlot,
+        item: Any,
+        exception: Exception,
+        field_path: str | None,
+        spider: Spider,
+    ) -> None:
+        """Record *item* in the slot rejection manifest and keep exporting.
+
+        Only exception metadata and JSON-safe identifier fields leave the
+        process; the item itself is never written to the manifest or logged.
+        A failure of the manifest itself is not a bad-item failure, so it is
+        raised instead of being swallowed.
+        """
+        options = self.feeds[slot.uri_template]
+        if slot._manifest is None:
+            manifest_uri = options["rejection_log_uri"]
+            if manifest_uri is None:
+                manifest_uri = rejection_manifest_path(slot.uri)
+            else:
+                manifest_uri = apply_uri_params(
+                    manifest_uri,
+                    self._get_uri_params(spider, options["uri_params"], slot),
+                )
+            scheme = urlparse(manifest_uri).scheme
+            if scheme == "file":
+                manifest_path = Path(file_uri_to_path(manifest_uri))
+            elif scheme == "":
+                manifest_path = Path(manifest_uri)
+            else:
+                raise ValueError(
+                    f"Cannot write the rejection manifest to non-local URI "
+                    f"{manifest_uri!r}; use a local path or a file:// URI."
+                ) from exception
+            slot._manifest = _RejectionManifest(manifest_path)
+        item_id = _extract_item_id(item, tuple(options["item_id_fields"]))
+        slot._manifest.record(
+            batch_id=slot.batch_id,
+            item_index=slot.item_attempts,
+            field_path=field_path,
+            exception=exception,
+            item_id=item_id,
+        )
+        slot.rejected_count += 1
+        logger.warning(
+            f"Isolated item #{slot.item_attempts} of feed {slot.uri!r}: "
+            f"{type(exception).__module__}.{type(exception).__name__} at "
+            f"field {field_path!r}; see {slot._manifest.path}",
+            extra={"spider": spider},
+            exc_info=exception,
+        )
 
     def _load_components(self, setting_prefix: str) -> dict[str, Any]:
         conf = without_none_values(

@@ -451,6 +451,64 @@ apply to the item itself. The number of exported entries is reported per
 storage class, as the ``feedexport/item_count/<storage class>`` stat.
 
 
+.. _item-isolation:
+
+Isolating items that cannot be serialized
+=========================================
+
+.. versionadded:: 2.21.0
+
+By default, an item whose fields cannot be converted or encoded by the feed
+exporter raises an exception, which aborts the export of every later item to
+that feed. Set the ``isolate_invalid_items`` :ref:`feed option
+<feed-options>` (or the :setting:`FEED_EXPORT_ISOLATE_INVALID_ITEMS` setting)
+to ``True`` to keep the batch going instead: the offending item is skipped,
+recorded in a separate rejection manifest, and the remaining items continue
+to be exported normally.
+
+Only failures that happen while an item field is converted or encoded are
+treated as bad items. A failure of the output itself — the storage file being
+full or unreachable, or a compression plugin being broken — is not
+attributable to an item, so it is raised exactly as it is without isolation.
+
+Each line of the rejection manifest is a JSON object describing one isolated
+item:
+
+-   ``item_index``: the 1-based position of the item among the items
+    attempted for the batch, independent of how many items were output.
+-   ``batch_id``: the output batch the item belonged to, as numbered by
+    :setting:`FEED_EXPORT_BATCH_ITEM_COUNT`.
+-   ``field_path``: the field being converted when the failure was detected,
+    or ``null`` when it cannot be pinpointed (for example when a JSON encoder
+    rejects a value after field conversion has finished).
+-   ``exception_class`` and ``exception_module``: the type of the raised
+    exception.
+-   ``item_id``: the JSON-serializable values of the fields named by the
+    ``item_id_fields`` feed option. The whole item is never written to the
+    manifest, and values that cannot be encoded as JSON are omitted rather
+    than copied.
+
+The manifest is a ``.rejected.jsonl`` file written next to the feed, or next
+to every batch file for batched feeds; the ``rejection_log_uri`` feed option
+points it elsewhere. A manifest with no isolated items is removed when the
+spider closes, so feeds that never fail leave no extra file behind.
+
+The counters stay separate. For every storage class,
+``feedexport/attempted_count/<storage class>`` counts the items that were
+offered to the exporter, ``feedexport/item_count/<storage class>`` counts the
+items that were actually output, and ``feedexport/rejected_count/<storage
+class>`` counts the isolated items, with ``attempted = output + rejected``.
+The ``batch_item_count`` option only counts output items, so isolated items
+neither fill nor split a batch. Each feed slot keeps its own counters and
+its own manifest.
+
+Isolation only supports local rejection manifests, because the manifest is
+written alongside the feed data. It is off by default, and turning it on does
+not change the :signal:`item_scraped` and :signal:`item_error` signals, nor
+the logging of storage failures; an isolated item additionally produces a
+``WARNING`` log entry pointing at its manifest.
+
+
 .. _post-processing:
 
 Post-Processing
@@ -523,6 +581,7 @@ These are the settings used for configuring the feed exports:
 -   :setting:`FEED_STORE_EMPTY`
 -   :setting:`FEED_EXPORT_FIELDS`
 -   :setting:`FEED_EXPORT_INDENT`
+-   :setting:`FEED_EXPORT_ISOLATE_INVALID_ITEMS`
 -   :setting:`FEED_STORAGES`
 -   :setting:`FEED_STORAGE_FTP_ACTIVE`
 -   :setting:`FEED_STORAGE_S3_ACL`
@@ -614,11 +673,23 @@ as a fallback value if that key is not provided for a specific feed definition:
 
 -   ``indent``: falls back to :setting:`FEED_EXPORT_INDENT`.
 
+-   ``isolate_invalid_items``: falls back to
+    :setting:`FEED_EXPORT_ISOLATE_INVALID_ITEMS`.
+
 -   ``item_export_kwargs``: :class:`dict` with keyword arguments for the corresponding :ref:`item exporter class <topics-exporters>`.
+
+-   ``item_id_fields``: names of the item fields whose values are copied
+    into an isolated item record, as long as those values are
+    JSON-serializable. Defaults to ``("id",)``.
 
 -   ``mode``: falls back to :setting:`FEED_MODE`.
 
     .. versionadded:: 2.20.0
+
+-   ``rejection_log_uri``: local path or ``file://`` URI of the rejection
+    manifest that receives isolated item records. Falls back to a
+    ``.rejected.jsonl`` file next to the feed, which for batched feeds is
+    created next to every batch file.
 
 -   ``store_empty``: falls back to :setting:`FEED_STORE_EMPTY`.
 
@@ -668,6 +739,20 @@ will put each item on a new line. ``None`` selects the most compact representati
 Currently implemented only by :class:`~scrapy.exporters.JsonItemExporter`
 and :class:`~scrapy.exporters.XmlItemExporter`, i.e. when you are exporting
 to ``.json`` or ``.xml``.
+
+.. setting:: FEED_EXPORT_ISOLATE_INVALID_ITEMS
+
+FEED_EXPORT_ISOLATE_INVALID_ITEMS
+---------------------------------
+
+.. versionadded:: 2.21.0
+
+Default: ``False``
+
+Whether items that fail field conversion or encoding are isolated into a
+rejection manifest instead of aborting the feed export. See
+:ref:`item-isolation` for details. Can be overridden per feed with the
+``isolate_invalid_items`` :ref:`feed option <feed-options>`.
 
 .. _feed-mode:
 .. setting:: FEED_MODE

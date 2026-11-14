@@ -155,6 +155,12 @@ def feed_complete_default_values_from_settings(
     out.setdefault("batch_item_count", settings.getint("FEED_EXPORT_BATCH_ITEM_COUNT"))
     out.setdefault("encoding", settings["FEED_EXPORT_ENCODING"])
     out.setdefault("fields", settings.getdictorlist("FEED_EXPORT_FIELDS") or None)
+    out.setdefault(
+        "isolate_invalid_items",
+        settings.getbool("FEED_EXPORT_ISOLATE_INVALID_ITEMS"),
+    )
+    out.setdefault("item_id_fields", ("id",))
+    out.setdefault("rejection_log_uri", None)
     out.setdefault("store_empty", settings.getbool("FEED_STORE_EMPTY"))
     out.setdefault("uri_params", settings["FEED_URI_PARAMS"])
     out.setdefault("item_export_kwargs", {})
