@@ -739,6 +739,105 @@ recently used outcomes to keep, or to ``0`` to keep none:
 
     MEDIA_CACHE_SIZE = 10000
 
+.. _topics-media-pipeline-safe-diagnostics:
+
+Safe failure diagnostics
+------------------------
+
+.. setting:: MEDIA_SAFE_DIAGNOSTICS
+.. setting:: MEDIA_SAFE_DIAGNOSTICS_ITEM_FIELDS
+
+.. versionadded:: 2.21.0
+
+Media download errors are normally logged with the full request URL and the
+exception traceback. For media URLs that carry secrets — signed query
+parameters, userinfo credentials — or for exceptions that embed proxy
+credentials or ``Authorization`` header values, that means secrets end up in
+log files.
+
+Setting :setting:`MEDIA_SAFE_DIAGNOSTICS` to ``True`` (it is ``False`` by
+default) makes media pipelines emit an additional, sanitized diagnostics
+event for every failed media download, as a JSON object logged at the
+``ERROR`` level by the ``scrapy.pipelines.media`` logger:
+
+.. code-block:: python
+
+    MEDIA_SAFE_DIAGNOSTICS = True
+    MEDIA_SAFE_DIAGNOSTICS_ITEM_FIELDS = ["sku"]
+
+Each event has the following fields:
+
+``event``
+    Always ``"media_download_failed"``.
+
+``spider``
+    The spider name.
+
+``item``
+    A dict of business identifiers, built from the item fields listed in the
+    :setting:`MEDIA_SAFE_DIAGNOSTICS_ITEM_FIELDS` setting (empty by default).
+    Fields missing from the item are skipped. Values are sanitized to
+    JSON-native types: ``bytes`` become ``{"type": "bytes", "length": N}``,
+    and any other value that is not JSON-native becomes a
+    ``"<unencodable:TypeName>"`` placeholder. Custom serialization methods of
+    arbitrary objects (``__json__``, ``__repr__``, …) are never called, and
+    nesting beyond 8 levels is replaced by a placeholder.
+
+``field`` and ``field_index``
+    The name of the item field the failed URL comes from and its index in
+    that field. The :class:`~scrapy.pipelines.files.FilesPipeline` maps URLs
+    back to its ``files_urls_field``; if you override
+    ``get_media_requests()`` to read URLs from other fields, also override
+    :meth:`~scrapy.pipelines.media.MediaPipeline.safe_diagnostics_url_source`.
+    Both are ``None`` when the source field cannot be determined.
+
+``source``
+    The pipeline stage where the failure happened: ``"media_to_download"``,
+    ``"download"`` (the HTTP fetch and response processing), or ``"unknown"``.
+
+``url_origin`` and ``url_path``
+    The failed URL, reduced to a normalized origin (lowercase scheme and
+    host, default port dropped) and path. Userinfo, query string and fragment
+    are always removed. Both are ``None`` for URLs that cannot be parsed.
+
+``http_status``
+    The HTTP status code of the failed response, or ``None`` when no
+    response was received (e.g. a network timeout).
+
+``exception_class``
+    The fully qualified class name of the download exception. The exception
+    message, ``repr`` and traceback, and the response object, are never
+    included in the event.
+
+To send events somewhere other than the logs, override
+:meth:`~scrapy.pipelines.media.MediaPipeline.safe_diagnostics_emit`.
+
+Keep the following boundaries in mind:
+
+-   These events are **added** to the existing log output, they do not
+    replace it. The traditional log messages of the media pipelines may
+    still contain full URLs; adjust your logging configuration (and
+    ``LOG_FAILED_RESULTS``) if you need to suppress them.
+
+-   The URL *path* is kept as is. If your signed URLs put secrets in the
+    path itself rather than in the query string, they will still appear in
+    the events.
+
+-   Diagnostics never change download behavior: the same exceptions reach
+    request errbacks and ``item_completed()``, request fingerprints are
+    untouched, and successful downloads and cache hits emit no events. If
+    building or emitting an event fails (including exceptions raised by a
+    ``safe_diagnostics_emit()`` override), a warning without event contents
+    is logged and the original download exception propagates unchanged. The
+    input item and the request headers are never modified.
+
+-   When several items share one media download, each item gets its own
+    event with its own business identifiers.
+
+Like other media pipeline settings, these can be set per pipeline class
+using the uppercased class name as a prefix, e.g.
+``FILESPIPELINE_MEDIA_SAFE_DIAGNOSTICS``.
+
 .. _topics-media-pipeline-override:
 
 Extending the Media Pipelines

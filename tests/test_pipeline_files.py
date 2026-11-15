@@ -2,6 +2,7 @@ import asyncio
 import base64
 import dataclasses
 import hashlib
+import json
 import logging
 import mimetypes
 import random
@@ -40,10 +41,15 @@ from scrapy.pipelines.files import (
     GCSFilesStore,
     S3FilesStore,
 )
-from scrapy.pipelines.media import FileException, _MediaRequestFiltered
+from scrapy.pipelines.media import (
+    FileException,
+    _MediaRequestFiltered,
+    _safe_url_origin_and_path,
+    _sanitize_identifier_value,
+)
 from scrapy.settings import Settings
 from scrapy.utils.asyncio import call_later
-from scrapy.utils.defer import maybe_deferred_to_future
+from scrapy.utils.defer import _process_pending_io, maybe_deferred_to_future
 from scrapy.utils.misc import build_from_crawler
 from scrapy.utils.spider import DefaultSpider
 from scrapy.utils.test import get_crawler
@@ -1903,3 +1909,558 @@ def test_file_exception_deprecated_import():
 
     with pytest.raises(AttributeError):
         files.nonexistent
+
+
+SECRET_SIGNATURE = "SECRET-SIGNATURE-123"
+SECRET_PROXY_PASS = "SECRET-PROXY-PASS"
+SECRET_AUTH = "SECRET-AUTH-TOKEN"
+SECRET_EXC = "SECRET-EXC-DETAIL"
+SECRETS = (SECRET_SIGNATURE, SECRET_PROXY_PASS, SECRET_AUTH, SECRET_EXC)
+
+
+def _secret_url(path: str = "/pic/1.jpg", port: str = "") -> str:
+    return (
+        f"https://user:{SECRET_PROXY_PASS}@cdn.example.com{port}{path}"
+        f"?sig={SECRET_SIGNATURE}&token={SECRET_AUTH}#frag-{SECRET_SIGNATURE}"
+    )
+
+
+class _SecretObject:
+    """An identifier value whose custom serialization must never be called."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __json__(self):
+        self.calls.append("__json__")
+        return {}
+
+    def to_json(self):
+        self.calls.append("to_json")
+        return "{}"
+
+    def __repr__(self):
+        self.calls.append("__repr__")
+        return "<_SecretObject>"
+
+    def __str__(self):
+        self.calls.append("__str__")
+        return "<_SecretObject>"
+
+
+class SafeDiagFilesPipeline(FilesPipeline):
+    """FilesPipeline test double: records diagnostics events and results, and
+    lets items drive the fake downloader through the ``fake_responses``,
+    ``request_headers`` and ``request_errback`` item keys."""
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.diag_events: list[dict[str, Any]] = []
+        self.last_results: list[Any] = []
+        self.created_requests: list[Request] = []
+
+    def get_media_requests(self, item, info):
+        requests = super().get_media_requests(item, info)
+        adapter = ItemAdapter(item)
+        responses = adapter.get("fake_responses", {})
+        headers = adapter.get("request_headers") or {}
+        errback = adapter.get("request_errback")
+        for request in requests:
+            self.created_requests.append(request)
+            if request.url in responses:
+                request.meta["response"] = responses[request.url]
+            for header, value in headers.items():
+                request.headers[header] = value
+            if errback:
+                request.errback = errback
+        return requests
+
+    def media_failed(self, failure, request, info):
+        # Re-raise the original exception instead of a plain FileException so
+        # that tests can check exception identity and class propagation.
+        failure.raiseException()
+
+    def item_completed(self, results, item, info):
+        self.last_results = results
+        return super().item_completed(results, item, info)
+
+    def safe_diagnostics_emit(self, event, info):
+        self.diag_events.append(event)
+        super().safe_diagnostics_emit(event, info)
+
+
+class FailingSinkFilesPipeline(SafeDiagFilesPipeline):
+    def safe_diagnostics_emit(self, event, info):
+        raise RuntimeError("sink is broken")
+
+
+class TestFilesPipelineSafeDiagnostics:
+    def setup_method(self):
+        self.tempdir = mkdtemp()
+
+    def teardown_method(self):
+        rmtree(self.tempdir)
+
+    def _create_pipeline(
+        self,
+        pipeline_cls: type[FilesPipeline] = SafeDiagFilesPipeline,
+        settings: dict[str, Any] | None = None,
+    ) -> SafeDiagFilesPipeline:
+        crawler = get_crawler(
+            DefaultSpider, {"FILES_STORE": self.tempdir, **(settings or {})}
+        )
+        crawler.spider = crawler._create_spider()
+        crawler.engine = MagicMock(download_async=mocked_download_func)
+        self.crawler = crawler
+        pipeline = build_from_crawler(pipeline_cls, crawler)
+        pipeline.open_spider()
+        return pipeline
+
+    def _create_safe_pipeline(
+        self,
+        pipeline_cls: type[FilesPipeline] = SafeDiagFilesPipeline,
+        fields: tuple[str, ...] = ("sku", "blob", "token", "absent"),
+        **extra_settings: Any,
+    ) -> SafeDiagFilesPipeline:
+        settings = {
+            "MEDIA_SAFE_DIAGNOSTICS": True,
+            "MEDIA_SAFE_DIAGNOSTICS_ITEM_FIELDS": list(fields),
+            **extra_settings,
+        }
+        return self._create_pipeline(pipeline_cls, settings)
+
+    @staticmethod
+    def _safe_records(caplog) -> list[logging.LogRecord]:
+        return [
+            record
+            for record in caplog.records
+            if getattr(record, "safe_diagnostics_event", None) is not None
+        ]
+
+    @staticmethod
+    def _assert_no_secrets(text: str) -> None:
+        for secret in SECRETS:
+            assert secret not in text
+
+    def _assert_record_safe(self, record: logging.LogRecord, event: dict) -> None:
+        assert record.levelname == "ERROR"
+        assert record.safe_diagnostics_event == event
+        message = record.getMessage()
+        # the message is a single-line, parseable JSON event
+        payload = json.loads(message[message.index("{") :])
+        assert payload == event
+        self._assert_no_secrets(message)
+
+    @coroutine_test
+    async def test_disabled_by_default(self, caplog):
+        pipe = self._create_pipeline()
+        url = _secret_url()
+        exc = TimeoutError(f"timed out: {url} ({SECRET_EXC})")
+        item = {"sku": "SKU-1", "file_urls": [url], "fake_responses": {url: exc}}
+        await pipe.process_item(item)
+        assert pipe.diag_events == []
+        assert self._safe_records(caplog) == []
+
+    @coroutine_test
+    async def test_timeout_error_sanitized_event(self, caplog):
+        pipe = self._create_safe_pipeline()
+        pipe.LOG_FAILED_RESULTS = False
+        url = _secret_url()
+        token = _SecretObject()
+        exc = TimeoutError(f"timed out: {url} ({SECRET_EXC})")
+        item = {
+            "sku": "SKU-1",
+            "blob": b"\x00\x01\x02",
+            "token": token,
+            "file_urls": [url],
+            "fake_responses": {url: exc},
+        }
+        new_item = await pipe.process_item(item)
+
+        # the real download exception propagates unchanged
+        assert len(pipe.last_results) == 1
+        ok, value = pipe.last_results[0]
+        assert ok is False
+        assert isinstance(value, Failure)
+        assert value.value is exc
+
+        # exactly one structured event, fully sanitized
+        assert len(pipe.diag_events) == 1
+        event = pipe.diag_events[0]
+        assert event == {
+            "event": "media_download_failed",
+            "spider": "default",
+            "item": {
+                "sku": "SKU-1",
+                "blob": {"type": "bytes", "length": 3},
+                "token": "<unencodable:_SecretObject>",
+            },
+            "field": "file_urls",
+            "field_index": 0,
+            "source": "download",
+            "url_origin": "https://cdn.example.com",
+            "url_path": "/pic/1.jpg",
+            "http_status": None,
+            "exception_class": "builtins.TimeoutError",
+        }
+        self._assert_no_secrets(json.dumps(event))
+        # custom serialization of identifier values was never called
+        assert token.calls == []
+
+        # the log output carries the same sanitized event, and nothing else
+        records = self._safe_records(caplog)
+        assert len(records) == 1
+        self._assert_record_safe(records[0], event)
+
+        # the input item was not modified by the diagnostics
+        assert new_item["sku"] == "SKU-1"
+        assert new_item["blob"] == b"\x00\x01\x02"
+        assert new_item["token"] is token
+        assert new_item["file_urls"] == [url]
+        assert set(new_item) == set(item) | {"files"}
+        assert new_item["files"] == []
+
+    @coroutine_test
+    async def test_http_403_event(self, caplog):
+        pipe = self._create_safe_pipeline()
+        pipe.LOG_FAILED_RESULTS = False
+        url = _secret_url("/img/403.jpg")
+        response = Response(url, status=403, body=b"")
+        item = {"sku": "SKU-2", "file_urls": [url], "fake_responses": {url: response}}
+        await pipe.process_item(item)
+
+        assert len(pipe.diag_events) == 1
+        event = pipe.diag_events[0]
+        assert event["http_status"] == 403
+        assert event["exception_class"] == "scrapy.pipelines.media.FileException"
+        assert event["source"] == "download"
+        assert event["url_origin"] == "https://cdn.example.com"
+        assert event["url_path"] == "/img/403.jpg"
+        assert event["item"] == {"sku": "SKU-2"}
+        self._assert_no_secrets(json.dumps(event))
+        records = self._safe_records(caplog)
+        assert len(records) == 1
+        self._assert_record_safe(records[0], event)
+
+    @coroutine_test
+    async def test_redirect_response_event(self, caplog):
+        # redirects are not followed by default, so a 302 is a download error
+        pipe = self._create_safe_pipeline()
+        pipe.LOG_FAILED_RESULTS = False
+        url = _secret_url("/img/redirect.jpg")
+        response = Response(
+            url, status=302, headers={b"Location": b"https://cdn.example.com/x.jpg"}
+        )
+        item = {"sku": "SKU-3", "file_urls": [url], "fake_responses": {url: response}}
+        await pipe.process_item(item)
+
+        assert len(pipe.diag_events) == 1
+        event = pipe.diag_events[0]
+        assert event["http_status"] == 302
+        assert event["url_origin"] == "https://cdn.example.com"
+        assert event["url_path"] == "/img/redirect.jpg"
+        self._assert_no_secrets(json.dumps(event))
+        records = self._safe_records(caplog)
+        assert len(records) == 1
+        self._assert_record_safe(records[0], event)
+
+    @coroutine_test
+    async def test_shared_download_diagnostics_not_mixed(self, caplog):
+        pipe = self._create_safe_pipeline()
+        pipe.LOG_FAILED_RESULTS = False
+        url = _secret_url("/shared.jpg")
+        calls = 0
+
+        async def slow_failure():
+            nonlocal calls
+            calls += 1
+            await _process_pending_io()
+            raise TimeoutError(f"boom {SECRET_EXC}")
+
+        item1 = {
+            "sku": "SKU-1",
+            "file_urls": [url],
+            "fake_responses": {url: slow_failure},
+        }
+        item2 = {
+            "sku": "SKU-2",
+            "file_urls": [url],
+            "fake_responses": {url: slow_failure},
+        }
+        await asyncio.gather(pipe.process_item(item1), pipe.process_item(item2))
+
+        # the file was downloaded only once
+        assert calls == 1
+        # but each item got its own event, with its own identifiers
+        assert len(pipe.diag_events) == 2
+        events_by_sku = {event["item"]["sku"]: event for event in pipe.diag_events}
+        assert set(events_by_sku) == {"SKU-1", "SKU-2"}
+        for sku, event in events_by_sku.items():
+            assert event["item"] == {"sku": sku}
+            assert event["url_origin"] == "https://cdn.example.com"
+            assert event["url_path"] == "/shared.jpg"
+            assert event["http_status"] is None
+            assert event["exception_class"] == "builtins.TimeoutError"
+            self._assert_no_secrets(json.dumps(event))
+        records = self._safe_records(caplog)
+        assert len(records) == 2
+        for record in records:
+            self._assert_record_safe(record, record.safe_diagnostics_event)
+
+    @coroutine_test
+    async def test_cached_failure_emits_per_item_event(self, caplog):
+        pipe = self._create_safe_pipeline()
+        pipe.LOG_FAILED_RESULTS = False
+        url = _secret_url("/cached.jpg")
+        exc = TimeoutError(SECRET_EXC)
+        item1 = {"sku": "SKU-1", "file_urls": [url], "fake_responses": {url: exc}}
+        await pipe.process_item(item1)
+        # the second item would succeed if downloaded again, but the cached
+        # failure must be reused instead
+        ok_response = Response(url, status=200, body=b"data")
+        item2 = {
+            "sku": "SKU-2",
+            "file_urls": [url],
+            "fake_responses": {url: ok_response},
+        }
+        await pipe.process_item(item2)
+
+        ok, value = pipe.last_results[0]
+        assert ok is False
+        assert value.value is exc
+        assert [event["item"]["sku"] for event in pipe.diag_events] == [
+            "SKU-1",
+            "SKU-2",
+        ]
+        for event in pipe.diag_events:
+            assert event["url_origin"] == "https://cdn.example.com"
+            assert event["url_path"] == "/cached.jpg"
+            self._assert_no_secrets(json.dumps(event))
+        assert len(self._safe_records(caplog)) == 2
+
+    @coroutine_test
+    async def test_partial_failure(self, caplog):
+        pipe = self._create_safe_pipeline()
+        pipe.LOG_FAILED_RESULTS = False
+        ok_url = _secret_url("/ok.jpg")
+        bad_url = _secret_url("/bad.jpg")
+        ok_response = Response(ok_url, status=200, body=b"imagedata")
+        bad_response = Response(bad_url, status=403, body=b"")
+        item = {
+            "sku": "SKU-9",
+            "file_urls": [ok_url, bad_url],
+            "fake_responses": {ok_url: ok_response, bad_url: bad_response},
+        }
+        new_item = await pipe.process_item(item)
+
+        # the successful download behaves as usual
+        assert len(pipe.last_results) == 2
+        ok0, value0 = pipe.last_results[0]
+        assert ok0 is True
+        assert value0["url"] == ok_url
+        assert value0["status"] == "downloaded"
+        ok1, value1 = pipe.last_results[1]
+        assert ok1 is False
+        assert isinstance(value1, Failure)
+        assert len(new_item["files"]) == 1
+        assert new_item["files"][0]["url"] == ok_url
+        assert (Path(self.tempdir) / new_item["files"][0]["path"]).exists()
+
+        # exactly one event, for the failed URL only
+        assert len(pipe.diag_events) == 1
+        event = pipe.diag_events[0]
+        assert event["field"] == "file_urls"
+        assert event["field_index"] == 1
+        assert event["url_path"] == "/bad.jpg"
+        assert event["http_status"] == 403
+        assert event["item"] == {"sku": "SKU-9"}
+        self._assert_no_secrets(json.dumps(event))
+        assert len(self._safe_records(caplog)) == 1
+
+    @coroutine_test
+    async def test_sink_exception_does_not_swallow_download_error(self, caplog):
+        pipe = self._create_safe_pipeline(FailingSinkFilesPipeline)
+        pipe.LOG_FAILED_RESULTS = False
+        url = _secret_url()
+        exc = TimeoutError(f"boom {SECRET_EXC}")
+        item = {"sku": "SKU-1", "file_urls": [url], "fake_responses": {url: exc}}
+        with caplog.at_level(logging.WARNING):
+            await pipe.process_item(item)
+
+        # the download exception is unaffected by the broken sink
+        ok, value = pipe.last_results[0]
+        assert ok is False
+        assert value.value is exc
+        # a warning without event contents or secrets was logged
+        sink_warnings = [
+            record
+            for record in caplog.records
+            if "Safe diagnostics sink failed" in record.getMessage()
+        ]
+        assert len(sink_warnings) == 1
+        message = sink_warnings[0].getMessage()
+        assert "RuntimeError" in message
+        self._assert_no_secrets(message)
+        assert self._safe_records(caplog) == []
+
+    @coroutine_test
+    async def test_errback_receives_original_failure(self, caplog):
+        pipe = self._create_safe_pipeline()
+        pipe.LOG_FAILED_RESULTS = False
+        url = _secret_url()
+        exc = TimeoutError(f"boom {SECRET_EXC}")
+        received: list[Failure] = []
+
+        def errback(failure):
+            received.append(failure)
+            return {"url": url, "path": "", "checksum": None, "status": "recovered"}
+
+        item = {
+            "sku": "SKU-1",
+            "file_urls": [url],
+            "fake_responses": {url: exc},
+            "request_errback": errback,
+        }
+        await pipe.process_item(item)
+
+        # the request errback got the real exception and could recover
+        assert len(received) == 1
+        assert received[0].value is exc
+        ok, value = pipe.last_results[0]
+        assert ok is True
+        assert value["status"] == "recovered"
+        # the failure was still diagnosed
+        assert len(pipe.diag_events) == 1
+        assert pipe.diag_events[0]["exception_class"] == "builtins.TimeoutError"
+
+    @coroutine_test
+    async def test_headers_and_request_fingerprint_untouched(self, caplog):
+        pipe = self._create_safe_pipeline()
+        pipe.LOG_FAILED_RESULTS = False
+        url = _secret_url()
+        exc = TimeoutError(SECRET_EXC)
+        item = {
+            "sku": "SKU-1",
+            "file_urls": [url],
+            "fake_responses": {url: exc},
+            "request_headers": {"Authorization": f"Bearer {SECRET_AUTH}"},
+        }
+        await pipe.process_item(item)
+
+        assert len(pipe.created_requests) == 1
+        request = pipe.created_requests[0]
+        # headers were not modified by the diagnostics
+        assert dict(request.headers) == {
+            b"Authorization": [f"Bearer {SECRET_AUTH}".encode()]
+        }
+        # the request fingerprint is the same as that of a fresh request
+        fingerprint = self.crawler.request_fingerprinter.fingerprint
+        assert fingerprint(request) == fingerprint(Request(url))
+        assert fingerprint(request) in pipe.spiderinfo.downloaded
+        # and the Authorization secret did not leak into the event
+        assert len(pipe.diag_events) == 1
+        self._assert_no_secrets(json.dumps(pipe.diag_events[0]))
+
+    @coroutine_test
+    async def test_media_to_download_failure_source(self, caplog):
+        class FailingStatPipeline(SafeDiagFilesPipeline):
+            def media_to_download(self, request, info, *, item=None):
+                raise OSError(f"store is down ({SECRET_EXC})")
+
+        pipe = self._create_safe_pipeline(FailingStatPipeline)
+        pipe.LOG_FAILED_RESULTS = False
+        url = _secret_url()
+        item = {"sku": "SKU-1", "file_urls": [url]}
+        await pipe.process_item(item)
+
+        assert len(pipe.diag_events) == 1
+        event = pipe.diag_events[0]
+        assert event["source"] == "media_to_download"
+        assert event["http_status"] is None
+        assert event["exception_class"] == "builtins.OSError"
+        self._assert_no_secrets(json.dumps(event))
+
+
+class TestSafeDiagnosticsHelpers:
+    @pytest.mark.parametrize(
+        ("url", "origin", "path"),
+        [
+            (
+                "https://user:pass@EXAMPLE.com:443/a/b.jpg?q=secret#frag",
+                "https://example.com",
+                "/a/b.jpg",
+            ),
+            ("http://example.com:80/a", "http://example.com", "/a"),
+            ("http://example.com:8080/a", "http://example.com:8080", "/a"),
+            ("https://example.com", "https://example.com", "/"),
+            ("ftp://user:pass@example.com:21/f.jpg", "ftp://example.com", "/f.jpg"),
+            ("s3://bucket/key.jpg?sig=x", "s3://bucket", "/key.jpg"),
+            ("relative/path.jpg?sig=x", None, "relative/path.jpg"),
+            ("", None, None),
+        ],
+    )
+    def test_safe_url_origin_and_path(self, url, origin, path):
+        assert _safe_url_origin_and_path(url) == (origin, path)
+
+    def test_sanitize_identifier_value_json_native(self):
+        value = {
+            "str": "a",
+            "int": 1,
+            "float": 1.5,
+            "bool": True,
+            "none": None,
+            "list": [1, "a", None],
+            "tuple": (1, 2),
+            "nested": {"a": [1]},
+        }
+        assert _sanitize_identifier_value(value) == {
+            "str": "a",
+            "int": 1,
+            "float": 1.5,
+            "bool": True,
+            "none": None,
+            "list": [1, "a", None],
+            "tuple": [1, 2],
+            "nested": {"a": [1]},
+        }
+        # the result is JSON-encodable
+        json.dumps(_sanitize_identifier_value(value))
+
+    def test_sanitize_identifier_value_bytes(self):
+        assert _sanitize_identifier_value(b"\x00\x01") == {
+            "type": "bytes",
+            "length": 2,
+        }
+
+    def test_sanitize_identifier_value_unencodable(self):
+        obj = _SecretObject()
+        assert _sanitize_identifier_value(obj) == "<unencodable:_SecretObject>"
+        assert obj.calls == []
+        assert _sanitize_identifier_value({1: "a"}) == "<unencodable:dict>"
+        assert _sanitize_identifier_value(float("nan")) == "<unencodable:float>"
+        assert _sanitize_identifier_value(float("inf")) == "<unencodable:float>"
+
+    def test_sanitize_identifier_value_depth_limit_and_cycles(self):
+        value: list[Any] = []
+        value.append(value)  # a cycle must not cause infinite recursion
+        result = _sanitize_identifier_value(value)
+        assert json.dumps(result)  # fully JSON-encodable
+        depth_limited: Any = "leaf"
+        for _ in range(20):
+            depth_limited = [depth_limited]
+        assert "<unencodable:list>" in json.dumps(
+            _sanitize_identifier_value(depth_limited)
+        )
+
+    def test_item_identifiers_non_mapping_item(self, tmp_path):
+        crawler = get_crawler(
+            DefaultSpider,
+            {
+                "FILES_STORE": str(tmp_path),
+                "MEDIA_SAFE_DIAGNOSTICS": True,
+                "MEDIA_SAFE_DIAGNOSTICS_ITEM_FIELDS": ["sku"],
+            },
+        )
+        pipeline = SafeDiagFilesPipeline(str(tmp_path), crawler=crawler)
+        assert pipeline._safe_diagnostics_item_identifiers(object()) == {}
+        assert pipeline._safe_diagnostics_item_identifiers(None) == {}

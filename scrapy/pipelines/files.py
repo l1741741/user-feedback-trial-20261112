@@ -37,13 +37,14 @@ from itemadapter import ItemAdapter
 from scrapy.exceptions import IgnoreRequest, NotConfigured, ScrapyDeprecationWarning
 from scrapy.http import Request, Response
 from scrapy.http.request import NO_CALLBACK
-from scrapy.pipelines.media import FileException as _FileException
 from scrapy.pipelines.media import (
+    _SAFE_DIAGNOSTICS_STATUS_META_KEY,
     FileInfo,
     FileInfoOrError,
     MediaPipeline,
     _MediaRequestFiltered,
 )
+from scrapy.pipelines.media import FileException as _FileException
 from scrapy.utils._datatypes import CaseInsensitiveDict
 from scrapy.utils._ftp import ftp_store_file
 from scrapy.utils.asyncio import is_asyncio_available, run_in_thread
@@ -835,6 +836,11 @@ class FilesPipeline(MediaPipeline):
     ) -> FileInfo:
         referer = referer_str(request)
 
+        if self._safe_diagnostics_enabled:
+            # Pass the status to the safe diagnostics machinery through the
+            # request meta, so that the response object itself is never kept.
+            request.meta[_SAFE_DIAGNOSTICS_STATUS_META_KEY] = response.status
+
         if response.status not in {200, 201}:
             logger.warning(
                 "File (code: %(status)s): Error downloading file from "
@@ -922,6 +928,23 @@ class FilesPipeline(MediaPipeline):
                 f"{self.files_urls_field} must be a list of URLs, got {type(urls).__name__}. "
             )
         return [Request(u, callback=NO_CALLBACK) for u in urls]
+
+    def safe_diagnostics_url_source(
+        self, request: Request, item: Any
+    ) -> tuple[str | None, int | None]:
+        """Map *request*'s URL back to its ``(files_urls_field, index)`` in
+        *item*, for safe diagnostics events. Returns ``(None, None)`` if the
+        URL is not found, e.g. when ``get_media_requests()`` is overridden."""
+        try:
+            urls = ItemAdapter(item).get(self.files_urls_field, [])
+        except Exception:
+            return None, None
+        if not isinstance(urls, list):
+            return None, None
+        for index, url in enumerate(urls):
+            if url == request.url:
+                return self.files_urls_field, index
+        return None, None
 
     def file_downloaded(
         self,
