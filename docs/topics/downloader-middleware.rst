@@ -522,6 +522,43 @@ Filesystem storage backend (default)
 
         /path/to/cache/dir/my_spider/72/72811f648e718090f041317756c03adb0ada46c7
 
+    Generation publishing
+    ^^^^^^^^^^^^^^^^^^^^^
+
+    .. versionadded:: 2.21.0
+
+    The files of an entry are written one after another. If the process dies
+    or the disk fails halfway through, a reader can find the metadata of the
+    new response next to the body of the previous one, which is an unusable
+    cache entry. Set :setting:`HTTPCACHE_GENERATION` to ``True`` to publish
+    every entry as an immutable *generation* instead.
+
+    In that mode, all the files listed above are written in a temporary
+    directory inside the cache entry. Each file is recorded in a
+    ``manifest.json`` file together with its size and SHA-256 digest, and the
+    whole generation is verified before publishing. Publishing is a single
+    atomic rename of the ``current.json`` pointer that names the current
+    generation, so a reader always sees either the complete previous
+    generation or the complete new one, never a mix of both. Generations are
+    numbered starting from zero and the previous generation is removed only
+    after the pointer has been switched.
+
+    The manifest records whether the payload files are gzip-compressed, so
+    entries stay readable if :setting:`HTTPCACHE_GZIP` changes between runs.
+    Its ``files`` object always lists the same seven payload files, including
+    an empty ``response_body`` for responses without a body. A failed write,
+    a failed verification or a failed publish removes the temporary files and
+    keeps the previous generation readable. If the pointer was switched but
+    the cache directory could not be synced, :class:`GenerationUncertainError`
+    is raised: the new generation may or may not survive a crash, so the
+    storage reports the uncertainty instead of claiming the previous
+    generation is unchanged.
+
+    Generation entries do not store the ``Authorization`` and
+    ``Proxy-Authorization`` request headers, so no plaintext credentials are
+    written to disk. Cache entries written without generation publishing are
+    ignored unless :setting:`HTTPCACHE_GENERATION_READ_LEGACY` is enabled.
+
 .. _httpcache-storage-dbm:
 
 DBM storage backend
@@ -743,6 +780,51 @@ Default: ``False``
 
 If enabled, will compress all cached data with gzip.
 This setting is specific to the Filesystem backend.
+
+.. setting:: HTTPCACHE_GENERATION
+
+HTTPCACHE_GENERATION
+^^^^^^^^^^^^^^^^^^^^
+
+Default: ``False``
+
+.. versionadded:: 2.21.0
+
+Whether :class:`~scrapy.extensions.httpcache.FilesystemCacheStorage`
+publishes each cache entry as an immutable, checksum-verified generation that
+is switched atomically. See :ref:`httpcache-storage-fs` for the storage
+layout and the failure guarantees. This setting is specific to the Filesystem
+backend.
+
+.. setting:: HTTPCACHE_GENERATION_READ_LEGACY
+
+HTTPCACHE_GENERATION_READ_LEGACY
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Default: ``False``
+
+.. versionadded:: 2.21.0
+
+Whether cache entries written without generation publishing are read when
+:setting:`HTTPCACHE_GENERATION` is enabled. They are ignored by default, since
+they can contain the partially written entries generation publishing
+prevents. Once a generation is published for a request, its legacy entry is
+no longer read even with this setting enabled.
+
+.. setting:: HTTPCACHE_FSYNC
+
+HTTPCACHE_FSYNC
+^^^^^^^^^^^^^^^
+
+Default: ``True``
+
+.. versionadded:: 2.21.0
+
+Whether generation files and the directories containing them are synced with
+:func:`os.fsync` before a generation is published. Disable it on file systems
+without ``fsync`` support or when durability across a crash is handled
+elsewhere; atomic switching still applies. This setting only has an effect
+when :setting:`HTTPCACHE_GENERATION` is enabled.
 
 .. setting:: HTTPCACHE_ALWAYS_STORE
 

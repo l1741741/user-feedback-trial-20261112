@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import email.utils
 import gc
+import hashlib
+import json
 import logging
+import os
 import pickle
 import shutil
+import stat
 import tempfile
 import time
 from contextlib import contextmanager
@@ -19,7 +23,13 @@ from scrapy import signals
 from scrapy.core.downloader.middleware import DownloaderMiddlewareManager
 from scrapy.downloadermiddlewares.httpcache import HttpCacheMiddleware
 from scrapy.exceptions import IgnoreRequest
-from scrapy.extensions.httpcache import DummyPolicy, rfc1123_to_epoch
+from scrapy.extensions.httpcache import (
+    DummyPolicy,
+    GenerationCorruptError,
+    GenerationPublishError,
+    GenerationUncertainError,
+    rfc1123_to_epoch,
+)
 from scrapy.http import BodyFileResponse, HtmlResponse, Request, Response
 from scrapy.spiders import Spider
 from scrapy.utils.asyncio import sleep
@@ -946,6 +956,802 @@ class TestFilesystemStorageGzipWithDummyPolicy(TestFilesystemStorageWithDummyPol
         # A spider killed while writing a gzip file leaves it truncated.
         body_path = Path(storage._get_request_path(spider, request), "response_body")
         body_path.write_bytes(body_path.read_bytes()[:-5])
+
+
+class GenerationStorageTestMixin(FilesystemStorageTestMixin):
+    """Generation-publishing mode runs the whole filesystem storage suite."""
+
+    def _get_settings(self, **new_settings: Any) -> dict[str, Any]:
+        new_settings.setdefault("HTTPCACHE_GENERATION", True)
+        return super()._get_settings(**new_settings)
+
+    def _generation_path(self, storage: Any, spider: Spider, request: Request) -> Path:
+        entry_dir = Path(storage._get_request_path(spider, request))
+        pointer = storage._read_pointer(entry_dir)
+        assert pointer is not None
+        return entry_dir / f"gen-{pointer['generation']}"
+
+    def _corrupt_cache_entry(self, storage, spider, request) -> None:
+        (self._generation_path(storage, spider, request) / "response_body").unlink()
+
+    def test_storage_old_cache_entry(self):
+        # The generation layout always writes response_data, so there is no
+        # Scrapy 2.14-style entry to downgrade to; the missing-artifact
+        # behavior is covered in the generation contract tests.
+        pass
+
+    @pytest.mark.parametrize("filename", ["request_headers", "response_headers"])
+    def test_storage_header_file(self, filename: str) -> None:
+        headers = [
+            ("X-Repeated", "1"),
+            ("content-type", "text/html"),
+            ("x-repeated", "2"),
+            ("X-Removed", None),
+            ("X-Custom-Header", b"caf\xe9"),
+        ]
+        expected = (
+            b"X-Repeated: 1\r\nX-Repeated: 2\r\ncontent-type: text/html\r\n"
+            b"X-Custom-Header: caf\xe9"
+        )
+        request = Request("http://www.example.com", headers=headers)
+        response = Response("http://www.example.com", headers=headers)
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, request, response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, request))
+            pointer = storage._read_pointer(entry_dir)
+            assert pointer is not None
+            generation_path = entry_dir / f"gen-{pointer['generation']}"
+            manifest = storage._load_manifest(
+                generation_path, pointer["manifest_digest"]
+            )
+            with storage._payload_opener(bool(manifest["gzip"]))(
+                generation_path / filename, "rb"
+            ) as f:
+                assert f.read() == expected
+
+
+class TestFilesystemGenerationStorageWithDummyPolicy(
+    GenerationStorageTestMixin, DummyPolicyTestMixin
+):
+    policy_class = "scrapy.extensions.httpcache.DummyPolicy"
+
+
+class TestFilesystemGenerationStorageWithRFC2616Policy(
+    GenerationStorageTestMixin, RFC2616PolicyTestMixin
+):
+    policy_class = "scrapy.extensions.httpcache.RFC2616Policy"
+
+
+class TestFilesystemGenerationStorageGzipWithDummyPolicy(
+    TestFilesystemGenerationStorageWithDummyPolicy
+):
+    def _get_settings(self, **new_settings: Any) -> dict[str, Any]:
+        new_settings.setdefault("HTTPCACHE_GZIP", True)
+        return super()._get_settings(**new_settings)
+
+
+class TestFilesystemGenerationPublish(TestBase):
+    """Contracts of the generation-publishing mode: atomicity, recovery and
+    cleanup under injected disk failures."""
+
+    policy_class = "scrapy.extensions.httpcache.DummyPolicy"
+    storage_class = "scrapy.extensions.httpcache.FilesystemCacheStorage"
+
+    def _get_settings(self, **new_settings: Any) -> dict[str, Any]:
+        new_settings.setdefault("HTTPCACHE_GENERATION", True)
+        return super()._get_settings(**new_settings)
+
+    @staticmethod
+    def _generation_entries(entry_dir: Path) -> list[str]:
+        return sorted(
+            child.name for child in entry_dir.iterdir() if child.name.startswith("gen-")
+        )
+
+    @staticmethod
+    def _temporary_entries(entry_dir: Path) -> list[str]:
+        return sorted(
+            child.name
+            for child in entry_dir.iterdir()
+            if child.name.startswith((".staging-", ".current-"))
+        )
+
+    def test_repeated_store_publishes_a_single_generation(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            second = self.response.replace(body=b"second body")
+            storage.store_response(crawler.spider, self.request, second)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            assert self._generation_entries(entry_dir) == ["gen-1"]
+            assert self._temporary_entries(entry_dir) == []
+            cached = storage.retrieve_response(crawler.spider, self.request.copy())
+            self.assertEqualResponse(second, cached)
+
+    def test_two_urls_are_isolated(self) -> None:
+        other_request = Request("http://other.example.com/path")
+        other_response = Response("http://other.example.com/path", body=b"other body")
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            storage.store_response(crawler.spider, other_request, other_response)
+            first_path = Path(storage._get_request_path(crawler.spider, self.request))
+            other_path = Path(storage._get_request_path(crawler.spider, other_request))
+            assert first_path != other_path
+            self.assertEqualResponse(
+                self.response,
+                storage.retrieve_response(crawler.spider, self.request.copy()),
+            )
+            self.assertEqualResponse(
+                other_response,
+                storage.retrieve_response(crawler.spider, other_request.copy()),
+            )
+
+    def test_reopen_storage_keeps_the_published_generation(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+        with self._storage() as (storage, crawler):
+            cached = storage.retrieve_response(crawler.spider, self.request.copy())
+            self.assertEqualResponse(self.response, cached)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            assert self._temporary_entries(entry_dir) == []
+
+    def test_empty_body_round_trip(self) -> None:
+        response = Response("http://www.example.com", body=b"")
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, response)
+            cached = storage.retrieve_response(crawler.spider, self.request.copy())
+            assert cached is not None
+            assert cached.body == b""
+
+    @pytest.mark.parametrize("use_gzip", [False, True])
+    def test_compression_format_is_self_describing(self, use_gzip: bool) -> None:
+        with self._storage(HTTPCACHE_GZIP=use_gzip) as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            pointer = storage._read_pointer(entry_dir)
+            assert pointer is not None
+            generation_path = entry_dir / f"gen-{pointer['generation']}"
+            manifest = storage._load_manifest(
+                generation_path, pointer["manifest_digest"]
+            )
+            assert manifest["gzip"] is use_gzip
+            payload = (generation_path / "response_body").read_bytes()
+            assert payload.startswith(b"\x1f\x8b") is use_gzip
+            cached = storage.retrieve_response(crawler.spider, self.request.copy())
+            self.assertEqualResponse(self.response, cached)
+
+    def test_fsync_disabled_never_calls_fsync(self) -> None:
+        with self._storage(HTTPCACHE_FSYNC=False) as (storage, crawler):
+            with mock.patch(
+                "scrapy.extensions.httpcache.os.fsync",
+                side_effect=AssertionError("fsync must not be called"),
+            ):
+                storage.store_response(crawler.spider, self.request, self.response)
+                cached = storage.retrieve_response(crawler.spider, self.request.copy())
+            self.assertEqualResponse(self.response, cached)
+
+    def test_credentials_are_not_written_to_disk(self) -> None:
+        request = Request(
+            "http://www.example.com",
+            headers={
+                "Authorization": "Bearer secret-token",
+                "Proxy-Authorization": "Basic dXNlcjpwYXNz",
+                "Content-Type": "text/html",
+            },
+        )
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, request, self.response)
+            assert request.headers[b"Authorization"] == b"Bearer secret-token"
+            entry_dir = Path(storage._get_request_path(crawler.spider, request))
+            for path in entry_dir.rglob("*"):
+                if path.is_file():
+                    assert b"secret-token" not in path.read_bytes()
+                    assert b"Basic dXNlcjpwYXNz" not in path.read_bytes()
+
+    @pytest.mark.parametrize(
+        ("failure", "expected_error"),
+        [
+            ("payload_write", GenerationPublishError),
+            ("payload_fsync", GenerationPublishError),
+            ("staging_fsync", GenerationPublishError),
+            ("verification", GenerationPublishError),
+            ("generation_replace", GenerationPublishError),
+            ("pointer_replace", GenerationPublishError),
+            ("entry_fsync", GenerationUncertainError),
+        ],
+    )
+    def test_failure_at_each_stage_keeps_a_readable_generation(
+        self, failure: str, expected_error: type[Exception]
+    ) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            updated = self.response.replace(
+                body=b"updated body", headers={"X-Stage": failure}
+            )
+            real_fsync = os.fsync
+            real_open = storage._open
+
+            def payload_write(path: str | os.PathLike[str], mode: str, *args, **kwargs):
+                if (
+                    mode == "wb"
+                    and ".staging-" in str(path)
+                    and str(path).endswith("response_body")
+                ):
+                    raise OSError("injected payload write failure")
+                return real_open(path, mode, *args, **kwargs)
+
+            def payload_fsync(fd: int) -> None:
+                if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                    raise OSError("injected payload fsync failure")
+                real_fsync(fd)
+
+            def staging_fsync(fd: int) -> None:
+                if stat.S_ISDIR(os.fstat(fd).st_mode):
+                    raise OSError("injected staging fsync failure")
+                real_fsync(fd)
+
+            real_replace = Path.replace
+
+            def generation_replace(self: Path, target: Path) -> Path:
+                if target.name.endswith("gen-1"):
+                    raise OSError("injected generation rename failure")
+                return real_replace(self, target)
+
+            def pointer_replace(self: Path, target: Path) -> Path:
+                if target.name == "current.json":
+                    raise OSError("injected pointer rename failure")
+                return real_replace(self, target)
+
+            def entry_fsync(fd: int) -> None:
+                stat_result = os.fstat(fd)
+                if (
+                    stat.S_ISDIR(stat_result.st_mode)
+                    and stat_result.st_ino == entry_dir.stat().st_ino
+                ):
+                    raise OSError("injected entry fsync failure")
+                real_fsync(fd)
+
+            patches = {
+                "payload_write": mock.patch.object(
+                    storage, "_open", side_effect=payload_write
+                ),
+                "payload_fsync": mock.patch(
+                    "scrapy.extensions.httpcache.os.fsync",
+                    side_effect=payload_fsync,
+                ),
+                "staging_fsync": mock.patch(
+                    "scrapy.extensions.httpcache.os.fsync",
+                    side_effect=staging_fsync,
+                ),
+                "verification": mock.patch.object(
+                    storage,
+                    "_verify_generation",
+                    side_effect=GenerationPublishError("injected"),
+                ),
+                "generation_replace": mock.patch.object(
+                    Path, "replace", autospec=True, side_effect=generation_replace
+                ),
+                "pointer_replace": mock.patch.object(
+                    Path, "replace", autospec=True, side_effect=pointer_replace
+                ),
+                "entry_fsync": mock.patch(
+                    "scrapy.extensions.httpcache.os.fsync",
+                    side_effect=entry_fsync,
+                ),
+            }
+            with patches[failure], pytest.raises(expected_error):
+                storage.store_response(crawler.spider, self.request, updated)
+
+            assert self._temporary_entries(entry_dir) == []
+            cached = storage.retrieve_response(crawler.spider, self.request.copy())
+            if failure == "entry_fsync":
+                # The pointer was switched before the failure, so the new
+                # generation may be visible; what matters is that it is
+                # complete, not that the old one was kept.
+                assert cached is not None
+                assert cached.body in {self.response.body, updated.body}
+            else:
+                self.assertEqualResponse(self.response, cached)
+                assert self._generation_entries(entry_dir) == ["gen-0"]
+
+            # A later attempt without the failure publishes successfully.
+            storage.store_response(crawler.spider, self.request, updated)
+            recovered = storage.retrieve_response(crawler.spider, self.request.copy())
+            self.assertEqualResponse(updated, recovered)
+            assert self._temporary_entries(entry_dir) == []
+
+    def test_staging_directory_left_by_a_crash_is_cleaned_up(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            orphan = entry_dir / ".staging-99-1-0"
+            orphan.mkdir()
+            (orphan / "response_body").write_bytes(b"partial")
+            storage.store_response(
+                crawler.spider,
+                self.request,
+                self.response.replace(body=b"after crash"),
+            )
+            assert not orphan.exists()
+            assert self._temporary_entries(entry_dir) == []
+
+    @pytest.mark.parametrize("use_gzip", [False, True])
+    def test_reopened_storage_after_each_failure_keeps_body_and_headers(
+        self, use_gzip: bool
+    ) -> None:
+        # Every injected failure must leave an entry that a freshly opened
+        # storage reads back with the original body and headers.
+        original = Response(
+            self.request.url,
+            headers={"Content-Type": "text/html", "X-Keep": "yes"},
+            body=b"original body",
+        )
+        updated = original.replace(
+            body=b"updated body", headers={"Content-Type": "text/html", "X-Keep": "no"}
+        )
+        with self._storage(HTTPCACHE_GZIP=use_gzip) as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, original)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            real_fsync = os.fsync
+            real_open = storage._open
+
+            def payload_write(path, mode, *args, **kwargs):
+                if (
+                    mode == "wb"
+                    and ".staging-" in str(path)
+                    and str(path).endswith("response_body")
+                ):
+                    raise OSError("injected payload write failure")
+                return real_open(path, mode, *args, **kwargs)
+
+            def file_fsync(fd: int) -> None:
+                if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                    raise OSError("injected file fsync failure")
+                real_fsync(fd)
+
+            real_replace = Path.replace
+
+            def pointer_replace(self: Path, target: Path) -> Path:
+                if target.name == "current.json":
+                    raise OSError("injected pointer rename failure")
+                return real_replace(self, target)
+
+            failures = [
+                mock.patch.object(storage, "_open", side_effect=payload_write),
+                mock.patch(
+                    "scrapy.extensions.httpcache.os.fsync",
+                    side_effect=file_fsync,
+                ),
+                mock.patch.object(
+                    Path, "replace", autospec=True, side_effect=pointer_replace
+                ),
+            ]
+            for failure in failures:
+                with failure, pytest.raises(GenerationPublishError):
+                    storage.store_response(crawler.spider, self.request, updated)
+
+        # A brand-new storage instance reads only complete generations.
+        with self._storage(HTTPCACHE_GZIP=use_gzip) as (storage, crawler):
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            assert self._temporary_entries(entry_dir) == []
+            cached = storage.retrieve_response(crawler.spider, self.request.copy())
+            assert cached is not None
+            assert cached.body == original.body
+            assert cached.headers == original.headers
+
+        # And a clean store after the failures is read back identically.
+        with self._storage(HTTPCACHE_GZIP=use_gzip) as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, updated)
+        with self._storage(HTTPCACHE_GZIP=use_gzip) as (storage, crawler):
+            cached = storage.retrieve_response(crawler.spider, self.request.copy())
+            assert cached is not None
+            assert cached.body == updated.body
+            assert cached.headers == updated.headers
+
+    def test_legacy_cache_is_invisible_without_the_explicit_policy(
+        self,
+    ) -> None:
+        with self._storage(HTTPCACHE_GENERATION=False) as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+        with self._storage() as (storage, crawler):
+            assert (
+                storage.retrieve_response(crawler.spider, self.request.copy()) is None
+            )
+
+    def test_legacy_cache_is_read_with_the_explicit_policy(self) -> None:
+        with self._storage(HTTPCACHE_GENERATION=False) as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+        with self._storage(HTTPCACHE_GENERATION_READ_LEGACY=True) as (storage, crawler):
+            cached = storage.retrieve_response(crawler.spider, self.request.copy())
+            self.assertEqualResponse(self.response, cached)
+            # Publishing a generation makes the legacy entry unreachable.
+            storage.store_response(
+                crawler.spider,
+                self.request,
+                self.response.replace(body=b"generation body"),
+            )
+            cached = storage.retrieve_response(crawler.spider, self.request.copy())
+            assert cached is not None
+            assert cached.body == b"generation body"
+
+    def test_missing_optional_response_data_is_a_miss_contract(self) -> None:
+        # response_data is a required, checksummed generation artifact; an
+        # entry missing it cannot be mistaken for a complete generation.
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            pointer = storage._read_pointer(entry_dir)
+            assert pointer is not None
+            generation_path = entry_dir / f"gen-{pointer['generation']}"
+            (generation_path / "response_data").unlink()
+            with pytest.raises(GenerationCorruptError):
+                storage.retrieve_response(crawler.spider, self.request.copy())
+
+    def test_tampered_body_is_reported_as_corrupt(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            pointer = storage._read_pointer(entry_dir)
+            assert pointer is not None
+            generation_path = entry_dir / f"gen-{pointer['generation']}"
+            # Same length, different content: the size check passes and the
+            # digest check has to catch the tampering.
+            body_path = generation_path / "response_body"
+            body_path.write_bytes(b"X" * len(self.response.body))
+            with pytest.raises(GenerationCorruptError, match="Digest mismatch"):
+                storage.retrieve_response(crawler.spider, self.request.copy())
+
+    def test_resized_body_is_reported_as_corrupt(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            pointer = storage._read_pointer(entry_dir)
+            assert pointer is not None
+            generation_path = entry_dir / f"gen-{pointer['generation']}"
+            (generation_path / "response_body").write_bytes(b"tampered")
+            with pytest.raises(
+                GenerationCorruptError, match="Invalid manifest payload list"
+            ):
+                storage.retrieve_response(crawler.spider, self.request.copy())
+
+    def test_missing_generation_directory_is_reported_as_corrupt(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            pointer = storage._read_pointer(entry_dir)
+            assert pointer is not None
+            shutil.rmtree(entry_dir / f"gen-{pointer['generation']}")
+            with pytest.raises(GenerationCorruptError, match="missing generation"):
+                storage.retrieve_response(crawler.spider, self.request.copy())
+
+    def test_manifest_cannot_reference_files_outside_the_entry(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            pointer = storage._read_pointer(entry_dir)
+            assert pointer is not None
+            generation_path = entry_dir / f"gen-{pointer['generation']}"
+            with pytest.raises(GenerationCorruptError):
+                storage._manifest_path(generation_path, "../../../etc/passwd")
+
+    def test_garbage_pointer_is_reported_as_corrupt(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            (entry_dir / "current.json").write_bytes(b"{not json")
+            with pytest.raises(GenerationCorruptError):
+                storage.retrieve_response(crawler.spider, self.request.copy())
+
+    @pytest.mark.parametrize(
+        "pointer",
+        [
+            {"version": 99, "generation": 0, "manifest_digest": "0"},
+            {"version": 1, "generation": -1, "manifest_digest": "0"},
+            {"version": 1, "generation": 0},
+        ],
+    )
+    def test_malformed_pointer_is_reported_as_corrupt(
+        self, pointer: dict[str, Any]
+    ) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            (entry_dir / "current.json").write_text(json.dumps(pointer))
+            with pytest.raises(GenerationCorruptError):
+                storage.retrieve_response(crawler.spider, self.request.copy())
+
+    def _stored_manifest(
+        self, storage: Any, spider: Spider, request: Request
+    ) -> tuple[Path, Path, dict[str, Any]]:
+        entry_dir = Path(storage._get_request_path(spider, request))
+        pointer = storage._read_pointer(entry_dir)
+        assert pointer is not None
+        generation_path = entry_dir / f"gen-{pointer['generation']}"
+        manifest = json.loads((generation_path / "manifest.json").read_text())
+        return entry_dir, generation_path, manifest
+
+    @pytest.mark.parametrize(
+        ("mutate", "message"),
+        [
+            ("version", "Unreadable manifest"),
+            ("files", "Unreadable manifest"),
+            ("metadata", "Unreadable manifest"),
+            ("gzip", "Unreadable manifest"),
+            ("size", "Invalid manifest payload list"),
+            ("digest", "Invalid manifest payload list"),
+        ],
+    )
+    def test_malformed_manifest_is_reported_as_corrupt(
+        self, mutate: str, message: str
+    ) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir, generation_path, manifest = self._stored_manifest(
+                storage, crawler.spider, self.request
+            )
+            if mutate == "version":
+                manifest["version"] = 99
+            elif mutate == "files":
+                manifest["files"] = []
+            elif mutate == "metadata":
+                manifest["metadata"] = []
+            elif mutate == "gzip":
+                manifest["gzip"] = "yes"
+            elif mutate == "size":
+                manifest["files"]["response_body"]["size"] = 999
+            elif mutate == "digest":
+                manifest["files"]["response_body"]["sha256"] = 1
+            manifest_bytes = json.dumps(
+                manifest, sort_keys=True, separators=(",", ":")
+            ).encode()
+            (generation_path / "manifest.json").write_bytes(manifest_bytes)
+            pointer_path = entry_dir / "current.json"
+            pointer = json.loads(pointer_path.read_text())
+            pointer["manifest_digest"] = hashlib.sha256(manifest_bytes).hexdigest()
+            pointer_path.write_text(
+                json.dumps(pointer, sort_keys=True, separators=(",", ":"))
+            )
+            with pytest.raises(GenerationCorruptError, match=message):
+                storage.retrieve_response(crawler.spider, self.request.copy())
+
+    def test_manifest_digest_mismatch_is_reported_as_corrupt(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir, _, _ = self._stored_manifest(
+                storage, crawler.spider, self.request
+            )
+            pointer_path = entry_dir / "current.json"
+            pointer = json.loads(pointer_path.read_text())
+            pointer["manifest_digest"] = "0" * 64
+            pointer_path.write_text(
+                json.dumps(pointer, sort_keys=True, separators=(",", ":"))
+            )
+            with pytest.raises(GenerationCorruptError, match="does not match"):
+                storage.retrieve_response(crawler.spider, self.request.copy())
+
+    def test_missing_manifest_is_reported_as_corrupt(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            _, generation_path, _ = self._stored_manifest(
+                storage, crawler.spider, self.request
+            )
+            (generation_path / "manifest.json").unlink()
+            with pytest.raises(GenerationCorruptError, match="Missing manifest"):
+                storage.retrieve_response(crawler.spider, self.request.copy())
+
+    def test_invalid_manifest_metadata_is_reported_as_corrupt(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir, generation_path, manifest = self._stored_manifest(
+                storage, crawler.spider, self.request
+            )
+            manifest["metadata"]["status"] = "not-a-status"
+            manifest_bytes = json.dumps(
+                manifest, sort_keys=True, separators=(",", ":")
+            ).encode()
+            (generation_path / "manifest.json").write_bytes(manifest_bytes)
+            pointer_path = entry_dir / "current.json"
+            pointer = json.loads(pointer_path.read_text())
+            pointer["manifest_digest"] = hashlib.sha256(manifest_bytes).hexdigest()
+            pointer_path.write_text(
+                json.dumps(pointer, sort_keys=True, separators=(",", ":"))
+            )
+            with pytest.raises(GenerationCorruptError, match="Invalid metadata"):
+                storage.retrieve_response(crawler.spider, self.request.copy())
+
+    def test_preexisting_generation_directory_seeds_the_next_id(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            # A leftover generation directory without a pointer must be
+            # accounted for when choosing the next generation id.
+            (entry_dir / "gen-7").mkdir()
+            (entry_dir / "gen-not-a-number").mkdir()
+            storage.store_response(crawler.spider, self.request, self.response)
+            pointer = storage._read_pointer(entry_dir)
+            assert pointer is not None
+            assert pointer["generation"] == 8
+
+    def test_stale_generation_directories_are_reported_as_corrupt(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            # A symlink entry cannot escape the cache root.
+            outside = entry_dir.parent / "outside"
+            outside.mkdir()
+            (entry_dir / "gen-0").rename(entry_dir / "gen-0-real")
+            (entry_dir / "gen-0").symlink_to(outside, target_is_directory=True)
+            with pytest.raises(GenerationCorruptError):
+                storage.retrieve_response(crawler.spider, self.request.copy())
+
+    def test_verification_failures_are_publish_errors(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            real_verify = storage._verify_generation
+
+            def broken_verify(generation_path, manifest, manifest_bytes):
+                # Simulate the on-disk payload changing after the digest was
+                # computed but before verification reads it back, without
+                # changing its length so that the digest check fires.
+                response_body = generation_path / "response_body"
+                response_body.write_bytes(b"X" * response_body.stat().st_size)
+                return real_verify(generation_path, manifest, manifest_bytes)
+
+            with (
+                mock.patch.object(
+                    storage, "_verify_generation", side_effect=broken_verify
+                ),
+                pytest.raises(GenerationPublishError, match="Verification"),
+            ):
+                storage.store_response(
+                    crawler.spider,
+                    self.request,
+                    self.response.replace(body=b"second"),
+                )
+            assert self._temporary_entries(entry_dir) == []
+            cached = storage.retrieve_response(crawler.spider, self.request.copy())
+            self.assertEqualResponse(self.response, cached)
+
+    def test_manifest_rewrite_before_verification_is_a_publish_error(
+        self,
+    ) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            real_verify = storage._verify_generation
+
+            def broken_verify(generation_path, manifest, manifest_bytes):
+                # Simulate the manifest file being overwritten after the
+                # in-memory manifest was serialized.
+                (generation_path / "manifest.json").write_bytes(b"{}")
+                return real_verify(generation_path, manifest, manifest_bytes)
+
+            with (
+                mock.patch.object(
+                    storage, "_verify_generation", side_effect=broken_verify
+                ),
+                pytest.raises(GenerationPublishError, match="Verification"),
+            ):
+                storage.store_response(
+                    crawler.spider,
+                    self.request,
+                    self.response.replace(body=b"second"),
+                )
+            assert self._temporary_entries(entry_dir) == []
+            self.assertEqualResponse(
+                self.response,
+                storage.retrieve_response(crawler.spider, self.request.copy()),
+            )
+
+    def test_verification_size_and_record_checks_are_publish_errors(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            real_verify = storage._verify_generation
+
+            def size_mismatch(generation_path, manifest, manifest_bytes):
+                response_body = generation_path / "response_body"
+                response_body.write_bytes(response_body.read_bytes() + b"extra")
+                return real_verify(generation_path, manifest, manifest_bytes)
+
+            with (
+                mock.patch.object(
+                    storage, "_verify_generation", side_effect=size_mismatch
+                ),
+                pytest.raises(GenerationPublishError, match="Verification"),
+            ):
+                storage.store_response(
+                    crawler.spider,
+                    self.request,
+                    self.response.replace(body=b"second"),
+                )
+
+            def bad_record(generation_path, manifest, manifest_bytes):
+                manifest["files"]["response_body"] = "not-a-record"
+                return real_verify(generation_path, manifest, manifest_bytes)
+
+            with (
+                mock.patch.object(
+                    storage, "_verify_generation", side_effect=bad_record
+                ),
+                pytest.raises(GenerationPublishError, match="Verification"),
+            ):
+                storage.store_response(
+                    crawler.spider,
+                    self.request,
+                    self.response.replace(body=b"third"),
+                )
+
+    def test_remove_tree_unlinks_symlinks_without_following_them(self) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            entry_dir = Path(storage._get_request_path(crawler.spider, self.request))
+            outside = entry_dir.parent / "outside"
+            outside.mkdir()
+            (outside / "keep-me").write_bytes(b"must survive")
+            link = entry_dir / "dangling-link"
+            link.symlink_to(outside / "keep-me")
+            storage._remove_tree(link)
+            assert not link.exists()
+            assert (outside / "keep-me").read_bytes() == b"must survive"
+
+    def test_previous_generation_cleanup_failure_is_logged(self, caplog) -> None:
+        with self._storage() as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            real_remove = storage._remove_tree
+
+            def fail_on_old_generation(path: Path) -> None:
+                if path.name == "gen-0":
+                    raise OSError("injected cleanup failure")
+                real_remove(path)
+
+            with mock.patch.object(
+                storage,
+                "_remove_tree",
+                autospec=True,
+                side_effect=fail_on_old_generation,
+            ):
+                storage.store_response(
+                    crawler.spider,
+                    self.request,
+                    self.response.replace(body=b"second"),
+                )
+            assert "previous cache generation" in caplog.text
+            cached = storage.retrieve_response(crawler.spider, self.request.copy())
+            assert cached is not None
+            assert cached.body == b"second"
+
+    @coroutine_test
+    async def test_304_revalidation_publishes_updated_generation(self) -> None:
+        with self._middleware(HTTPCACHE_POLICY=AlwaysStalePolicy) as mw:
+            spider = mw.crawler.spider
+            assert spider is not None
+            initial = Response(
+                self.request.url,
+                headers={
+                    "Content-Type": "text/html",
+                    "Last-Modified": self.yesterday,
+                },
+                body=b"original body",
+            )
+            mw.process_response(self.request, initial)
+            entry_dir = Path(mw.storage._get_request_path(spider, self.request))
+
+            assert await mw.process_request(self.request) is None
+            not_modified = Response(
+                self.request.url,
+                status=304,
+                headers={"X-Refreshed": "1", "Date": self.today},
+            )
+            mw.process_response(self.request, not_modified)
+
+            pointer = mw.storage._read_pointer(entry_dir)
+            assert pointer is not None
+            assert pointer["generation"] == 1
+            cached = mw.storage.retrieve_response(spider, self.request.copy())
+            assert cached is not None
+            assert cached.body == b"original body"
+            assert cached.headers[b"X-Refreshed"] == b"1"
+            assert self._temporary_entries(entry_dir) == []
 
 
 class _LateMiddleware:

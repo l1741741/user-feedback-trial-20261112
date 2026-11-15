@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
+import json
 import logging
+import os
 import pickle
+import shutil
+import sys
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from importlib import import_module
@@ -14,14 +19,13 @@ from weakref import WeakKeyDictionary
 
 from w3lib.http import headers_dict_to_raw, headers_raw_to_dict
 
-from scrapy.http import Response
+from scrapy.http import Headers, Response
 from scrapy.utils.httpobj import urlparse_cached
 from scrapy.utils.project import data_path
 from scrapy.utils.python import to_unicode
 from scrapy.utils.response import response_from_dict
 
 if TYPE_CHECKING:
-    import os
     from collections.abc import Callable
     from types import ModuleType
 
@@ -32,6 +36,53 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# Files whose checksum is recorded in a generation manifest.
+_GENERATION_FILES: frozenset[str] = frozenset(
+    {
+        "meta",
+        "pickled_meta",
+        "request_body",
+        "request_headers",
+        "response_body",
+        "response_data",
+        "response_headers",
+    }
+)
+# Request headers carrying credentials. They are redacted before a cache entry
+# is written in generation mode so that no plaintext secret reaches the disk.
+_GENERATION_REDACTED_HEADERS: tuple[bytes, ...] = (
+    b"Authorization",
+    b"Proxy-Authorization",
+)
+_GENERATION_MANIFEST_VERSION = 1
+_GENERATION_POINTER_VERSION = 1
+
+
+class GenerationCacheError(Exception):
+    """Base class for errors of the generation-publishing mode of
+    :class:`FilesystemCacheStorage`."""
+
+
+class GenerationPublishError(GenerationCacheError):
+    """Raised when a cache generation could not be built or published.
+
+    The previously published generation, if any, is left readable and the
+    temporary files of the failed attempt are removed."""
+
+
+class GenerationUncertainError(GenerationCacheError):
+    """Raised when the pointer to the current generation was switched but the
+    cache directory could not be synced afterwards.
+
+    The new generation may or may not be visible to a reader after a crash, so
+    it is no longer safe to claim that the previous generation is unchanged;
+    the caller must report this state rather than retry blindly."""
+
+
+class GenerationCorruptError(GenerationCacheError):
+    """Raised when the published generation is missing files or fails its
+    recorded size or digest checks, so that the entry cannot be trusted."""
 
 
 def _get_scope(settings: BaseSettings, supported: tuple[str, ...]) -> str:
@@ -320,6 +371,9 @@ class FilesystemCacheStorage:
         self.cachedir: str = data_path(settings["HTTPCACHE_DIR"])
         self.expiration_secs: int = settings.getint("HTTPCACHE_EXPIRATION_SECS")
         self.use_gzip: bool = settings.getbool("HTTPCACHE_GZIP")
+        self.generation_mode: bool = settings.getbool("HTTPCACHE_GENERATION")
+        self.read_legacy: bool = settings.getbool("HTTPCACHE_GENERATION_READ_LEGACY")
+        self.use_fsync: bool = settings.getbool("HTTPCACHE_FSYNC")
         self._scope = _get_scope(settings, ("spider", "none", "domain"))
         # https://github.com/python/mypy/issues/10740
         self._open: Callable[
@@ -327,6 +381,7 @@ class FilesystemCacheStorage:
         ] = (
             gzip.open if self.use_gzip else open  # type: ignore[assignment]
         )
+        self._generation_counter = 0
 
     def open_spider(self, spider: Spider) -> None:
         logger.debug(
@@ -342,7 +397,37 @@ class FilesystemCacheStorage:
 
     def retrieve_response(self, spider: Spider, request: Request) -> Response | None:
         """Return response if present in cache, or None otherwise."""
-        metadata = self._read_meta(spider, request)
+        if self.generation_mode:
+            return self._retrieve_generation(spider, request)
+        return self._retrieve_legacy(spider, request)
+
+    def store_response(
+        self, spider: Spider, request: Request, response: Response
+    ) -> None:
+        """Store the given response in the cache."""
+        if self.generation_mode:
+            self._store_generation(spider, request, response)
+            return
+        self._store_legacy(spider, request, response)
+
+    def _get_request_path(self, spider: Spider, request: Request) -> str:
+        key = self._fingerprinter.fingerprint(request).hex()
+        scope_path = self._get_scope_path(spider, request)
+        return str(Path(self.cachedir, scope_path, key[0:2], key))
+
+    def _get_scope_path(self, spider: Spider, request: Request) -> str:
+        if self._scope == "spider":
+            return spider.name
+        if self._scope == "domain":
+            # quote() covers hostnames that are not valid path components,
+            # such as IPv6 addresses.
+            return quote(urlparse_cached(request).hostname or "_", safe="")
+        return ""
+
+    # -- Legacy layout -------------------------------------------------------
+
+    def _retrieve_legacy(self, spider: Spider, request: Request) -> Response | None:
+        metadata = self._read_meta_legacy(spider, request)
         if metadata is None:
             return None  # not cached
         rpath = Path(self._get_request_path(spider, request))
@@ -363,10 +448,9 @@ class FilesystemCacheStorage:
         request.meta["cache_timestamp"] = metadata["timestamp"]
         return response_from_dict(data)
 
-    def store_response(
+    def _store_legacy(
         self, spider: Spider, request: Request, response: Response
     ) -> None:
-        """Store the given response in the cache."""
         rpath = Path(self._get_request_path(spider, request))
         if not rpath.exists():
             rpath.mkdir(parents=True)
@@ -397,21 +481,9 @@ class FilesystemCacheStorage:
         with self._open(rpath / "request_body", "wb") as f:
             f.write(request.body)
 
-    def _get_request_path(self, spider: Spider, request: Request) -> str:
-        key = self._fingerprinter.fingerprint(request).hex()
-        scope_path = self._get_scope_path(spider, request)
-        return str(Path(self.cachedir, scope_path, key[0:2], key))
-
-    def _get_scope_path(self, spider: Spider, request: Request) -> str:
-        if self._scope == "spider":
-            return spider.name
-        if self._scope == "domain":
-            # quote() covers hostnames that are not valid path components,
-            # such as IPv6 addresses.
-            return quote(urlparse_cached(request).hostname or "_", safe="")
-        return ""
-
-    def _read_meta(self, spider: Spider, request: Request) -> dict[str, Any] | None:
+    def _read_meta_legacy(
+        self, spider: Spider, request: Request
+    ) -> dict[str, Any] | None:
         rpath = Path(self._get_request_path(spider, request))
         metapath = rpath / "pickled_meta"
         if not metapath.exists():
@@ -421,6 +493,444 @@ class FilesystemCacheStorage:
             return None  # expired
         with self._open(metapath, "rb") as f:
             return cast("dict[str, Any]", pickle.load(f))  # noqa: S301
+
+    # -- Generation-publishing layout ---------------------------------------
+
+    def _entry_dir(self, spider: Spider, request: Request) -> Path:
+        return Path(self._get_request_path(spider, request))
+
+    @staticmethod
+    def _generation_dir(entry_dir: Path, generation: int) -> Path:
+        return entry_dir / f"gen-{generation}"
+
+    @staticmethod
+    def _staging_dir(entry_dir: Path, generation: int, counter: int) -> Path:
+        return entry_dir / f".staging-{generation}-{counter}-{os.getpid()}"
+
+    @staticmethod
+    def _pointer_path(entry_dir: Path) -> Path:
+        return entry_dir / "current.json"
+
+    def _read_pointer(self, entry_dir: Path) -> dict[str, Any] | None:
+        pointer_path = self._pointer_path(entry_dir)
+        if not pointer_path.exists():
+            return None  # no published generation
+        try:
+            pointer = json.loads(pointer_path.read_bytes().decode("utf-8"))
+            if int(pointer["version"]) != _GENERATION_POINTER_VERSION:
+                raise ValueError("unknown pointer version")
+            generation = int(pointer["generation"])
+            if generation < 0:
+                raise ValueError("negative generation")
+            manifest_digest = str(pointer["manifest_digest"])
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise GenerationCorruptError(
+                f"Unreadable generation pointer at {pointer_path}"
+            ) from exc
+        # Generation ids are non-negative integers, so the generation directory
+        # can never contain a path separator or escape the cache entry.
+        generation_path = self._generation_dir(entry_dir, generation)
+        self._ensure_within(entry_dir.resolve(), generation_path.resolve())
+        return {"generation": generation, "manifest_digest": manifest_digest}
+
+    def _next_generation(self, entry_dir: Path) -> int:
+        # Consider both the pointer and generation directories left behind by a
+        # crashed run, so a recovered entry never reuses an existing id.
+        highest = -1
+        pointer = self._read_pointer(entry_dir)
+        if pointer is not None:
+            highest = int(pointer["generation"])
+        if entry_dir.is_dir():
+            for child in entry_dir.iterdir():
+                if not child.name.startswith("gen-"):
+                    continue
+                try:
+                    highest = max(highest, int(child.name[len("gen-") :]))
+                except ValueError:
+                    continue
+        return highest + 1
+
+    def _cleanup_staging(self, entry_dir: Path) -> None:
+        if not entry_dir.is_dir():
+            return
+        for child in entry_dir.iterdir():
+            if child.name.startswith(".staging-") and child.is_dir():
+                self._remove_tree(child)
+
+    def _store_generation(
+        self, spider: Spider, request: Request, response: Response
+    ) -> None:
+        entry_dir = self._entry_dir(spider, request)
+        self._cleanup_staging(entry_dir)
+        old_pointer = self._read_pointer(entry_dir)
+        generation = self._next_generation(entry_dir)
+        self._generation_counter += 1
+        staging = self._staging_dir(entry_dir, generation, self._generation_counter)
+        old_generation_dir = (
+            self._generation_dir(entry_dir, int(old_pointer["generation"]))
+            if old_pointer is not None
+            else None
+        )
+        generation_path = self._generation_dir(entry_dir, generation)
+        try:
+            staging.mkdir(parents=True, exist_ok=False)
+            manifest = self._build_generation_manifest(
+                staging, generation, request, response
+            )
+            manifest_bytes = self._dump_manifest(manifest)
+            self._write_manifest(staging / "manifest.json", manifest_bytes)
+            self._verify_generation(staging, manifest, manifest_bytes)
+            self._fsync_dir(staging)
+            self._ensure_within(entry_dir.resolve(), generation_path.resolve())
+            try:
+                staging.replace(generation_path)
+            except OSError as exc:
+                raise GenerationPublishError(
+                    f"Could not publish generation {generation} in {entry_dir}"
+                ) from exc
+            # The new generation now exists under its final name but the
+            # pointer still names the previous one. A failure before the
+            # pointer switch leaves the new directory unreferenced, so it is
+            # removed below; once the switch succeeds it must stay, even if
+            # the directory sync then reports an uncertain state.
+            self._publish_pointer(
+                entry_dir, generation, hashlib.sha256(manifest_bytes).hexdigest()
+            )
+        except GenerationUncertainError:
+            self._remove_tree(staging)
+            raise
+        except GenerationCacheError:
+            self._remove_tree(staging)
+            self._remove_tree(generation_path)
+            raise
+        except OSError as exc:
+            self._remove_tree(staging)
+            self._remove_tree(generation_path)
+            raise GenerationPublishError(
+                f"Could not write generation {generation} in {entry_dir}"
+            ) from exc
+        if old_generation_dir is not None:
+            try:
+                self._remove_tree(old_generation_dir)
+            except OSError:
+                logger.warning(
+                    f"Could not remove the previous cache generation in "
+                    f"{old_generation_dir}; it is no longer referenced and can "
+                    f"be deleted manually.",
+                    extra={"spider": spider},
+                )
+
+    def _build_generation_manifest(
+        self,
+        staging: Path,
+        generation: int,
+        request: Request,
+        response: Response,
+    ) -> dict[str, Any]:
+        metadata = {
+            "url": request.url,
+            "method": request.method,
+            "status": response.status,
+            "response_url": response.url,
+            "timestamp": time(),
+        }
+        redacted_headers = Headers(request.headers)
+        for header in _GENERATION_REDACTED_HEADERS:
+            redacted_headers.pop(header, None)
+        data = {
+            key: value
+            for key, value in response.to_dict().items()
+            if key not in {"url", "status", "headers", "body"}
+        }
+        payloads = {
+            "meta": repr(metadata).encode(),
+            "pickled_meta": pickle.dumps(metadata, protocol=4),
+            "request_body": request.body,
+            "request_headers": headers_dict_to_raw(redacted_headers),
+            "response_body": response.body,
+            "response_data": pickle.dumps(data, protocol=4),
+            "response_headers": headers_dict_to_raw(response.headers),
+        }
+        files: dict[str, dict[str, int | str]] = {}
+        for name in _GENERATION_FILES:
+            content = payloads[name]
+            path = staging / name
+            self._write_generation_file(path, content)
+            files[name] = {
+                # Size of the file on disk, which is the gzip stream length
+                # when HTTPCACHE_GZIP is enabled; the digest always covers the
+                # uncompressed payload so that it can be checked after reading.
+                "size": path.stat().st_size,
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        return {
+            "version": _GENERATION_MANIFEST_VERSION,
+            "generation": generation,
+            "gzip": self.use_gzip,
+            "metadata": metadata,
+            "files": files,
+        }
+
+    @staticmethod
+    def _dump_manifest(manifest: dict[str, Any]) -> bytes:
+        return json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+
+    def _write_generation_file(self, path: Path, content: bytes) -> None:
+        with self._open(path, "wb") as f:
+            f.write(content)
+            if self.use_fsync:
+                f.flush()
+                os.fsync(f.fileno())
+
+    def _write_manifest(self, path: Path, content: bytes) -> None:
+        # The manifest itself is always plain JSON, even when the payload files
+        # are gzip-compressed, so that readers do not need a working gzip
+        # stream to find out what the generation is supposed to contain.
+        with path.open("wb") as f:
+            f.write(content)
+            if self.use_fsync:
+                f.flush()
+                os.fsync(f.fileno())
+
+    def _publish_pointer(
+        self, entry_dir: Path, generation: int, manifest_digest: str
+    ) -> None:
+        pointer_bytes = self._dump_manifest(
+            {
+                "version": _GENERATION_POINTER_VERSION,
+                "generation": generation,
+                "manifest_digest": manifest_digest,
+            }
+        )
+        pointer_path = self._pointer_path(entry_dir)
+        temp_path = entry_dir / f".current-{generation}-{os.getpid()}.tmp"
+        try:
+            with temp_path.open("wb") as f:
+                f.write(pointer_bytes)
+                if self.use_fsync:
+                    f.flush()
+                    os.fsync(f.fileno())
+            try:
+                temp_path.replace(pointer_path)
+            except OSError as exc:
+                raise GenerationPublishError(
+                    f"Could not switch the generation pointer in {entry_dir}"
+                ) from exc
+            try:
+                self._fsync_dir(entry_dir)
+            except OSError as exc:
+                raise GenerationUncertainError(
+                    f"The generation pointer in {entry_dir} was switched to "
+                    f"generation {generation}, but the directory could not be "
+                    f"synced; which generation a reader sees after a crash is "
+                    f"unknown."
+                ) from exc
+        finally:
+            self._remove_tree(temp_path)
+
+    def _verify_generation(
+        self,
+        generation_path: Path,
+        manifest: dict[str, Any],
+        manifest_bytes: bytes,
+    ) -> None:
+        try:
+            files = manifest["files"]
+            if not isinstance(files, dict) or set(files) != _GENERATION_FILES:
+                raise ValueError("the manifest does not list exactly the payload files")
+            for name in sorted(_GENERATION_FILES):
+                record = files[name]
+                if not isinstance(record, dict):
+                    raise ValueError(f"invalid manifest record for {name}")
+                path = self._manifest_path(generation_path, name)
+                if path.stat().st_size != int(record["size"]):
+                    raise ValueError(f"size mismatch for {name}")
+                with self._open(path, "rb") as f:
+                    content = f.read()
+                if hashlib.sha256(content).hexdigest() != str(record["sha256"]):
+                    raise ValueError(f"digest mismatch for {name}")
+            if (generation_path / "manifest.json").read_bytes() != manifest_bytes:
+                raise ValueError(
+                    "the written manifest does not match the in-memory manifest"
+                )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise GenerationPublishError(
+                f"Verification of the cache generation in {generation_path} failed"
+            ) from exc
+
+    def _manifest_path(self, generation_path: Path, name: str) -> Path:
+        if name not in _GENERATION_FILES:
+            raise GenerationCorruptError(
+                f"The manifest names a file outside the cache entry: {name!r}"
+            )
+        path = (generation_path / name).resolve()
+        self._ensure_within(generation_path.resolve(), path)
+        return path
+
+    @staticmethod
+    def _is_within(directory: Path, path: Path) -> bool:
+        try:
+            path.relative_to(directory)
+        except ValueError:
+            return False
+        return True
+
+    def _ensure_within(self, directory: Path, path: Path) -> None:
+        if not self._is_within(directory, path):
+            raise GenerationCorruptError(
+                f"The cache entry references {path}, which is outside {directory}"
+            )
+
+    def _retrieve_generation(self, spider: Spider, request: Request) -> Response | None:
+        entry_dir = self._entry_dir(spider, request)
+        pointer = self._read_pointer(entry_dir)
+        if pointer is None:
+            if self.read_legacy:
+                return self._retrieve_legacy(spider, request)
+            return None  # no published generation
+        generation_path = self._generation_dir(entry_dir, int(pointer["generation"]))
+        self._ensure_within(entry_dir.resolve(), generation_path.resolve())
+        if not generation_path.is_dir():
+            raise GenerationCorruptError(
+                f"The pointer in {entry_dir} references missing generation "
+                f"{pointer['generation']}"
+            )
+        manifest = self._load_manifest(generation_path, str(pointer["manifest_digest"]))
+        metadata = self._read_meta_generation(generation_path, manifest)
+        if metadata is None:
+            return None  # expired
+        open_payload = self._payload_opener(bool(manifest["gzip"]))
+        body = self._read_payload(
+            generation_path, manifest, open_payload, "response_body"
+        )
+        rawheaders = self._read_payload(
+            generation_path, manifest, open_payload, "response_headers"
+        )
+        data = {
+            "url": metadata["response_url"],
+            "status": metadata["status"],
+            "headers": headers_raw_to_dict(rawheaders),
+            "body": body,
+        }
+        raw_data = self._read_payload(
+            generation_path, manifest, open_payload, "response_data"
+        )
+        data.update(pickle.loads(raw_data))  # noqa: S301
+        request.meta["cache_timestamp"] = metadata["timestamp"]
+        return response_from_dict(data)
+
+    @staticmethod
+    def _payload_opener(
+        use_gzip: bool,
+    ) -> Callable[Concatenate[str | os.PathLike[str], str, ...], IO[bytes]]:
+        return gzip.open if use_gzip else open  # type: ignore[return-value]
+
+    def _load_manifest(
+        self, generation_path: Path, expected_digest: str
+    ) -> dict[str, Any]:
+        manifest_path = generation_path / "manifest.json"
+        self._ensure_within(generation_path.resolve(), manifest_path.resolve())
+        try:
+            manifest_bytes = manifest_path.read_bytes()
+        except OSError as exc:
+            raise GenerationCorruptError(
+                f"Missing manifest in cache generation {generation_path}"
+            ) from exc
+        if hashlib.sha256(manifest_bytes).hexdigest() != expected_digest:
+            raise GenerationCorruptError(
+                f"The manifest of cache generation {generation_path} does not "
+                f"match the generation pointer"
+            )
+        try:
+            manifest = json.loads(manifest_bytes.decode("utf-8"))
+            if int(manifest["version"]) != _GENERATION_MANIFEST_VERSION:
+                raise ValueError("unknown manifest version")
+            if not isinstance(manifest["files"], dict):
+                raise ValueError("invalid file list")
+            if not isinstance(manifest["metadata"], dict):
+                raise ValueError("invalid metadata")
+            if not isinstance(manifest["gzip"], bool):
+                raise ValueError("invalid gzip flag")
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise GenerationCorruptError(
+                f"Unreadable manifest in cache generation {generation_path}"
+            ) from exc
+        try:
+            for name, record in manifest["files"].items():
+                path = self._manifest_path(generation_path, str(name))
+                if not isinstance(record, dict) or not path.is_file():
+                    raise ValueError(f"invalid or missing payload {name}")
+                if path.stat().st_size != int(record["size"]):
+                    raise ValueError(f"size mismatch for {name}")
+                if not isinstance(record["sha256"], str):
+                    raise ValueError(f"invalid digest for {name}")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise GenerationCorruptError(
+                f"Invalid manifest payload list in cache generation {generation_path}"
+            ) from exc
+        return cast("dict[str, Any]", manifest)
+
+    def _read_payload(
+        self,
+        generation_path: Path,
+        manifest: dict[str, Any],
+        open_payload: Callable[
+            Concatenate[str | os.PathLike[str], str, ...], IO[bytes]
+        ],
+        name: str,
+    ) -> bytes:
+        path = self._manifest_path(generation_path, name)
+        with open_payload(path, "rb") as f:
+            content = f.read()
+        record = manifest["files"][name]
+        if hashlib.sha256(content).hexdigest() != str(record["sha256"]):
+            raise GenerationCorruptError(
+                f"Digest mismatch for {name} in cache generation {generation_path}"
+            )
+        return content
+
+    def _read_meta_generation(
+        self, generation_path: Path, manifest: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        if 0 < self.expiration_secs:
+            mtime = (generation_path / "manifest.json").stat().st_mtime
+            if self.expiration_secs < time() - mtime:
+                return None  # expired
+        try:
+            metadata = manifest["metadata"]
+            return {
+                "url": str(metadata["url"]),
+                "method": str(metadata["method"]),
+                "status": int(metadata["status"]),
+                "response_url": str(metadata["response_url"]),
+                "timestamp": float(metadata["timestamp"]),
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GenerationCorruptError(
+                f"Invalid metadata in cache generation {generation_path}"
+            ) from exc
+
+    def _fsync_dir(self, path: Path) -> None:
+        if not self.use_fsync or sys.platform == "win32":
+            # Windows cannot open directories for fsync; its file system
+            # journal already makes renames atomic and durable.
+            return
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _remove_tree(path: Path) -> None:
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
 
 
 def parse_cachecontrol(header: bytes) -> dict[bytes, bytes | None]:
