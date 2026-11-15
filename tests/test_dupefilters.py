@@ -10,8 +10,18 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+import scrapy.dupefilters
 from scrapy.core.scheduler import Scheduler
-from scrapy.dupefilters import BaseDupeFilter, DiskDupeFilter, RFPDupeFilter
+from scrapy.dupefilters import (
+    _JOURNAL_HEADER,
+    BaseDupeFilter,
+    DiskDupeFilter,
+    JournalCorruptionError,
+    JournalFormatError,
+    JournalWriteError,
+    RFPDupeFilter,
+    _journal_record,
+)
 from scrapy.exceptions import ScrapyDeprecationWarning
 from scrapy.http import Request
 from scrapy.utils.misc import build_from_crawler
@@ -255,6 +265,416 @@ class TestRFPDupeFilter(DupeFilterTestMixin):
         assert not dupefilter.request_seen(Request("http://scrapytest.org/index.html"))
         assert dupefilter.request_seen(Request("http://scrapytest.org/INDEX.html"))
         dupefilter.close("finished")
+
+
+class _TornFile:
+    """File wrapper that simulates a short write followed by an I/O error,
+    as happens when a process dies or the disk fails mid-append."""
+
+    def __init__(self, real: Any, keep: int, fail_truncate: bool = False):
+        self._real = real
+        self._keep = keep
+        self._fail_truncate = fail_truncate
+
+    def write(self, data: bytes) -> int:
+        self._real.write(data[: self._keep])
+        self._real.flush()
+        raise OSError("simulated short write")
+
+    def truncate(self, size: int | None = None) -> int:
+        if self._fail_truncate:
+            raise OSError("simulated truncate failure")
+        return self._real.truncate(size)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+class TestRFPDupeFilterJournal:
+    """Tests for the recoverable journal mode of RFPDupeFilter
+    (DUPEFILTER_JOURNAL)."""
+
+    def _get_journal_dupefilter(self, path: Path, **kwargs: Any) -> RFPDupeFilter:
+        return RFPDupeFilter(path=str(path), journal=True, **kwargs)
+
+    @staticmethod
+    def _record(dupefilter: RFPDupeFilter, request: Request) -> bytes:
+        return _journal_record(dupefilter.fingerprinter.fingerprint(request))
+
+    def test_setting_enables_journal_mode(self, tmp_path: Path) -> None:
+        dupefilter = cast(
+            "RFPDupeFilter",
+            _get_dupefilter(
+                settings={"JOBDIR": str(tmp_path), "DUPEFILTER_JOURNAL": True}
+            ),
+        )
+        assert dupefilter._journal
+        journal = tmp_path / "requests.seen.journal"
+        assert journal.read_bytes() == _JOURNAL_HEADER
+        assert not (tmp_path / "requests.seen").exists()
+        dupefilter.close("finished")
+
+    def test_journal_disabled_by_default(self, tmp_path: Path) -> None:
+        dupefilter = cast(
+            "RFPDupeFilter", _get_dupefilter(settings={"JOBDIR": str(tmp_path)})
+        )
+        assert not dupefilter._journal
+        assert (tmp_path / "requests.seen").exists()
+        assert not (tmp_path / "requests.seen.journal").exists()
+        dupefilter.close("finished")
+
+    def test_layout_and_reopen(self, tmp_path: Path) -> None:
+        r1 = Request("https://example.com/1")
+        r2 = Request("https://example.com/2")
+        r3 = Request("https://example.com/3")
+
+        df = self._get_journal_dupefilter(tmp_path)
+        assert not df.request_seen(r1)
+        assert not df.request_seen(r2)
+        journal = tmp_path / "requests.seen.journal"
+        expected = _JOURNAL_HEADER + self._record(df, r1) + self._record(df, r2)
+        assert journal.read_bytes() == expected
+        df.close("finished")
+
+        resumed = self._get_journal_dupefilter(tmp_path)
+        assert resumed.request_seen(r1)
+        assert resumed.request_seen(r2)
+        assert not resumed.request_seen(r3)
+        expected += self._record(resumed, r3)
+        assert journal.read_bytes() == expected
+        resumed.close("finished")
+        assert not (tmp_path / "requests.seen.journal.orphan").exists()
+
+    def test_empty_journal_file_is_initialized(self, tmp_path: Path) -> None:
+        journal = tmp_path / "requests.seen.journal"
+        journal.touch()
+        df = self._get_journal_dupefilter(tmp_path)
+        r1 = Request("https://example.com/1")
+        assert not df.request_seen(r1)
+        assert journal.read_bytes() == _JOURNAL_HEADER + self._record(df, r1)
+        df.close("finished")
+
+    def test_header_only_journal_reopens_clean(self, tmp_path: Path) -> None:
+        df = self._get_journal_dupefilter(tmp_path)
+        df.close("finished")
+        resumed = self._get_journal_dupefilter(tmp_path)
+        assert not resumed.request_seen(Request("https://example.com/1"))
+        resumed.close("finished")
+        assert not (tmp_path / "requests.seen.journal.orphan").exists()
+
+    def test_truncated_record_quarantined(self, tmp_path: Path) -> None:
+        r1 = Request("https://example.com/1")
+        r2 = Request("https://example.com/2")
+        df = self._get_journal_dupefilter(tmp_path)
+        df.request_seen(r1)
+        df.request_seen(r2)
+        record1 = self._record(df, r1)
+        record2 = self._record(df, r2)
+        df.close("finished")
+
+        journal = tmp_path / "requests.seen.journal"
+        data = journal.read_bytes()
+        journal.write_bytes(data[:-3])  # tear off 3 bytes of the last record
+
+        resumed = self._get_journal_dupefilter(tmp_path)
+        # The committed record is recovered, the torn one is rescheduled.
+        assert resumed.request_seen(r1)
+        assert not resumed.request_seen(r2)
+        # The torn tail was isolated into the orphan file and the journal was
+        # truncated to the commit boundary.
+        orphan = tmp_path / "requests.seen.journal.orphan"
+        assert orphan.read_bytes() == record2[:-3]
+        assert journal.read_bytes() == _JOURNAL_HEADER + record1 + record2
+        resumed.close("finished")
+
+    def test_truncated_length_field_quarantined(self, tmp_path: Path) -> None:
+        r1 = Request("https://example.com/1")
+        df = self._get_journal_dupefilter(tmp_path)
+        df.request_seen(r1)
+        record1 = self._record(df, r1)
+        df.close("finished")
+
+        journal = tmp_path / "requests.seen.journal"
+        with journal.open("ab") as f:
+            f.write(b"\x00")  # a single dangling byte of a length field
+
+        resumed = self._get_journal_dupefilter(tmp_path)
+        assert resumed.request_seen(r1)
+        assert (tmp_path / "requests.seen.journal.orphan").read_bytes() == b"\x00"
+        assert journal.read_bytes() == _JOURNAL_HEADER + record1
+        resumed.close("finished")
+
+    def test_bad_checksum_tail_quarantined(self, tmp_path: Path) -> None:
+        r1 = Request("https://example.com/1")
+        r2 = Request("https://example.com/2")
+        df = self._get_journal_dupefilter(tmp_path)
+        df.request_seen(r1)
+        df.request_seen(r2)
+        record1 = self._record(df, r1)
+        record2 = self._record(df, r2)
+        df.close("finished")
+
+        journal = tmp_path / "requests.seen.journal"
+        data = bytearray(journal.read_bytes())
+        data[-5] ^= 0xFF  # flip a fingerprint bit in the last record
+        journal.write_bytes(bytes(data))
+
+        resumed = self._get_journal_dupefilter(tmp_path)
+        assert resumed.request_seen(r1)
+        assert not resumed.request_seen(r2)  # uncommitted: rescheduled
+        assert (tmp_path / "requests.seen.journal.orphan").read_bytes() == (
+            record2[:-5] + bytes([record2[-5] ^ 0xFF]) + record2[-4:]
+        )
+        assert journal.read_bytes() == _JOURNAL_HEADER + record1 + record2
+        resumed.close("finished")
+
+    def test_mid_file_corruption_raises_and_preserves(self, tmp_path: Path) -> None:
+        requests = [Request(f"https://example.com/{i}") for i in (1, 2, 3)]
+        df = self._get_journal_dupefilter(tmp_path)
+        for request in requests:
+            df.request_seen(request)
+        record1 = self._record(df, requests[0])
+        df.close("finished")
+
+        journal = tmp_path / "requests.seen.journal"
+        data = bytearray(journal.read_bytes())
+        corrupt_offset = len(_JOURNAL_HEADER) + len(record1)
+        data[corrupt_offset + 2] ^= 0xFF  # corrupt the 2nd record's payload
+        journal.write_bytes(bytes(data))
+        before = journal.read_bytes()
+
+        with pytest.raises(JournalCorruptionError) as excinfo:
+            self._get_journal_dupefilter(tmp_path)
+        assert excinfo.value.offset == corrupt_offset
+        assert excinfo.value.path == journal
+        assert str(corrupt_offset) in str(excinfo.value)
+        # The original file is preserved, no orphan is created.
+        assert journal.read_bytes() == before
+        assert not (tmp_path / "requests.seen.journal.orphan").exists()
+
+    def test_oversized_tail_raises_and_preserves(self, tmp_path: Path) -> None:
+        df = self._get_journal_dupefilter(tmp_path)
+        r1 = Request("https://example.com/1")
+        df.request_seen(r1)
+        df.close("finished")
+
+        journal = tmp_path / "requests.seen.journal"
+        with journal.open("ab") as f:
+            f.write(b"\xff" * (70000))  # larger than any single record
+        before = journal.read_bytes()
+
+        with pytest.raises(JournalCorruptionError):
+            self._get_journal_dupefilter(tmp_path)
+        assert journal.read_bytes() == before
+
+    def test_bad_magic_raises_and_preserves(self, tmp_path: Path) -> None:
+        journal = tmp_path / "requests.seen.journal"
+        journal.write_bytes(b"NOTAJOURNAL" * 4)
+        before = journal.read_bytes()
+        with pytest.raises(JournalFormatError) as excinfo:
+            self._get_journal_dupefilter(tmp_path)
+        assert excinfo.value.path == journal
+        assert journal.read_bytes() == before
+
+    def test_unsupported_version_raises_and_preserves(self, tmp_path: Path) -> None:
+        journal = tmp_path / "requests.seen.journal"
+        journal.write_bytes(b"SRFPJ\x00\x00\x63" + b"\x00" * 10)
+        before = journal.read_bytes()
+        with pytest.raises(JournalFormatError, match="version"):
+            self._get_journal_dupefilter(tmp_path)
+        assert journal.read_bytes() == before
+
+    def test_legacy_file_requires_explicit_migration(self, tmp_path: Path) -> None:
+        r1 = Request("https://example.com/1")
+        legacy_df = RFPDupeFilter(path=str(tmp_path))
+        legacy_df.request_seen(r1)
+        legacy_df.close("finished")
+        legacy_bytes = (tmp_path / "requests.seen").read_bytes()
+
+        # Journal mode never converts the legacy format implicitly.
+        with pytest.raises(JournalFormatError, match="migrate_legacy_journal"):
+            self._get_journal_dupefilter(tmp_path)
+        assert (tmp_path / "requests.seen").read_bytes() == legacy_bytes
+        assert not (tmp_path / "requests.seen.journal").exists()
+
+        journal_path = RFPDupeFilter.migrate_legacy_journal(str(tmp_path))
+        assert journal_path == tmp_path / "requests.seen.journal"
+        # The original file is kept as a backup with identical bytes.
+        assert not (tmp_path / "requests.seen").exists()
+        assert (tmp_path / "requests.seen.legacy.bak").read_bytes() == legacy_bytes
+
+        df = self._get_journal_dupefilter(tmp_path)
+        assert df.request_seen(r1)
+        r2 = Request("https://example.com/2")
+        assert not df.request_seen(r2)
+        df.close("finished")
+
+    def test_migration_refuses_to_overwrite(self, tmp_path: Path) -> None:
+        with pytest.raises(JournalFormatError, match="No legacy"):
+            RFPDupeFilter.migrate_legacy_journal(str(tmp_path))
+
+        (tmp_path / "requests.seen").write_bytes(b"\x00\x01x")
+        (tmp_path / "requests.seen.journal").write_bytes(_JOURNAL_HEADER)
+        with pytest.raises(JournalFormatError, match="already exists"):
+            RFPDupeFilter.migrate_legacy_journal(str(tmp_path))
+        (tmp_path / "requests.seen.journal").unlink()
+
+        (tmp_path / "requests.seen.legacy.bak").write_bytes(b"old backup")
+        with pytest.raises(JournalFormatError, match="already exists"):
+            RFPDupeFilter.migrate_legacy_journal(str(tmp_path))
+        assert (tmp_path / "requests.seen").read_bytes() == b"\x00\x01x"
+        assert not (tmp_path / "requests.seen.journal").exists()
+
+    def test_short_write_failure_keeps_memory_and_disk_consistent(
+        self, tmp_path: Path
+    ) -> None:
+        r1 = Request("https://example.com/1")
+        r2 = Request("https://example.com/2")
+        df = self._get_journal_dupefilter(tmp_path)
+        df.request_seen(r1)
+        record1 = self._record(df, r1)
+        journal = tmp_path / "requests.seen.journal"
+
+        df.file = _TornFile(df.file, keep=10)  # type: ignore[assignment]
+        with pytest.raises(JournalWriteError):
+            df.request_seen(r2)
+        # The fingerprint did not enter the in-memory set, and the torn
+        # append was rolled back: memory and disk are consistent.
+        assert journal.read_bytes() == _JOURNAL_HEADER + record1
+
+        # The request is rescheduled on the next call and the append retried.
+        df.file = df.file._real
+        assert not df.request_seen(r2)
+        assert df.request_seen(r2)
+        record2 = self._record(df, r2)
+        assert journal.read_bytes() == _JOURNAL_HEADER + record1 + record2
+        df.close("finished")
+
+        resumed = self._get_journal_dupefilter(tmp_path)
+        assert resumed.request_seen(r1)
+        assert resumed.request_seen(r2)
+        assert not (tmp_path / "requests.seen.journal.orphan").exists()
+        resumed.close("finished")
+
+    def test_failed_rollback_is_cleaned_before_next_append(
+        self, tmp_path: Path
+    ) -> None:
+        r1 = Request("https://example.com/1")
+        r2 = Request("https://example.com/2")
+        df = self._get_journal_dupefilter(tmp_path)
+        df.request_seen(r1)
+        record1 = self._record(df, r1)
+        journal = tmp_path / "requests.seen.journal"
+
+        # The torn append cannot be rolled back either (failing disk).
+        df.file = _TornFile(df.file, keep=10, fail_truncate=True)  # type: ignore[assignment]
+        with pytest.raises(JournalWriteError):
+            df.request_seen(r2)
+        record2 = self._record(df, r2)
+        assert journal.read_bytes() == _JOURNAL_HEADER + record1 + record2[:10]
+
+        # The next successful append removes the torn tail first, so the
+        # journal only ever contains valid records.
+        df.file = df.file._real
+        assert not df.request_seen(r2)
+        assert journal.read_bytes() == _JOURNAL_HEADER + record1 + record2
+        df.close("finished")
+
+        resumed = self._get_journal_dupefilter(tmp_path)
+        assert resumed.request_seen(r1)
+        assert resumed.request_seen(r2)
+        assert not (tmp_path / "requests.seen.journal.orphan").exists()
+        resumed.close("finished")
+
+    def test_failed_rollback_tail_quarantined_on_reopen(self, tmp_path: Path) -> None:
+        r1 = Request("https://example.com/1")
+        r2 = Request("https://example.com/2")
+        df = self._get_journal_dupefilter(tmp_path)
+        df.request_seen(r1)
+        record1 = self._record(df, r1)
+        journal = tmp_path / "requests.seen.journal"
+
+        # The process "dies" right after the failed append: no retry, no
+        # cleanup. The torn tail is quarantined on the next open.
+        df.file = _TornFile(df.file, keep=10, fail_truncate=True)  # type: ignore[assignment]
+        with pytest.raises(JournalWriteError):
+            df.request_seen(r2)
+        record2 = self._record(df, r2)
+        df.file.close()
+
+        resumed = self._get_journal_dupefilter(tmp_path)
+        assert resumed.request_seen(r1)
+        assert not resumed.request_seen(r2)  # uncommitted: rescheduled
+        assert (tmp_path / "requests.seen.journal.orphan").read_bytes() == record2[:10]
+        assert journal.read_bytes() == _JOURNAL_HEADER + record1 + record2
+        resumed.close("finished")
+
+    def test_fsync_failure_keeps_memory_and_disk_consistent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        r1 = Request("https://example.com/1")
+        df = self._get_journal_dupefilter(tmp_path)
+
+        def failing_fsync(fd: int) -> None:
+            raise OSError("simulated fsync failure")
+
+        monkeypatch.setattr(scrapy.dupefilters.os, "fsync", failing_fsync)
+        with pytest.raises(JournalWriteError):
+            df.request_seen(r1)
+        monkeypatch.undo()
+
+        # Not in memory: the request is rescheduled and the append retried.
+        assert not df.request_seen(r1)
+        assert df.request_seen(r1)
+        df.close("finished")
+
+        resumed = self._get_journal_dupefilter(tmp_path)
+        assert resumed.request_seen(r1)
+        resumed.close("finished")
+
+    def test_close_is_idempotent(self, tmp_path: Path) -> None:
+        df = self._get_journal_dupefilter(tmp_path)
+        r1 = Request("https://example.com/1")
+        df.request_seen(r1)
+        df.close("finished")
+        df.close("finished")  # no-op, no error
+        assert df.file is None
+
+        resumed = self._get_journal_dupefilter(tmp_path)
+        assert resumed.request_seen(r1)
+        resumed.close("finished")
+
+    def test_failed_close_does_not_truncate_and_can_be_retried(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        df = self._get_journal_dupefilter(tmp_path)
+        r1 = Request("https://example.com/1")
+        df.request_seen(r1)
+        record1 = self._record(df, r1)
+
+        def failing_fsync(fd: int) -> None:
+            raise OSError("simulated fsync failure")
+
+        monkeypatch.setattr(scrapy.dupefilters.os, "fsync", failing_fsync)
+        with pytest.raises(OSError, match="simulated fsync failure"):
+            df.close("finished")
+        monkeypatch.undo()
+
+        # The file is still open for a retry, and the log was not truncated.
+        assert df.file is not None
+        df.close("finished")
+        assert df.file is None
+        journal = tmp_path / "requests.seen.journal"
+        assert journal.read_bytes() == _JOURNAL_HEADER + record1
+
+    def test_duplicate_request_appends_single_record(self, tmp_path: Path) -> None:
+        r1 = Request("https://example.com/1")
+        df = self._get_journal_dupefilter(tmp_path)
+        assert not df.request_seen(r1)
+        assert df.request_seen(r1)
+        journal = tmp_path / "requests.seen.journal"
+        assert journal.read_bytes() == _JOURNAL_HEADER + self._record(df, r1)
+        df.close("finished")
 
 
 class TestDiskDupeFilter(DupeFilterTestMixin):

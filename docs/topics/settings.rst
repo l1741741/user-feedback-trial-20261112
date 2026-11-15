@@ -1452,8 +1452,17 @@ interface:
 .. autoclass:: scrapy.dupefilters.BaseDupeFilter
 
 .. autoclass:: scrapy.dupefilters.RFPDupeFilter
+    :members: migrate_legacy_journal
 
 .. autoclass:: scrapy.dupefilters.DiskDupeFilter
+
+.. autoclass:: scrapy.dupefilters.DupeFilterJournalError
+
+.. autoclass:: scrapy.dupefilters.JournalFormatError
+
+.. autoclass:: scrapy.dupefilters.JournalCorruptionError
+
+.. autoclass:: scrapy.dupefilters.JournalWriteError
 
 
 .. setting:: DUPEFILTER_DEBUG
@@ -1465,6 +1474,28 @@ Default: ``False``
 
 By default, ``RFPDupeFilter`` only logs the first duplicate request.
 Setting :setting:`DUPEFILTER_DEBUG` to ``True`` will make it log all duplicate requests.
+
+.. setting:: DUPEFILTER_JOURNAL
+
+DUPEFILTER_JOURNAL
+------------------
+
+Default: ``False``
+
+When using :setting:`JOBDIR`, setting :setting:`DUPEFILTER_JOURNAL` to
+``True`` makes :class:`~scrapy.dupefilters.RFPDupeFilter` keep seen request
+fingerprints in a recoverable journal file (``requests.seen.journal``)
+instead of the legacy ``requests.seen`` file. The journal uses a versioned
+header and per-record checksums, syncs every record to disk before the
+fingerprint is considered seen, and applies explicit recovery rules on
+startup: uncommitted or truncated tail records are quarantined into
+``requests.seen.journal.orphan``, while mid-file corruption raises an error
+instead of being silently skipped. See :ref:`job-dir-dupefilter-journal` for
+the file format, the recovery and failure semantics, and how to migrate an
+existing ``requests.seen`` file.
+
+This setting has no effect on :class:`~scrapy.dupefilters.DiskDupeFilter`,
+which already stores fingerprints in a WAL-mode SQLite database.
 
 .. setting:: EDITOR
 

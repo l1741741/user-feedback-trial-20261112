@@ -200,7 +200,89 @@ Where:
     the ``info.json`` and ``q{00000}`` files.
 
 -   :class:`~scrapy.dupefilters.RFPDupeFilter` creates the ``requests.seen``
-    file.
+    file, or, with :setting:`DUPEFILTER_JOURNAL`, the
+    ``requests.seen.journal`` file (see :ref:`job-dir-dupefilter-journal`).
 
 -   :class:`~scrapy.extensions.spiderstate.SpiderState` creates the
     ``spider.state`` file.
+
+.. _job-dir-dupefilter-journal:
+
+Recoverable dupefilter journal
+==============================
+
+By default, :class:`~scrapy.dupefilters.RFPDupeFilter` stores the
+fingerprints of seen requests in the ``requests.seen`` file, a sequence of
+bare fingerprints with no checksums or commit markers. If the process exits
+in the middle of a write, the file can be left with a truncated tail that is
+silently dropped on the next run, and there is no way to tell a truncated
+tail apart from actual data corruption.
+
+Setting :setting:`DUPEFILTER_JOURNAL` to ``True`` switches
+:class:`~scrapy.dupefilters.RFPDupeFilter` to a recoverable journal file,
+``requests.seen.journal``, with the following layout:
+
+-   An 8-byte **versioned header**: the 6-byte magic ``b"SRFPJ\x00"``
+    followed by a big-endian, 2-byte format version (currently ``1``).
+
+-   A sequence of **records**, one per fingerprint: a big-endian, 2-byte
+    fingerprint length, the fingerprint itself, and a 4-byte CRC-32 checksum
+    of the length and fingerprint bytes.
+
+The **commit boundary** is the offset right after the last complete record
+with a valid checksum. A record becomes committed once it has been fully
+written, flushed and fsynced; only then is the fingerprint added to the
+in-memory set, so the in-memory set is always a subset of the committed
+on-disk records.
+
+On startup, only complete, checksum-valid records are recovered:
+
+-   An **uncommitted or truncated tail** (an incomplete record, or a record
+    with a bad checksum followed by no valid record, small enough to be a
+    single record) is *quarantined*: its bytes are appended to
+    ``requests.seen.journal.orphan`` for forensics, and the journal is
+    truncated to the commit boundary. Requests whose fingerprints were only
+    in the tail are simply scheduled again.
+
+-   **Mid-file corruption** (an invalid record with a valid record after it,
+    or an unparseable tail larger than any single record could be) raises
+    :class:`~scrapy.dupefilters.JournalCorruptionError`, which carries the
+    file ``path`` and the byte ``offset`` of the first invalid record. The
+    original file is left unmodified — corrupt data is never silently
+    skipped.
+
+-   A file that is not a journal at all, or uses an unsupported format
+    version, raises :class:`~scrapy.dupefilters.JournalFormatError` and is
+    left unmodified. An empty journal file is treated as a fresh journal
+    (a previous run crashed before writing the header) and re-initialized.
+
+If appending a record fails (write, flush or fsync error),
+:meth:`~scrapy.dupefilters.RFPDupeFilter.request_seen` raises
+:class:`~scrapy.dupefilters.JournalWriteError` and the fingerprint is *not*
+added to the in-memory set, keeping memory and disk consistent: the request
+is scheduled again later, which retries the append. The failed append is
+rolled back to the commit boundary on a best-effort basis; if the rollback
+itself fails, the torn tail is cleaned before the next append or quarantined
+on the next open. Closing the filter is idempotent, and a failed close never
+truncates the existing journal.
+
+Writing the same job directory from multiple processes at the same time is
+not supported.
+
+.. _job-dir-dupefilter-journal-migration:
+
+Migrating from the legacy format
+--------------------------------
+
+Journal mode never converts an existing ``requests.seen`` file implicitly:
+if one is found when journal mode is enabled,
+:class:`~scrapy.dupefilters.JournalFormatError` is raised. To convert
+explicitly, keeping the original file as ``requests.seen.legacy.bak``::
+
+    from scrapy.dupefilters import RFPDupeFilter
+
+    RFPDupeFilter.migrate_legacy_journal("/path/to/job/dir")
+
+The migration refuses to overwrite an existing journal or backup file. The
+legacy ``requests.seen`` format remains the default and is fully supported;
+it is only read or written when :setting:`DUPEFILTER_JOURNAL` is ``False``.
