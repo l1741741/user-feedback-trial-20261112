@@ -636,6 +636,69 @@ Example of image files stored using ``small`` and ``big`` thumbnail names::
 
 The first one is the full image, as downloaded from the site.
 
+.. _topics-images-focal-points:
+
+Focal point cropping for thumbnails
+-----------------------------------
+
+.. versionadded:: VERSION
+
+.. setting:: IMAGES_FOCAL_POINTS_FIELD
+
+By default thumbnails scale the whole image down, which can push the subject
+of an oddly proportioned product picture out of the frame. The Images
+Pipeline can instead crop each image around a focal point before scaling.
+
+The focal points live in an item field, ``image_focal_points`` by default,
+whose name can be changed with :setting:`IMAGES_FOCAL_POINTS_FIELD`. It is a
+list aligned with the image URLs of the same item: each entry is either
+``None``, which keeps the default thumbnail rule for that URL, or a pair of
+finite real numbers between 0 and 1:
+
+.. code-block:: python
+
+    {
+        "image_urls": [
+            "https://example.com/product/front.jpg",
+            "https://example.com/product/side.jpg",
+        ],
+        "image_focal_points": [(0.25, 0.4), None],
+    }
+
+The two numbers are the *x* and *y* coordinates of the focal point as
+fractions of the image width and height. ``(0, 0)`` is the top-left corner,
+``(1, 1)`` the bottom-right corner, and ``(0.5, 0.5)`` the center. The
+coordinates refer to the image after its :rfc:`EXIF orientation
+<5322#section-4.6.4>` has been applied, i.e. the orientation in which the
+full-size image is stored.
+
+For every thumbnail size, the pipeline first crops the largest window that
+has the thumbnail's width-to-height ratio, fits inside the image and contains
+the focal point. The window is centered on the focal point until it touches
+an edge of the image, after which it is clamped to that edge. The window is
+then scaled down with the usual thumbnail rule: it is never enlarged and no
+padding is ever added, so a window smaller than the thumbnail size is stored
+at its own size. This applies to very wide or very tall source images as
+well: the window simply spans the whole short dimension.
+
+Transparency is handled exactly as without a focal point: JPEG output
+flattens transparent pixels onto a white background, while
+:setting:`IMAGES_PRESERVE_FORMAT` keeps the alpha channel. Every thumbnail of
+an image is cropped independently from the same full-size pixels, so the
+thumbnails never affect one another, and the full-size image is stored
+uncropped.
+
+An entry that is not ``None`` or a two-coordinate pair, a coordinate that is
+not a finite number between 0 and 1 (including booleans), or a list whose
+length does not match the image URL list raises :exc:`ValueError` or
+:exc:`TypeError` while the item is processed, before anything is written.
+
+Focal points participate in caching. The stored file names and the internal
+request identity include the focal point, so the same URL requested by two
+items with different focal points is processed into separate files, and a
+request without a focal point always uses the default path and never reuses
+a focal-cropped result. Repeating the same item produces the same files.
+
 .. _preserving-image-format:
 
 Preserving the original image format
@@ -936,7 +999,10 @@ See here the methods that you can override in your custom Images Pipeline:
       property, or the ``response``, see :ref:`file-naming-response`.
 
       By default the :meth:`file_path` method returns
-      ``full/<request URL hash>.<extension>``.
+      ``full/<request URL hash>.<extension>``. When the request carries a
+      focal point (see :ref:`topics-images-focal-points`), a suffix derived
+      from that focal point is appended to the hash, so different focal
+      points never share a file.
 
    .. method:: ImagesPipeline.thumb_path(self, request, thumb_id, response=None, info=None, *, item=None)
 
@@ -955,7 +1021,8 @@ See here the methods that you can override in your custom Images Pipeline:
       property.
 
       By default the :meth:`thumb_path` method returns
-      ``thumbs/<size name>/<request URL hash>.<extension>``.
+      ``thumbs/<size name>/<request URL hash>.<extension>``, with the same
+      focal point suffix as :meth:`file_path` when a focal point applies.
 
 
    .. method:: ImagesPipeline.get_media_requests(item, info)
