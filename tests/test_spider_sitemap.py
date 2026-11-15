@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import gzip
+import html
+import logging
 import re
 from datetime import UTC, datetime
 from io import BytesIO
@@ -8,6 +10,7 @@ from logging import WARNING
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest import mock
+from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 
@@ -1050,3 +1053,747 @@ def test_iterloc_deprecated():
         locs = list(iterloc(entries))
 
     assert locs == ["http://www.example.com/"]
+
+
+def _sitemap_index(*locs: str) -> bytes:
+    entries = "".join(
+        f"<sitemap><loc>{html.escape(loc)}</loc></sitemap>" for loc in locs
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        f"{entries}</sitemapindex>"
+    ).encode()
+
+
+def _urlset(*locs: str) -> bytes:
+    entries = "".join(f"<url><loc>{html.escape(loc)}</loc></url>" for loc in locs)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        f"{entries}</urlset>"
+    ).encode()
+
+
+async def _crawl_in_memory(
+    spider: SitemapSpider,
+    bodies: dict[str, bytes],
+    *,
+    redirects: dict[str, str] | None = None,
+    max_requests: int = 100,
+) -> tuple[list[Request], list[Request]]:
+    """Run *spider* over the in-memory sitemaps of *bodies*.
+
+    *bodies* maps sitemap URLs to their body. *redirects* maps the URL of a
+    sitemap request to the URL that the response comes from, as an engine
+    would after a redirect. Return the requests that the spider produced for
+    sitemaps and for pages, in scheduling order.
+
+    *max_requests* stops the crawl, for spiders that follow a sitemap cycle.
+    """
+    # A fragment is not sent to the server, so bodies are also keyed without it.
+    by_body_url: dict[str, bytes] = {
+        urlunsplit((*urlsplit(url)[:4], "")): body for url, body in bodies.items()
+    }
+    by_body_url.update(bodies)
+    redirects = redirects or {}
+
+    queue = [request async for request in spider.start()]
+    sitemap_requests: list[Request] = []
+    page_requests: list[Request] = []
+    while queue and len(sitemap_requests) + len(page_requests) < max_requests:
+        request = queue.pop(0)
+        if request.callback != spider._parse_sitemap:
+            page_requests.append(request)
+            continue
+        sitemap_requests.append(request)
+        response_url = redirects.get(request.url, request.url)
+        body = by_body_url[urlunsplit((*urlsplit(response_url)[:4], ""))]
+        response = XmlResponse(url=response_url, body=body, request=request)
+        queue.extend(request.callback(response))
+    return sitemap_requests, page_requests
+
+
+class TestSitemapSpiderTraversal:
+    """Tests for the sitemap depth limit and deduplication."""
+
+    def test_max_depth_validation(self):
+        attributes = (
+            {"sitemap_max_depth": None},
+            {"sitemap_max_depth": 0},
+            {"sitemap_max_depth": 3},
+        )
+        for kwargs in attributes:
+            SitemapSpider("example.com", **kwargs)
+
+        for value in (True, False, 1.0, "1"):
+            with pytest.raises(TypeError, match="sitemap_max_depth"):
+                SitemapSpider("example.com", sitemap_max_depth=value)
+        for value in (-1, -10):
+            with pytest.raises(ValueError, match="sitemap_max_depth"):
+                SitemapSpider("example.com", sitemap_max_depth=value)
+
+    @pytest.mark.parametrize(
+        ("max_depth", "expected"),
+        [
+            (None, ["root.xml", "child.xml", "grandchild.xml", "page"]),
+            (0, ["root.xml"]),
+            (1, ["root.xml", "child.xml"]),
+        ],
+    )
+    @coroutine_test
+    async def test_max_depth(self, max_depth: int | None, expected: list[str]) -> None:
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = ["http://www.example.com/root.xml"]
+            sitemap_max_depth = max_depth
+
+        bodies = {
+            "http://www.example.com/root.xml": _sitemap_index(
+                "http://www.example.com/child.xml"
+            ),
+            "http://www.example.com/child.xml": _sitemap_index(
+                "http://www.example.com/grandchild.xml"
+            ),
+            "http://www.example.com/grandchild.xml": _urlset(
+                "http://www.example.com/page"
+            ),
+        }
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        sitemap_requests, page_requests = await _crawl_in_memory(spider, bodies)
+
+        names = [
+            "page" if request in page_requests else request.url.rsplit("/", 1)[-1]
+            for request in [*sitemap_requests, *page_requests]
+        ]
+        assert sorted(names) == sorted(expected)
+
+    @coroutine_test
+    async def test_max_depth_keeps_the_other_branches(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = [
+                "http://www.example.com/deep.xml",
+                "http://www.example.com/shallow.xml",
+            ]
+            sitemap_max_depth = 1
+
+        bodies = {
+            "http://www.example.com/deep.xml": _sitemap_index(
+                "http://www.example.com/deep-child.xml"
+            ),
+            "http://www.example.com/deep-child.xml": _sitemap_index(
+                "http://www.example.com/deep-grandchild.xml"
+            ),
+            "http://www.example.com/shallow.xml": _urlset(
+                "http://www.example.com/page"
+            ),
+        }
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        sitemap_requests, page_requests = await _crawl_in_memory(spider, bodies)
+
+        assert [request.url for request in sitemap_requests] == [
+            "http://www.example.com/deep.xml",
+            "http://www.example.com/shallow.xml",
+            "http://www.example.com/deep-child.xml",
+        ]
+        assert [request.url for request in page_requests] == [
+            "http://www.example.com/page"
+        ]
+
+    @coroutine_test
+    async def test_max_depth_does_not_hide_a_shallower_path(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = ["http://www.example.com/root.xml"]
+            sitemap_max_depth = 1
+
+        bodies = {
+            "http://www.example.com/root.xml": _sitemap_index(
+                "http://www.example.com/deep.xml",
+                "http://www.example.com/child.xml",
+            ),
+            "http://www.example.com/deep.xml": _sitemap_index(
+                "http://www.example.com/child.xml"
+            ),
+            "http://www.example.com/child.xml": _urlset("http://www.example.com/page"),
+        }
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        sitemap_requests, page_requests = await _crawl_in_memory(spider, bodies)
+
+        # child.xml, first seen at depth 2 through deep.xml, is at depth 1
+        # through root.xml, and is downloaded because of that second path.
+        assert [request.url for request in sitemap_requests] == [
+            "http://www.example.com/root.xml",
+            "http://www.example.com/deep.xml",
+            "http://www.example.com/child.xml",
+        ]
+        assert [request.url for request in page_requests] == [
+            "http://www.example.com/page"
+        ]
+
+    @pytest.mark.parametrize("max_depth", [0, 1])
+    @coroutine_test
+    async def test_max_depth_does_not_count_pages(self, max_depth: int):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = ["http://www.example.com/sitemap.xml"]
+            sitemap_max_depth = max_depth
+            sitemap_deduplicate = True
+
+        bodies = {
+            "http://www.example.com/sitemap.xml": _urlset(
+                "http://www.example.com/product/1"
+            ),
+        }
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        sitemap_requests, page_requests = await _crawl_in_memory(spider, bodies)
+
+        # The page is not a sitemap: the depth limit does not apply to it, and
+        # it is not registered in the sitemap deduplication ledger.
+        assert [request.url for request in sitemap_requests] == [
+            "http://www.example.com/sitemap.xml"
+        ]
+        assert [request.url for request in page_requests] == [
+            "http://www.example.com/product/1"
+        ]
+        assert spider._visited_sitemap_urls == {"http://www.example.com/sitemap.xml"}
+
+    @coroutine_test
+    async def test_deduplicate_cycle(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = ["http://www.example.com/a.xml"]
+            sitemap_deduplicate = True
+
+        bodies = {
+            "http://www.example.com/a.xml": _sitemap_index(
+                "http://www.example.com/b.xml"
+            ),
+            "http://www.example.com/b.xml": _sitemap_index(
+                "http://www.example.com/a.xml",
+                "http://www.example.com/c.xml",
+            ),
+            "http://www.example.com/c.xml": _urlset("http://www.example.com/page"),
+        }
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        sitemap_requests, page_requests = await _crawl_in_memory(spider, bodies)
+
+        assert [request.url for request in sitemap_requests] == [
+            "http://www.example.com/a.xml",
+            "http://www.example.com/b.xml",
+            "http://www.example.com/c.xml",
+        ]
+        assert [request.url for request in page_requests] == [
+            "http://www.example.com/page"
+        ]
+
+    @coroutine_test
+    async def test_no_deduplication_by_default(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = ["http://www.example.com/a.xml"]
+
+        bodies = {
+            "http://www.example.com/a.xml": _sitemap_index(
+                "http://www.example.com/b.xml"
+            ),
+            "http://www.example.com/b.xml": _sitemap_index(
+                "http://www.example.com/a.xml"
+            ),
+        }
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        sitemap_requests, _ = await _crawl_in_memory(spider, bodies, max_requests=4)
+        assert [request.url for request in sitemap_requests] == [
+            "http://www.example.com/a.xml",
+            "http://www.example.com/b.xml",
+            "http://www.example.com/a.xml",
+            "http://www.example.com/b.xml",
+        ]
+        assert all(
+            "_sitemap_index_depth" not in request.meta for request in sitemap_requests
+        )
+
+    @coroutine_test
+    async def test_max_depth_is_disabled_by_default(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = ["http://www.example.com/root.xml"]
+
+        bodies = {
+            "http://www.example.com/root.xml": _sitemap_index(
+                "http://www.example.com/child.xml"
+            ),
+            "http://www.example.com/child.xml": _sitemap_index(
+                "http://www.example.com/grandchild.xml"
+            ),
+            "http://www.example.com/grandchild.xml": _urlset(
+                "http://www.example.com/page"
+            ),
+        }
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        _, page_requests = await _crawl_in_memory(spider, bodies)
+        assert [request.url for request in page_requests] == [
+            "http://www.example.com/page"
+        ]
+
+    @coroutine_test
+    async def test_deduplicate_relative_urls_and_fragments(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = ["http://www.example.com/sitemaps/index.xml"]
+            sitemap_deduplicate = True
+
+        bodies = {
+            "http://www.example.com/sitemaps/index.xml": _sitemap_index(
+                "child.xml#section",
+                "child.xml",
+                "/sitemaps/child.xml#other",
+            ),
+            "http://www.example.com/sitemaps/child.xml": _urlset(
+                "http://www.example.com/page"
+            ),
+        }
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        sitemap_requests, _ = await _crawl_in_memory(spider, bodies)
+
+        # The first spelling of the URL wins, fragment included, and the
+        # others are recognized as the same sitemap.
+        assert [request.url for request in sitemap_requests] == [
+            "http://www.example.com/sitemaps/index.xml",
+            "http://www.example.com/sitemaps/child.xml#section",
+        ]
+
+    @pytest.mark.parametrize(
+        ("second", "expected"),
+        [
+            ("child.xml?b=2&a=1", 1),
+            ("child.xml?a=1&b=2", 2),
+            ("child.xml#fragment", 2),
+        ],
+        ids=["same-query", "reordered-query", "same-query-no-fragment"],
+    )
+    @coroutine_test
+    async def test_deduplicate_query_strings(self, second: str, expected: int) -> None:
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = ["http://www.example.com/index.xml"]
+            sitemap_deduplicate = True
+
+        bodies = {
+            "http://www.example.com/index.xml": _sitemap_index(
+                "child.xml?b=2&a=1", second
+            ),
+            "http://www.example.com/child.xml?b=2&a=1": _urlset(),
+            "http://www.example.com/child.xml?a=1&b=2": _urlset(),
+            "http://www.example.com/child.xml": _urlset(),
+        }
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        sitemap_requests, _ = await _crawl_in_memory(spider, bodies)
+
+        assert len(sitemap_requests) == 1 + expected
+
+    @coroutine_test
+    async def test_deduplicate_does_not_merge_schemes(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = ["https://www.example.com/index.xml"]
+            sitemap_deduplicate = True
+
+        bodies = {
+            "https://www.example.com/index.xml": _sitemap_index(
+                "https://www.example.com/child.xml",
+                "http://www.example.com/child.xml",
+            ),
+            "https://www.example.com/child.xml": _urlset(),
+            "http://www.example.com/child.xml": _urlset(),
+        }
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        sitemap_requests, _ = await _crawl_in_memory(spider, bodies)
+
+        assert [request.url for request in sitemap_requests] == [
+            "https://www.example.com/index.xml",
+            "https://www.example.com/child.xml",
+            "http://www.example.com/child.xml",
+        ]
+
+    @coroutine_test
+    async def test_deduplicate_page_urls(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = [
+                "http://www.example.com/one.xml",
+                "http://www.example.com/two.xml",
+            ]
+            sitemap_deduplicate = True
+
+        bodies = {
+            "http://www.example.com/one.xml": _urlset(
+                "http://www.example.com/product/1"
+            ),
+            "http://www.example.com/two.xml": _urlset(
+                "http://www.example.com/product/1"
+            ),
+        }
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        sitemap_requests, page_requests = await _crawl_in_memory(spider, bodies)
+
+        assert [request.url for request in sitemap_requests] == [
+            "http://www.example.com/one.xml",
+            "http://www.example.com/two.xml",
+        ]
+        assert [request.url for request in page_requests] == [
+            "http://www.example.com/product/1",
+            "http://www.example.com/product/1",
+        ]
+
+    @coroutine_test
+    async def test_deduplicate_start_urls(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = [
+                "http://www.example.com/sitemap.xml",
+                "http://www.example.com/sitemap.xml#fragment",
+            ]
+            sitemap_deduplicate = True
+
+        bodies = {
+            "http://www.example.com/sitemap.xml": _urlset("http://www.example.com/page")
+        }
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        sitemap_requests, page_requests = await _crawl_in_memory(spider, bodies)
+
+        assert [request.url for request in sitemap_requests] == [
+            "http://www.example.com/sitemap.xml"
+        ]
+        assert [request.url for request in page_requests] == [
+            "http://www.example.com/page"
+        ]
+
+    @coroutine_test
+    async def test_deduplicate_robots_txt_response(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = ["http://www.example.com/robots.txt"]
+            sitemap_deduplicate = True
+
+        robots = (
+            b"Sitemap: http://www.example.com/sitemap.xml\n"
+            b"Sitemap: http://www.example.com/sitemap.xml#again\n"
+        )
+        bodies = {
+            "http://www.example.com/robots.txt": robots,
+            "http://www.example.com/sitemap.xml": _urlset(
+                "http://www.example.com/page"
+            ),
+        }
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        sitemap_requests, page_requests = await _crawl_in_memory(spider, bodies)
+
+        assert [request.url for request in sitemap_requests] == [
+            "http://www.example.com/robots.txt",
+            "http://www.example.com/sitemap.xml",
+        ]
+        assert [request.url for request in page_requests] == [
+            "http://www.example.com/page"
+        ]
+
+    def test_deduplicate_robots_parsed_signal_and_response_share_the_ledger(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_deduplicate = True
+
+        crawler = get_crawler(_Spider, settings_dict={"ROBOTSTXT_OBEY": True})
+        spider = _Spider.from_crawler(crawler)
+        crawler.engine = mock.MagicMock()
+        spider._signal_only_netlocs.add("www.example.com")
+
+        class FakeRobotParser:
+            def sitemaps(self):
+                return ["/sitemap.xml", "/other.xml"]
+
+        crawler.signals.send_catch_log(
+            signal=signals.robots_parsed,
+            robotparser=FakeRobotParser(),
+            request=Request("http://www.example.com/some/page"),
+            response=TextResponse("http://www.example.com/robots.txt"),
+        )
+        assert crawler.engine.crawl.call_count == 2
+
+        robots_response = TextResponse(
+            url="http://www.example.com/robots.txt",
+            body=(
+                b"Sitemap: http://www.example.com/sitemap.xml\n"
+                b"Sitemap: http://www.example.com/new.xml\n"
+            ),
+        )
+        scheduled = list(spider._parse_sitemap(robots_response))
+        assert [request.url for request in scheduled] == [
+            "http://www.example.com/new.xml"
+        ]
+
+    def test_deduplicate_robots_response_then_signal(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_deduplicate = True
+
+        crawler = get_crawler(_Spider, settings_dict={"ROBOTSTXT_OBEY": True})
+        spider = _Spider.from_crawler(crawler)
+        crawler.engine = mock.MagicMock()
+
+        robots_response = TextResponse(
+            url="http://www.example.com/robots.txt",
+            body=b"Sitemap: http://www.example.com/sitemap.xml\n",
+        )
+        assert [request.url for request in spider._parse_sitemap(robots_response)] == [
+            "http://www.example.com/sitemap.xml"
+        ]
+
+        spider._signal_only_netlocs.add("www.example.com")
+
+        class FakeRobotParser:
+            def sitemaps(self):
+                return ["/sitemap.xml", "/other.xml"]
+
+        crawler.signals.send_catch_log(
+            signal=signals.robots_parsed,
+            robotparser=FakeRobotParser(),
+            request=Request("http://www.example.com/some/page"),
+            response=TextResponse("http://www.example.com/robots.txt"),
+        )
+        crawler.engine.crawl.assert_called_once()
+        assert crawler.engine.crawl.call_args[0][0].url == (
+            "http://www.example.com/other.xml"
+        )
+
+    def test_deduplicate_recovers_after_request_build_failure(self):
+        calls = []
+
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_deduplicate = True
+
+            def sitemap_request(self, loc, callback, entry, *, source, response):
+                calls.append(loc)
+                if len(calls) == 1:
+                    raise RuntimeError("boom")
+                return super().sitemap_request(
+                    loc, callback, entry, source=source, response=response
+                )
+
+        spider = _Spider("example.com")
+        response = TextResponse(
+            url="http://www.example.com/index.xml",
+            body=_sitemap_index("http://www.example.com/child.xml"),
+        )
+
+        with pytest.raises(RuntimeError, match="boom"):
+            list(spider._parse_sitemap(response))
+
+        assert [request.url for request in spider._parse_sitemap(response)] == [
+            "http://www.example.com/child.xml"
+        ]
+
+    @coroutine_test
+    async def test_deduplicate_after_redirect_self_reference(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = ["http://www.example.com/old.xml"]
+            sitemap_deduplicate = True
+
+        bodies = {
+            "http://www.example.com/new.xml": _sitemap_index(
+                "http://www.example.com/new.xml",
+                "http://www.example.com/old.xml",
+                "http://www.example.com/child.xml",
+            ),
+            "http://www.example.com/child.xml": _urlset(),
+        }
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        sitemap_requests, _ = await _crawl_in_memory(
+            spider,
+            bodies,
+            redirects={
+                "http://www.example.com/old.xml": "http://www.example.com/new.xml"
+            },
+        )
+
+        # The index links to both the URL it was requested with and the final
+        # one; neither makes the spider download it again.
+        assert [request.url for request in sitemap_requests] == [
+            "http://www.example.com/old.xml",
+            "http://www.example.com/child.xml",
+        ]
+
+    def test_deduplicate_is_per_spider(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_deduplicate = True
+
+        response = TextResponse(
+            url="http://www.example.com/index.xml",
+            body=_sitemap_index("http://www.example.com/child.xml"),
+        )
+        first = _Spider("example.com")
+        second = _Spider("example.com")
+
+        assert [request.url for request in first._parse_sitemap(response)] == [
+            "http://www.example.com/child.xml"
+        ]
+        assert list(first._parse_sitemap(response)) == []
+        assert [request.url for request in second._parse_sitemap(response)] == [
+            "http://www.example.com/child.xml"
+        ]
+
+    def test_sitemap_request_inputs_are_not_modified(self):
+        entry_loc = "http://www.example.com/child.xml"
+        built = []
+
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_max_depth = 2
+
+            def sitemap_request(self, loc, callback, entry, *, source, response):
+                request = Request(loc, callback, meta={"shared": True})
+                built.append(request)
+                return request
+
+        spider = _Spider("example.com")
+        request = Request("http://www.example.com/index.xml", meta={"shared": True})
+        response = TextResponse(
+            url="http://www.example.com/index.xml",
+            body=_sitemap_index(entry_loc),
+            request=request,
+        )
+
+        requests = list(spider._parse_sitemap(response))
+
+        assert entry_loc == "http://www.example.com/child.xml"
+        assert response.meta == {"shared": True}
+        assert request.meta == {"shared": True}
+        assert built[0].meta == {"shared": True}
+        assert requests[0].meta == {"shared": True, "_sitemap_index_depth": 1}
+        assert requests[0] is not built[0]
+
+    def test_sitemap_request_receives_source_entry_and_response(self):
+        calls = []
+
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_max_depth = 1
+
+            def sitemap_request(self, loc, callback, entry, *, source, response):
+                calls.append((loc, source, entry, response))
+                return super().sitemap_request(
+                    loc, callback, entry, source=source, response=response
+                )
+
+        spider = _Spider("example.com")
+        response = TextResponse(
+            url="http://www.example.com/index.xml",
+            body=_sitemap_index("http://www.example.com/child.xml"),
+        )
+
+        assert list(spider._parse_sitemap(response))
+        assert calls == [
+            (
+                "http://www.example.com/child.xml",
+                "sitemapindex",
+                {"loc": "http://www.example.com/child.xml"},
+                response,
+            )
+        ]
+
+    def test_deduplicate_does_not_log_credentials(self, caplog):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_deduplicate = True
+
+        spider = _Spider("example.com")
+        response = TextResponse(
+            url="http://www.example.com/index.xml",
+            body=_sitemap_index(
+                "http://user:secret@www.example.com/child.xml",
+                "http://user:secret@www.example.com/child.xml#again",
+            ),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="scrapy.spiders.sitemap"):
+            requests = list(spider._parse_sitemap(response))
+
+        assert [request.url for request in requests] == [
+            "http://user:secret@www.example.com/child.xml"
+        ]
+        messages = [record.getMessage() for record in caplog.records]
+        assert messages
+        assert all("secret" not in message for message in messages)
+
+    def test_max_depth_log_does_not_include_credentials(self, caplog):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_max_depth = 0
+
+        spider = _Spider("example.com")
+        response = TextResponse(
+            url="http://www.example.com/index.xml",
+            body=_sitemap_index("http://user:secret@www.example.com/child.xml"),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="scrapy.spiders.sitemap"):
+            assert list(spider._parse_sitemap(response)) == []
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert messages
+        assert all("secret" not in message for message in messages)
+
+    def test_depth_of_a_response_without_request(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_max_depth = 0
+
+        spider = _Spider("example.com")
+        response = TextResponse(
+            url="http://www.example.com/index.xml",
+            body=_sitemap_index("http://www.example.com/child.xml"),
+        )
+        assert response.request is None
+
+        # Without a request, the sitemap is treated as a root one, and the
+        # sitemap linked from it is above the limit.
+        assert list(spider._parse_sitemap(response)) == []
+
+    @coroutine_test
+    async def test_deduplicate_invalid_start_url(self):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_urls = ["http://example.com:bad/x.xml"]
+            sitemap_deduplicate = True
+
+        spider = _Spider.from_crawler(get_crawler(_Spider))
+        # An unparsable URL is not registered in the ledger, and still fails
+        # to build a request, as it did without deduplication.
+        with pytest.raises(ValueError, match="Port"):
+            async for _ in spider.start():
+                pass
+
+    def test_max_depth_log_for_an_invalid_url(self, caplog):
+        class _Spider(SitemapSpider):
+            name = "test"
+            sitemap_max_depth = 0
+
+        spider = _Spider("example.com")
+        response = TextResponse(
+            url="http://www.example.com/index.xml",
+            body=_sitemap_index("http://example.com:bad/x.xml"),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="scrapy.spiders.sitemap"):
+            assert list(spider._parse_sitemap(response)) == []
+
+        assert caplog.record_tuples == [
+            (
+                "scrapy.spiders.sitemap",
+                logging.DEBUG,
+                "Ignoring sitemap at depth 1, above sitemap_max_depth=0: <invalid URL>",
+            )
+        ]

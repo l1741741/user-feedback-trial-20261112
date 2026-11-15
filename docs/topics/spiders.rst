@@ -547,6 +547,32 @@ whose url contains ``/sitemap_shop``:
         def parse_shop(self, response):
             pass  # ... scrape shop here ...
 
+Limit how deeply sitemap indexes are followed, and download each sitemap only
+once:
+
+.. code-block:: python
+
+    from scrapy.spiders import SitemapSpider
+
+
+    class MySpider(SitemapSpider):
+        sitemap_urls = ["http://www.example.com/robots.txt"]
+        sitemap_rules = [
+            ("/product/", "parse_product"),
+        ]
+        sitemap_max_depth = 1
+        sitemap_deduplicate = True
+
+        def parse_product(self, response):
+            pass  # ... scrape product ...
+
+Here, the sitemaps declared in :file:`robots.txt` are at depth 0, the sitemaps
+that they link to from a sitemap index are at depth 1, and the next level is
+not downloaded. Sitemaps reachable through several paths are downloaded only
+once. Both attributes are disabled by default, which preserves the previous
+behavior: no depth limit, and every link is followed as many times as it
+appears.
+
 Combine SitemapSpider with other sources of urls:
 
 .. code-block:: python
