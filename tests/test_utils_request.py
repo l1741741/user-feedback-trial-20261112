@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import gc
+import hashlib
 import json
+import weakref
+from collections import OrderedDict
 from hashlib import sha1
 from typing import TYPE_CHECKING, Any, Protocol
 from weakref import WeakKeyDictionary
@@ -9,6 +13,7 @@ import pytest
 
 from scrapy.http import Request
 from scrapy.utils.request import (
+    _FINGERPRINT_CACHE_MAX_SIZE,
     _fingerprint_cache,
     fingerprint,
     request_httprepr,
@@ -77,11 +82,11 @@ class TestFingerprint:
     cache: (
         WeakKeyDictionary[
             Request,
-            dict[tuple[tuple[bytes, ...] | None, bool, bool, str | None], bytes],
+            OrderedDict[tuple[tuple[bytes, ...] | None, bool, bool, str | None], bytes],
         ]
         | WeakKeyDictionary[
             Request,
-            dict[tuple[tuple[bytes, ...] | None, bool, bool, str | None], str],
+            OrderedDict[tuple[tuple[bytes, ...] | None, bool, bool, str | None], str],
         ]
     ) = _fingerprint_cache
     default_cache_key = (None, False, False, None)
@@ -316,6 +321,156 @@ class TestFingerprint:
         ]
         expected = [_fingerprint for _, _fingerprint, _ in self.known_hashes]
         assert actual == expected
+
+
+class TestFingerprintCacheBounds:
+    """Tests for the bounded per-request cache of fingerprint combinations."""
+
+    @staticmethod
+    def _combinations(count: int) -> list[dict[str, list[str]]]:
+        return [{"include_headers": [f"X-H{i}"]} for i in range(count)]
+
+    @staticmethod
+    def _cache_key(header: str) -> tuple[tuple[bytes, ...], bool, bool, None]:
+        return ((header.encode(),), False, False, None)
+
+    def test_max_size_is_32(self):
+        assert _FINGERPRINT_CACHE_MAX_SIZE == 32
+
+    def test_cache_bounded_at_max_size(self):
+        r = Request("http://www.example.com/")
+        for kwargs in self._combinations(_FINGERPRINT_CACHE_MAX_SIZE):
+            fingerprint(r, **kwargs)
+        assert len(_fingerprint_cache[r]) == _FINGERPRINT_CACHE_MAX_SIZE
+        fingerprint(r, include_headers=["X-H-overflow"])
+        assert len(_fingerprint_cache[r]) == _FINGERPRINT_CACHE_MAX_SIZE
+
+    def test_lru_eviction_order(self):
+        r = Request("http://www.example.com/")
+        combos = self._combinations(_FINGERPRINT_CACHE_MAX_SIZE)
+        for kwargs in combos:
+            fingerprint(r, **kwargs)
+        # Refresh the first combination, making the second one the least
+        # recently used.
+        fingerprint(r, **combos[0])
+        fingerprint(r, include_headers=["X-H-overflow"])
+        cache = _fingerprint_cache[r]
+        assert len(cache) == _FINGERPRINT_CACHE_MAX_SIZE
+        assert self._cache_key("x-h1") not in cache
+        assert self._cache_key("x-h0") in cache
+        assert self._cache_key("x-h-overflow") in cache
+
+    def test_evicted_combination_is_recomputed(self, monkeypatch):
+        calls = 0
+        real_sha1 = hashlib.sha1
+
+        def counting_sha1(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return real_sha1(*args, **kwargs)
+
+        monkeypatch.setattr(hashlib, "sha1", counting_sha1)
+        r = Request("http://www.example.com/")
+        combos = self._combinations(_FINGERPRINT_CACHE_MAX_SIZE)
+        for kwargs in combos:
+            fingerprint(r, **kwargs)
+        assert calls == _FINGERPRINT_CACHE_MAX_SIZE
+        fingerprint(r, **combos[0])  # cache hit, no recomputation
+        assert calls == _FINGERPRINT_CACHE_MAX_SIZE
+        fingerprint(r, include_headers=["X-H-overflow"])  # evicts combos[1]
+        assert calls == _FINGERPRINT_CACHE_MAX_SIZE + 1
+        fingerprint(r, **combos[1])  # evicted, recomputed
+        assert calls == _FINGERPRINT_CACHE_MAX_SIZE + 2
+        fingerprint(r, **combos[0])  # refreshed earlier, still cached
+        assert calls == _FINGERPRINT_CACHE_MAX_SIZE + 2
+
+    def test_fingerprint_bytes_stable_across_eviction(self):
+        r = Request("https://example.org#a", headers={"A": b"B"})
+        expected = b"]\xc7\x1f\xf2\xafG2\xbc\xa4\xfa\x99\n33\xda\x18\x94\x81U."
+        assert fingerprint(r, include_headers=["A"]) == expected
+        for kwargs in self._combinations(_FINGERPRINT_CACHE_MAX_SIZE):
+            fingerprint(r, **kwargs)
+        assert self._cache_key("a") not in _fingerprint_cache[r]
+        assert fingerprint(r, include_headers=["A"]) == expected
+
+    @pytest.mark.parametrize(
+        "equivalent",
+        [
+            ["a", "B"],
+            ["B", "a"],
+            ("A", "b"),
+            ("b", "A"),
+        ],
+    )
+    def test_equivalent_include_headers_share_a_slot(self, equivalent):
+        r = Request("http://www.example.com/")
+        fp1 = fingerprint(r, include_headers=["A", "b"])
+        fp2 = fingerprint(r, include_headers=equivalent)
+        assert fp1 == fp2
+        assert len(_fingerprint_cache[r]) == 1
+
+    def test_generator_include_headers_consumed_once(self):
+        r = Request("http://www.example.com/", headers={"A": "1", "B": "2"})
+        gen = (h for h in ["A", "B"])
+        fp = fingerprint(r, include_headers=gen)
+        assert list(gen) == []
+        r2 = Request("http://www.example.com/", headers={"A": "1", "B": "2"})
+        assert fp == fingerprint(r2, include_headers=["a", "b"])
+        assert len(_fingerprint_cache[r]) == 1
+
+    def test_failed_computation_not_cached(self, monkeypatch):
+        r = Request("http://www.example.com/")
+
+        def failing_dumps(*args, **kwargs):
+            raise ValueError("boom")
+
+        monkeypatch.setattr(json, "dumps", failing_dumps)
+        with pytest.raises(ValueError, match="boom"):
+            fingerprint(r, include_headers=["X-Err"])
+        assert self._cache_key("x-err") not in _fingerprint_cache.get(r, {})
+        monkeypatch.undo()
+        fp = fingerprint(r, include_headers=["X-Err"])
+        assert _fingerprint_cache[r][self._cache_key("x-err")] == fp
+
+    def test_keep_fragments_combinations(self):
+        r = Request("http://www.example.com/#fragment")
+        fp_default = fingerprint(r)
+        fp_keep = fingerprint(r, keep_fragments=True)
+        assert fp_default != fp_keep
+        assert len(_fingerprint_cache[r]) == 2
+        assert fingerprint(r) == fp_default
+        assert fingerprint(r, keep_fragments=True) == fp_keep
+        assert len(_fingerprint_cache[r]) == 2
+
+    def test_requests_have_separate_caches(self):
+        r1 = Request("http://www.example.com/1")
+        r2 = Request("http://www.example.com/2")
+        for kwargs in self._combinations(_FINGERPRINT_CACHE_MAX_SIZE + 1):
+            fingerprint(r1, **kwargs)
+        fingerprint(r2, include_headers=["X-H0"])
+        assert _fingerprint_cache[r1] is not _fingerprint_cache[r2]
+        assert len(_fingerprint_cache[r1]) == _FINGERPRINT_CACHE_MAX_SIZE
+        assert len(_fingerprint_cache[r2]) == 1
+
+    def test_cache_stores_only_bytes(self):
+        r = Request("http://www.example.com/")
+        for kwargs in self._combinations(3):
+            fingerprint(r, **kwargs)
+        assert len(_fingerprint_cache[r]) == 3
+        for value in _fingerprint_cache[r].values():
+            assert isinstance(value, bytes)
+            assert len(value) == 20
+
+    def test_cache_released_with_request(self):
+        before = len(_fingerprint_cache)
+        r = Request("http://www.example.com/")
+        fingerprint(r, include_headers=["X-H0"])
+        assert len(_fingerprint_cache) == before + 1
+        ref = weakref.ref(r)
+        del r
+        gc.collect()
+        assert ref() is None
+        assert len(_fingerprint_cache) == before
 
 
 class TestRequestFingerprinter:

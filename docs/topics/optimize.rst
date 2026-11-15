@@ -310,6 +310,13 @@ Lowering memory usage
     :class:`~scrapy.dupefilters.DiskDupeFilter` to keep the fingerprint of
     every sent request on disk instead of in memory.
 
+-   The :ref:`per-request fingerprint cache <request-fingerprint-cache>` is
+    limited to 32 combinations per request and uses weak references, so
+    requests that stay in memory for a long time do not accumulate
+    fingerprints without bounds. If you implement a
+    :ref:`custom request fingerprinter <custom-request-fingerprinter>` with
+    its own cache, apply a similar bound.
+
 -   Set :setting:`MEDIA_CACHE_SIZE` if you use :ref:`media pipelines
     <topics-media-pipeline>`.
 

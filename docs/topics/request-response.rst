@@ -310,6 +310,19 @@ By default, request fingerprinting canonicalizes the request URL. If
 canonicalize the URL, and the ``keep_fragments`` parameter is ignored (it is
 effectively true).
 
+.. _request-fingerprint-cache:
+
+Fingerprints computed by :func:`scrapy.utils.request.fingerprint` are cached
+per request, so that repeated calls with equal parameters do not recompute
+them. Header names passed through *include_headers* are lowercased and
+sorted before caching, so combinations that differ only in letter case or
+order share a single cache entry. The cache of a single request holds at
+most 32 combinations of the parameters and request attributes that affect
+the fingerprint; once that limit is reached, caching a new combination
+evicts the least recently used one, which is recomputed if requested again.
+Cached fingerprints of a request are released when the request itself is
+garbage collected.
+
 For example, to take the value of a request header named ``X-ID`` into
 account:
 

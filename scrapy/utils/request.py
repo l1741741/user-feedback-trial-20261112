@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Protocol, Self
 from urllib.parse import urlunparse
 from weakref import WeakKeyDictionary
@@ -28,8 +29,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Maximum number of fingerprint combinations cached per request. Requests
+# that stay alive for a long time (e.g. retried with different
+# include_headers values) would otherwise accumulate cache entries without
+# bounds.
+_FINGERPRINT_CACHE_MAX_SIZE = 32
+
 _fingerprint_cache: WeakKeyDictionary[
-    Request, dict[tuple[tuple[bytes, ...] | None, bool, bool, str | None], bytes]
+    Request, OrderedDict[tuple[tuple[bytes, ...] | None, bool, bool, str | None], bytes]
 ] = WeakKeyDictionary()
 
 
@@ -70,11 +77,19 @@ def fingerprint(
     keep_fragments is not a substitute for rendering JavaScript to reach
     content loaded based on the URL fragment; see
     :ref:`topics-dynamic-content` for that instead.
+
+    .. versionchanged:: VERSION
+       The per-request cache of computed fingerprints is limited to 32
+       combinations of the parameters and request attributes that affect
+       the fingerprint. When that limit is reached, the least recently
+       used combination is evicted and recomputed if requested again.
     """
     processed_include_headers: tuple[bytes, ...] | None = None
     if include_headers:
+        # Normalize (lowercase) before sorting so that combinations that
+        # differ only in header name case or order share a cache entry.
         processed_include_headers = tuple(
-            to_bytes(h.lower()) for h in sorted(include_headers)
+            sorted(to_bytes(h.lower()) for h in include_headers)
         )
     verbatim_url = bool(request.meta.get("verbatim_url"))
     effective_keep_fragments = keep_fragments and not verbatim_url
@@ -83,41 +98,44 @@ def fingerprint(
     handler_id: str | None = request.meta.get("download_handler")
     if handler_id is not None and handler_id == urlparse_cached(request).scheme:
         handler_id = None
-    cache = _fingerprint_cache.setdefault(request, {})
+    cache = _fingerprint_cache.setdefault(request, OrderedDict())
     cache_key = (
         processed_include_headers,
         effective_keep_fragments,
         verbatim_url,
         handler_id,
     )
-    if cache_key not in cache:
-        # To decode bytes reliably (JSON does not support bytes), regardless of
-        # character encoding, we use bytes.hex()
-        headers: dict[str, list[str]] = {}
-        if processed_include_headers:
-            for header in processed_include_headers:
-                if header in request.headers:
-                    headers[header.hex()] = [
-                        header_value.hex()
-                        for header_value in request.headers.getlist(header)
-                    ]
-        if verbatim_url:
-            url = request.url
-        else:
-            url = canonicalize_url(request.url, keep_fragments=keep_fragments)
-        fingerprint_data = {
-            "method": request.method,
-            "url": url,
-            "body": (request.body or b"").hex(),
-            "headers": headers,
-        }
-        if handler_id is not None:
-            fingerprint_data["download_handler"] = handler_id
-        fingerprint_json = json.dumps(fingerprint_data, sort_keys=True)
-        cache[cache_key] = hashlib.sha1(  # noqa: S324
-            fingerprint_json.encode()
-        ).digest()
-    return cache[cache_key]
+    if cache_key in cache:
+        cache.move_to_end(cache_key)
+        return cache[cache_key]
+    # To decode bytes reliably (JSON does not support bytes), regardless of
+    # character encoding, we use bytes.hex()
+    headers: dict[str, list[str]] = {}
+    if processed_include_headers:
+        for header in processed_include_headers:
+            if header in request.headers:
+                headers[header.hex()] = [
+                    header_value.hex()
+                    for header_value in request.headers.getlist(header)
+                ]
+    if verbatim_url:
+        url = request.url
+    else:
+        url = canonicalize_url(request.url, keep_fragments=keep_fragments)
+    fingerprint_data = {
+        "method": request.method,
+        "url": url,
+        "body": (request.body or b"").hex(),
+        "headers": headers,
+    }
+    if handler_id is not None:
+        fingerprint_data["download_handler"] = handler_id
+    fingerprint_json = json.dumps(fingerprint_data, sort_keys=True)
+    digest = hashlib.sha1(fingerprint_json.encode()).digest()  # noqa: S324
+    if len(cache) >= _FINGERPRINT_CACHE_MAX_SIZE:
+        cache.popitem(last=False)
+    cache[cache_key] = digest
+    return digest
 
 
 class RequestFingerprinterProtocol(Protocol):
