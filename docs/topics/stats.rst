@@ -705,6 +705,42 @@ one per actual value of the placeholder.
     custom *stats_base_key*, in which case ``retry`` is replaced with that key
     in the 3 stats above.
 
+.. stat:: retry_after/accepted
+
+``retry_after/accepted``
+    Number of responses whose valid ``Retry-After`` header started a wait
+    before their retry.
+
+    Set by :class:`~scrapy.downloadermiddlewares.retry.RetryMiddleware` when
+    :setting:`RETRY_AFTER_ENABLED` is enabled.
+
+.. stat:: retry_after/cancelled
+
+``retry_after/cancelled``
+    Number of accepted waits cancelled before they elapsed, e.g. because the
+    spider closed. A cancelled wait does not schedule its retry.
+
+    Set by :class:`~scrapy.downloadermiddlewares.retry.RetryMiddleware` when
+    :setting:`RETRY_AFTER_ENABLED` is enabled.
+
+.. stat:: retry_after/invalid
+
+``retry_after/invalid``
+    Number of responses whose ``Retry-After`` header could not be used. The
+    request is retried immediately through the regular retry path instead.
+
+    Set by :class:`~scrapy.downloadermiddlewares.retry.RetryMiddleware` when
+    :setting:`RETRY_AFTER_ENABLED` is enabled.
+
+.. stat:: retry_after/waited_seconds
+
+``retry_after/waited_seconds``
+    Total time actually spent in completed Retry-After waits, in seconds.
+    Cancelled waits do not contribute.
+
+    Set by :class:`~scrapy.downloadermiddlewares.retry.RetryMiddleware` when
+    :setting:`RETRY_AFTER_ENABLED` is enabled.
+
 .. stat:: robotstxt/exception_count/{exception_type}
 
 ``robotstxt/exception_count/{exception_type}``

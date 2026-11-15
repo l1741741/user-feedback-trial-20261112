@@ -1152,6 +1152,10 @@ RetryMiddleware
    A middleware to retry failed requests that are potentially caused by
    temporary problems such as a connection timeout or HTTP 500 error.
 
+   When :setting:`RETRY_AFTER_ENABLED` is enabled, a retried response carrying
+   a valid ``Retry-After`` header waits for the requested time before its
+   retry request is scheduled.
+
 .. reqmeta:: dont_retry
 
 If :attr:`Request.meta <scrapy.Request.meta>` has ``dont_retry`` key
@@ -1282,6 +1286,52 @@ Adjust retry request priority relative to original request:
 - **a negative priority adjust (default) means lower priority.**
 
 See also: :reqmeta:`priority_adjust`.
+
+.. setting:: RETRY_AFTER_ENABLED
+
+RETRY_AFTER_ENABLED
+^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: VERSION
+
+Default: ``False``
+
+Whether a retried response that carries a ``Retry-After`` header waits until
+the server asks the client to try again. The header is honored only for
+responses that are retried anyway (see :setting:`RETRY_HTTP_CODES`) and while
+the request still has retries left (see :setting:`RETRY_TIMES`).
+
+When enabled, a valid header pauses the retry for the requested time instead
+of scheduling it immediately. The wait is asynchronous and cancellable: it
+does not block the reactor, and closing the spider cancels pending waits
+without scheduling their retries. An invalid header is ignored and the
+request follows the regular, immediate retry path.
+
+The accepted header values are an ASCII, non-negative integer number of
+seconds (e.g. ``30``) and an HTTP date with a time zone (e.g.
+``Wed, 21 Oct 2026 07:28:00 GMT``). Optional spaces and tabs are allowed on
+either side. Negative numbers, fractional numbers, repeated headers, several
+values joined by commas, dates without a time zone and overly long values are
+treated as invalid.
+
+.. setting:: RETRY_AFTER_MAX_DELAY
+
+RETRY_AFTER_MAX_DELAY
+^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: VERSION
+
+Default: ``120``
+
+Maximum time, in seconds, that a single :setting:`RETRY_AFTER_ENABLED` wait can
+last. Both integer delays and HTTP dates are clamped to this value, and a date
+in the past results in a zero-length wait.
+
+The value must be a non-negative, finite number; booleans are not accepted. It
+is only validated when :setting:`RETRY_AFTER_ENABLED` is ``True``.
+
+See also the :stat:`retry_after/accepted`, :stat:`retry_after/invalid`,
+:stat:`retry_after/cancelled` and :stat:`retry_after/waited_seconds` stats.
 
 
 .. currentmodule:: None
