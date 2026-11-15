@@ -517,17 +517,35 @@ JsonItemExporter
 JsonLinesItemExporter
 ---------------------
 
-.. class:: JsonLinesItemExporter(file, **kwargs)
+.. class:: JsonLinesItemExporter(file, *, atomic_items=False, max_item_bytes=0, **kwargs)
 
    Exports items in JSON format to the specified file-like object, writing one
-   JSON-encoded item per line. The additional ``__init__`` method arguments are passed
-   to the :class:`BaseItemExporter` ``__init__`` method, and the leftover arguments to
-   the :class:`~json.JSONEncoder` ``__init__`` method, so you can use any
-   :class:`~json.JSONEncoder` ``__init__`` method argument to customize this exporter.
+   JSON-encoded item per line. The additional ``__init__`` method arguments are
+   passed to the :class:`BaseItemExporter` ``__init__`` method, and the leftover
+   arguments to the :class:`~json.JSONEncoder` ``__init__`` method, so you can
+   use any :class:`~json.JSONEncoder` ``__init__`` method argument to customize
+   this exporter.
 
    :param file: the file-like object to use for exporting the data. Its
       ``write`` method should accept ``bytes`` (a disk file opened in binary
       mode, an ``io.BytesIO`` object, etc)
+
+   *atomic_items*, keyword-only, makes the exporter check an item before
+   writing any of it. It serializes every field, JSON-encodes the result, adds
+   the trailing newline and encodes the line first, and only then calls
+   ``write()`` once with the complete line. If any of those steps fails, the
+   exporter writes nothing for that item and raises an exception that names the
+   field or the limit involved, but never the field value. Later items are
+   exported normally.
+
+   *max_item_bytes*, keyword-only, is the largest encoded line, in bytes, that
+   *atomic_items* accepts for an item; the trailing newline counts. ``0``, the
+   default, means no limit. Use a positive integer, or ``0``: negative numbers,
+   booleans and other non-integers raise :exc:`ValueError` from ``__init__``.
+   Without *atomic_items*, *max_item_bytes* has no effect.
+
+   .. versionadded:: VERSION
+      The *atomic_items* and *max_item_bytes* parameters.
 
    A typical output of this exporter would be:
 
@@ -538,6 +556,52 @@ JsonLinesItemExporter
 
    Unlike the one produced by :class:`JsonItemExporter`, the format produced by
    this exporter is well suited for serializing large amounts of data.
+
+   .. _jsonlines-item-atomicity:
+
+   Item validation atomicity
+   ~~~~~~~~~~~~~~~~~~~~~~~~~
+
+   *atomic_items* guarantees that an item is either written completely or not
+   at all, as far as item validation goes. It cannot take back bytes that a
+   failing ``write()`` call already accepted, because the output stream may be
+   a socket, a pipe or a compressed file that cannot seek or truncate, and the
+   exporter does not try either. If ``write()`` raises or accepts fewer bytes
+   than it was given, the exporter marks itself as failed, and every later
+   :meth:`~BaseItemExporter.export_item` call raises :exc:`RuntimeError`
+   instead of producing more broken lines.
+   :meth:`~BaseItemExporter.finish_exporting` is still safe to call, and leaves
+   the stream open for its owner.
+
+   Memory use does not grow with the number of items: each item is buffered
+   only while it is validated and written.
+
+   The following example exports two valid items, skips one whose price
+   cannot be JSON-encoded, and exports one more. Every line in the resulting
+   stream parses on its own:
+
+   .. code-block:: pycon
+
+       >>> import json
+       >>> from io import BytesIO
+       >>> from scrapy.exporters import JsonLinesItemExporter
+       >>> stream = BytesIO()
+       >>> exporter = JsonLinesItemExporter(
+       ...     stream, atomic_items=True, max_item_bytes=64
+       ... )
+       >>> exporter.export_item({"name": "Color TV", "price": "1200"})
+       >>> exporter.export_item({"name": "DVD player", "price": "200"})
+       >>> try:
+       ...     exporter.export_item({"name": "VCR", "price": 1j})
+       ... except TypeError as exc:
+       ...     print(exc)
+       Object of type complex is not JSON serializable (While JSON-encoding field 'price')
+       >>> exporter.export_item({"name": "Camcorder", "price": "300"})
+       >>> for line in stream.getvalue().splitlines():
+       ...     print(json.loads(line))
+       {'name': 'Color TV', 'price': '1200'}
+       {'name': 'DVD player', 'price': '200'}
+       {'name': 'Camcorder', 'price': '300'}
 
 MarshalItemExporter
 -------------------

@@ -4,10 +4,10 @@ import marshal
 import pickle
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import UTC, datetime
 from io import BytesIO
-from typing import Any
+from typing import IO, Any, cast
 
 import lxml.etree
 import pytest
@@ -26,6 +26,7 @@ from scrapy.exporters import (
 )
 from scrapy.item import Field, Item
 from scrapy.utils.python import to_unicode
+from scrapy.utils.serialize import ScrapyJSONEncoder
 
 
 def custom_serializer(value):
@@ -614,6 +615,475 @@ class TestJsonLinesItemExporter(TestBaseItemExporter):
 class TestJsonLinesItemExporterDataclass(TestJsonLinesItemExporter):
     item_class = MyDataClass
     custom_field_item_class = CustomFieldDataclass
+
+
+class _NonSeekableStream:
+    """Collects bytes like a socket, which has no seek() or truncate()."""
+
+    def __init__(self) -> None:
+        self.chunks: list[bytes] = []
+
+    def write(self, data: bytes) -> int:
+        self.chunks.append(bytes(data))
+        return len(data)
+
+    @property
+    def value(self) -> bytes:
+        return b"".join(self.chunks)
+
+
+class _ShortWritingStream(_NonSeekableStream):
+    """Accepts only *limit* bytes per write() call."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self.limit = limit
+
+    def write(self, data: bytes) -> int:
+        self.chunks.append(bytes(data[: self.limit]))
+        return min(len(data), self.limit)
+
+
+class _FailingStream(_NonSeekableStream):
+    """Raises *exc* from every write() call."""
+
+    def __init__(self, exc: Exception) -> None:
+        super().__init__()
+        self.exc = exc
+
+    def write(self, data: bytes) -> int:
+        raise self.exc
+
+
+def _file(stream: Any) -> IO[bytes]:
+    """Present a duck-typed test stream as the binary file an exporter takes."""
+    return cast("IO[bytes]", stream)
+
+
+class TestJsonLinesItemExporterAtomic:
+    """Tests for ``atomic_items=True`` and ``max_item_bytes``."""
+
+    def _get_exporter(self, **kwargs: Any) -> tuple[JsonLinesItemExporter, BytesIO]:
+        output = BytesIO()
+        exporter = JsonLinesItemExporter(output, atomic_items=True, **kwargs)
+        return exporter, output
+
+    @staticmethod
+    def _lines(output: BytesIO) -> list[Any]:
+        return [json.loads(line) for line in output.getvalue().splitlines()]
+
+    def test_dict_item(self):
+        exporter, output = self._get_exporter()
+        exporter.start_exporting()
+        exporter.export_item({"name": "John\xa3", "age": "22"})
+        exporter.finish_exporting()
+        assert self._lines(output) == [{"name": "John\xa3", "age": "22"}]
+
+    def test_item(self):
+        exporter, output = self._get_exporter()
+        exporter.export_item(MyItem(name="John\xa3", age="22"))
+        assert self._lines(output) == [{"name": "John\xa3", "age": "22"}]
+
+    def test_output_matches_default_path(self):
+        item = {"name": "John\xa3", "age": "22"}
+        exporter, output = self._get_exporter()
+        exporter.export_item(item)
+        default_output = BytesIO()
+        JsonLinesItemExporter(default_output).export_item(item)
+        assert output.getvalue() == default_output.getvalue()
+
+    def test_single_write_per_item(self):
+        calls: list[bytes] = []
+
+        class RecordingStream(_NonSeekableStream):
+            def write(self, data: bytes) -> int:
+                calls.append(bytes(data))
+                return super().write(data)
+
+        exporter = JsonLinesItemExporter(_file(RecordingStream()), atomic_items=True)
+        exporter.export_item({"name": "John", "age": "22"})
+        assert len(calls) == 1
+        assert calls[0].endswith(b"\n")
+        assert calls[0].count(b"\n") == 1
+
+    def test_custom_serializer(self):
+        exporter, output = self._get_exporter()
+        exporter.export_item(CustomFieldItem(name="John", age="22"))
+        assert self._lines(output) == [{"name": "John", "age": "24"}]
+
+    def test_custom_encoder_option(self):
+        exporter, output = self._get_exporter(sort_keys=True)
+        exporter.export_item({"b": "2", "a": "1"})
+        assert output.getvalue() == b'{"a": "1", "b": "2"}\n'
+
+    def test_custom_encoder(self):
+        class UpperEncoder(ScrapyJSONEncoder):
+            def default(self, o: Any) -> Any:
+                if isinstance(o, bytes):
+                    return o.decode().upper()
+                return super().default(o)
+
+        item = {"name": b"john"}
+        default_output = BytesIO()
+        default_exporter = JsonLinesItemExporter(default_output)
+        default_exporter.encoder = UpperEncoder()
+        default_exporter.export_item(item)
+        exporter, output = self._get_exporter()
+        exporter.encoder = UpperEncoder()
+        exporter.export_item(item)
+        assert output.getvalue() == default_output.getvalue()
+        assert output.getvalue() == b'{"name": "JOHN"}\n'
+
+    def test_ensure_ascii(self):
+        exporter, output = self._get_exporter()
+        exporter.export_item({"name": "John\xa3"})
+        assert output.getvalue() == b'{"name": "John\\u00a3"}\n'
+
+    def test_utf8_encoding(self):
+        exporter, output = self._get_exporter(encoding="utf-8")
+        exporter.export_item({"name": "John\xa3"})
+        assert output.getvalue() == '{"name": "John£"}\n'.encode()
+
+    def test_latin1_encoding(self):
+        exporter, output = self._get_exporter(encoding="latin-1")
+        exporter.export_item({"name": "John\xa3"})
+        assert output.getvalue() == b'{"name": "John\xa3"}\n'
+
+    def test_non_ascii_encoding(self):
+        exporter, output = self._get_exporter(encoding="utf-16")
+        exporter.export_item({"name": "John"})
+        assert json.loads(output.getvalue().decode("utf-16")) == {"name": "John"}
+
+    def test_fields_to_export_order(self):
+        exporter, output = self._get_exporter(fields_to_export={"name": "Name"})
+        exporter.export_item(MyItem(name="John", age="22"))
+        assert output.getvalue() == b'{"Name": "John"}\n'
+
+    def test_item_not_modified(self):
+        item = MyItem(name="John", age="22")
+        exporter, _ = self._get_exporter(fields_to_export=["name"])
+        exporter.export_item(item)
+        exporter.export_item({"name": "Maria", "age": "33"})
+        assert dict(item) == {"name": "John", "age": "22"}
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            pytest.param({}, id="all-fields"),
+            pytest.param({"fields_to_export": ["age"]}, id="list"),
+            pytest.param({"fields_to_export": {"name": "Name"}}, id="mapping"),
+            pytest.param({"export_empty_fields": True}, id="empty-fields"),
+            pytest.param(
+                {
+                    "fields_to_export": {"name": "Name", "age": "Age"},
+                    "export_empty_fields": True,
+                },
+                id="mapping-and-empty-fields",
+            ),
+            pytest.param({"fields_to_export": ["name", "missing"]}, id="missing-field"),
+            pytest.param(
+                {"fields_to_export": ["name", "missing"], "export_empty_fields": True},
+                id="missing-field-with-empty-fields",
+            ),
+            pytest.param({"encoding": "latin-1"}, id="latin-1"),
+            pytest.param({"sort_keys": True}, id="sort-keys"),
+        ],
+    )
+    def test_matches_default_path(self, options: dict[str, Any]):
+        items = [MyItem(name="John\xa3", age="22"), {"age": "33", "name": "Maria"}]
+        default_output = BytesIO()
+        default_exporter = JsonLinesItemExporter(default_output, **options)
+        for item in items:
+            default_exporter.export_item(item)
+        exporter, output = self._get_exporter(**options)
+        for item in items:
+            exporter.export_item(item)
+        assert output.getvalue() == default_output.getvalue()
+
+    def test_field_iteration_errors_propagate(self):
+        def fields() -> Iterator[str]:
+            yield "name"
+            raise RuntimeError("field iteration failed")
+
+        exporter, output = self._get_exporter(fields_to_export=fields())
+        with pytest.raises(RuntimeError, match="field iteration failed"):
+            exporter.export_item({"name": "John"})
+        assert output.getvalue() == b""
+
+    def test_get_serialized_fields_override(self):
+        class Exporter(JsonLinesItemExporter):
+            def get_serialized_fields(
+                self,
+                item: Any,
+                default_value: Any = None,
+                include_empty: bool | None = None,
+            ) -> Iterable[tuple[str, Any]]:
+                yield from super().get_serialized_fields(
+                    item, default_value, include_empty
+                )
+                yield "extra", "1"
+
+        output = BytesIO()
+        Exporter(output, atomic_items=True).export_item({"name": "John"})
+        assert self._lines(output) == [{"name": "John", "extra": "1"}]
+
+    def test_serialization_failure_writes_nothing(self):
+        exporter, output = self._get_exporter()
+        with pytest.raises(TypeError, match="field 'age'"):
+            exporter.export_item({"name": "Maria", "age": 1j})
+        assert output.getvalue() == b""
+
+    def test_serialization_failure_hides_value(self):
+        secret = "s3cr3t"
+        exporter, output = self._get_exporter()
+        with pytest.raises(TypeError) as excinfo:
+            exporter.export_item({"name": "Maria", "age": 1j, "note": secret})
+        assert secret not in str(excinfo.value)
+        assert secret not in "\n".join(excinfo.value.__notes__)
+        assert output.getvalue() == b""
+
+    def test_serializer_failure_writes_nothing(self):
+        def serializer(value):
+            raise ValueError("cannot serialize")
+
+        class BrokenItem(Item):
+            name = Field(serializer=serializer)
+
+        exporter, output = self._get_exporter()
+        with pytest.raises(ValueError, match="cannot serialize") as excinfo:
+            exporter.export_item(BrokenItem(name="John"))
+        assert "While serializing field 'name'" in "\n".join(excinfo.value.__notes__)
+        assert output.getvalue() == b""
+
+    def test_encoding_failure_names_all_fields(self):
+        class DictFailingEncoder(ScrapyJSONEncoder):
+            def encode(self, o: Any) -> str:
+                if isinstance(o, dict) and len(o) > 1:
+                    raise TypeError("cannot encode this item")
+                return super().encode(o)
+
+        exporter, output = self._get_exporter()
+        exporter.encoder = DictFailingEncoder()
+        with pytest.raises(TypeError, match="fields: name, age"):
+            exporter.export_item({"name": "John", "age": "22"})
+        assert output.getvalue() == b""
+
+    def test_serializer_failure_with_several_args(self):
+        def serializer(value):
+            raise RuntimeError("cannot", "serialize")
+
+        class BrokenItem(Item):
+            name = Field(serializer=serializer)
+
+        exporter, output = self._get_exporter()
+        with pytest.raises(RuntimeError) as excinfo:
+            exporter.export_item(BrokenItem(name="John"))
+        assert "While serializing field 'name'" in "\n".join(excinfo.value.__notes__)
+        assert "While serializing field 'name'" not in str(excinfo.value)
+        assert output.getvalue() == b""
+
+    def test_default_path_serializer_failure(self):
+        def serializer(value):
+            raise ValueError("cannot serialize")
+
+        class BrokenItem(Item):
+            name = Field(serializer=serializer)
+
+        output = BytesIO()
+        exporter = JsonLinesItemExporter(output)
+        with pytest.raises(ValueError, match="cannot serialize") as excinfo:
+            exporter.export_item(BrokenItem(name="John"))
+        assert getattr(excinfo.value, "__notes__", []) == []
+        assert output.getvalue() == b""
+
+    def test_encoding_failure_writes_nothing(self):
+        exporter, output = self._get_exporter(encoding="latin-1")
+        with pytest.raises(UnicodeEncodeError) as excinfo:
+            exporter.export_item({"name": "☺", "age": "22"})
+        assert "field 'name'" in str(excinfo.value)
+        assert "☺" not in str(excinfo.value)
+        assert "☺" not in repr(excinfo.value)
+        context = excinfo.value.__context__
+        assert context is not None
+        assert "☺" not in repr(context)
+        assert output.getvalue() == b""
+
+    @pytest.mark.parametrize(
+        ("offset", "expected"),
+        [
+            pytest.param(0, "accepted", id="exact"),
+            pytest.param(1, "accepted", id="one-over"),
+            pytest.param(-1, "rejected", id="one-under"),
+        ],
+    )
+    def test_max_item_bytes_boundary(self, offset: int, expected: str):
+        item = {"name": "John\xa3"}
+        default_output = BytesIO()
+        JsonLinesItemExporter(default_output).export_item(item)
+        line = default_output.getvalue()
+        exporter, output = self._get_exporter(max_item_bytes=len(line) + offset)
+        if expected == "accepted":
+            exporter.export_item(item)
+            assert output.getvalue() == line
+        else:
+            with pytest.raises(ValueError, match="max_item_bytes"):
+                exporter.export_item(item)
+            assert output.getvalue() == b""
+
+    def test_max_item_bytes_counts_newline(self):
+        item = {"name": "ok"}
+        without_newline = len(json.dumps(item).encode())
+        exporter, output = self._get_exporter(max_item_bytes=without_newline)
+        with pytest.raises(ValueError, match=f"{without_newline + 1} bytes long"):
+            exporter.export_item(item)
+        assert output.getvalue() == b""
+
+    def test_max_item_bytes_counts_encoded_length(self):
+        item = {"name": "John\xa3"}
+        default_output = BytesIO()
+        JsonLinesItemExporter(default_output, encoding="utf-8").export_item(item)
+        # "£" takes two bytes in UTF-8 and six as an ensure_ascii escape.
+        assert len(default_output.getvalue()) == 19
+        exporter, output = self._get_exporter(encoding="utf-8", max_item_bytes=18)
+        with pytest.raises(ValueError, match="19 bytes long"):
+            exporter.export_item(item)
+        assert output.getvalue() == b""
+
+    def test_max_item_bytes_zero_is_unlimited(self):
+        exporter, output = self._get_exporter(max_item_bytes=0)
+        exporter.export_item({"name": "x" * 10_000})
+        assert len(self._lines(output)) == 1
+
+    def test_max_item_bytes_hides_value(self):
+        exporter, output = self._get_exporter(max_item_bytes=5)
+        with pytest.raises(ValueError, match="max_item_bytes") as excinfo:
+            exporter.export_item({"name": "s3cr3t"})
+        assert "s3cr3t" not in str(excinfo.value)
+        assert output.getvalue() == b""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param(-1, id="negative"),
+            pytest.param(True, id="bool-true"),
+            pytest.param(False, id="bool-false"),
+            pytest.param(1.5, id="float"),
+            pytest.param("10", id="str"),
+            pytest.param(None, id="none"),
+        ],
+    )
+    def test_max_item_bytes_invalid(self, value: Any):
+        output = BytesIO()
+        with pytest.raises(ValueError, match="max_item_bytes"):
+            JsonLinesItemExporter(output, atomic_items=True, max_item_bytes=value)
+        assert output.getvalue() == b""
+
+    def test_max_item_bytes_ignored_without_atomic_items(self):
+        output = BytesIO()
+        exporter = JsonLinesItemExporter(output, max_item_bytes=1)
+        exporter.export_item({"name": "John"})
+        assert self._lines(output) == [{"name": "John"}]
+
+    def test_failure_then_normal_item(self):
+        exporter, output = self._get_exporter()
+        exporter.export_item({"name": "Joseph", "age": "22"})
+        with pytest.raises(TypeError):
+            exporter.export_item({"name": "Maria", "age": 1j})
+        exporter.export_item({"name": "Jesus", "age": "44"})
+        assert self._lines(output) == [
+            {"name": "Joseph", "age": "22"},
+            {"name": "Jesus", "age": "44"},
+        ]
+
+    def test_limit_failure_then_normal_item(self):
+        exporter, output = self._get_exporter(max_item_bytes=20)
+        with pytest.raises(ValueError, match="max_item_bytes"):
+            exporter.export_item({"name": "a" * 100})
+        exporter.export_item({"name": "ok"})
+        assert self._lines(output) == [{"name": "ok"}]
+
+    def test_non_seekable_stream(self):
+        stream = _NonSeekableStream()
+        exporter = JsonLinesItemExporter(_file(stream), atomic_items=True)
+        exporter.export_item({"name": "Joseph"})
+        with pytest.raises(TypeError):
+            exporter.export_item({"name": "Maria", "age": 1j})
+        exporter.export_item({"name": "Jesus"})
+        exporter.finish_exporting()
+        assert [json.loads(line) for line in stream.value.splitlines()] == [
+            {"name": "Joseph"},
+            {"name": "Jesus"},
+        ]
+
+    def test_never_seeks_or_truncates(self):
+        class StrictStream(_NonSeekableStream):
+            def seek(self, *args: Any) -> int:
+                raise AssertionError("seek() called")
+
+            def truncate(self, *args: Any) -> int:
+                raise AssertionError("truncate() called")
+
+        stream = StrictStream()
+        exporter = JsonLinesItemExporter(
+            _file(stream), atomic_items=True, max_item_bytes=50
+        )
+        exporter.export_item({"name": "Joseph"})
+        with pytest.raises(ValueError, match="max_item_bytes"):
+            exporter.export_item({"name": "a" * 100})
+        exporter.finish_exporting()
+        assert [json.loads(line) for line in stream.value.splitlines()] == [
+            {"name": "Joseph"}
+        ]
+
+    def test_short_write(self):
+        line = b'{"name": "John"}\n'
+        stream = _ShortWritingStream(limit=len(line) // 2)
+        exporter = JsonLinesItemExporter(_file(stream), atomic_items=True)
+        with pytest.raises(OSError, match="Short write"):
+            exporter.export_item({"name": "John"})
+        assert stream.value == line[: len(line) // 2]
+
+    def test_write_failure(self):
+        stream = _FailingStream(OSError("disk full"))
+        exporter = JsonLinesItemExporter(_file(stream), atomic_items=True)
+        with pytest.raises(OSError, match="disk full"):
+            exporter.export_item({"name": "John"})
+        assert stream.value == b""
+
+    @pytest.mark.parametrize(
+        "stream",
+        [
+            pytest.param(_ShortWritingStream(limit=1), id="short-write"),
+            pytest.param(_FailingStream(OSError("disk full")), id="write-error"),
+        ],
+    )
+    def test_export_rejected_after_write_failure(self, stream):
+        exporter = JsonLinesItemExporter(_file(stream), atomic_items=True)
+        with pytest.raises(OSError, match=r"Short write|disk full"):
+            exporter.export_item({"name": "John"})
+        with pytest.raises(RuntimeError, match="failed or was incomplete"):
+            exporter.export_item({"name": "Joseph"})
+
+    def test_finish_exporting_after_write_failure(self):
+        stream = _FailingStream(OSError("disk full"))
+        exporter = JsonLinesItemExporter(_file(stream), atomic_items=True)
+        with pytest.raises(OSError, match="disk full"):
+            exporter.export_item({"name": "John"})
+        exporter.finish_exporting()
+        assert not stream.value
+
+    def test_finish_exporting_leaves_stream_open(self):
+        output = BytesIO()
+        exporter = JsonLinesItemExporter(output, atomic_items=True)
+        exporter.export_item({"name": "John"})
+        exporter.finish_exporting()
+        assert not output.closed
+        output.write(b"")
+
+    def test_no_batch_buffering(self):
+        exporter, output = self._get_exporter()
+        exporter.export_item({"n": "1"})
+        assert output.getvalue() == b'{"n": "1"}\n'
 
 
 class TestJsonItemExporter(TestJsonLinesItemExporter):

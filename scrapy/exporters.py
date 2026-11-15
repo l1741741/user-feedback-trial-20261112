@@ -12,7 +12,7 @@ import pprint
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping
 from io import BytesIO, TextIOWrapper
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from xml.sax.saxutils import XMLGenerator
 from xml.sax.xmlreader import AttributesImpl
 
@@ -24,12 +24,41 @@ from scrapy.utils.serialize import ScrapyJSONEncoder
 if TYPE_CHECKING:
     from collections.abc import Coroutine
     from json import JSONEncoder
+    from typing import IO
 
     from scrapy.item import Field
 
 logger = logging.getLogger(__name__)
 
 _SCALAR_TYPES: frozenset[type] = frozenset({bool, bytes, float, int, str, type(None)})
+
+
+def _annotate_exception(exc: Exception, info: str) -> Exception:
+    """Return an exception like *exc* that records *info* as a note and, where
+    the type allows it, in the message too, so that callers that only look at
+    the text see it.
+
+    Encoding errors build their message when created, from the text that
+    failed to encode, which may contain a field value. Those get a replacement
+    exception of the same type built from placeholder text, and the original is
+    scrubbed too, since Python keeps it as the context of the replacement.
+    Callers pass field names or limits, never field values.
+    """
+    if isinstance(exc, UnicodeError) and len(exc.args) == 5:
+        encoding, text, start, end, reason = exc.args
+        placeholders = "?" * len(text)
+        exc.args = (encoding, placeholders, start, end, reason)
+        cast("Any", exc).object = placeholders
+        replacement = type(exc)(
+            encoding, placeholders, start, end, f"{reason} ({info})"
+        )
+        replacement.add_note(info)
+        return replacement
+    exc.add_note(info)
+    if len(exc.args) == 1 and isinstance(exc.args[0], str):
+        exc.args = (f"{exc.args[0]} ({info})",)
+    return exc
+
 
 __all__ = [
     "BaseItemExporter",
@@ -137,22 +166,12 @@ class BaseItemExporter(ABC):
         declared = (name for name in adapter.field_names() if name in populated)
         return dict.fromkeys([*declared, *adapter.keys()])
 
-    def get_serialized_fields(
-        self, item: Any, default_value: Any = None, include_empty: bool | None = None
-    ) -> Iterable[tuple[str, Any]]:
-        """Return the fields of *item* to export, as an iterable of
-        ``(name, serialized_value)`` tuples, taking :attr:`fields_to_export`
-        into account and applying :meth:`serialize_field` to every value.
-
-        Fields missing from *item* are exported with *default_value*.
-
-        *include_empty* overrides :attr:`export_empty_fields`.
-        """
-        item = ItemAdapter(item)
-
-        if include_empty is None:
-            include_empty = self.export_empty_fields
-
+    def _iter_field_names(
+        self, item: ItemAdapter, include_empty: bool
+    ) -> Iterable[tuple[str, str]]:
+        """Yield the ``(item_field, output_field)`` pairs to export for *item*,
+        taking :attr:`fields_to_export` and *include_empty* into account."""
+        field_iter: Iterable[str] | Iterable[tuple[str, str]]
         if self.fields_to_export is None:
             field_iter = (
                 item.field_names()
@@ -173,29 +192,190 @@ class BaseItemExporter(ABC):
 
         for field_name in field_iter:
             if isinstance(field_name, str):
-                item_field, output_field = field_name, field_name
+                yield field_name, field_name
             else:
-                item_field, output_field = field_name
-            if item_field in item:
-                field_meta = item.get_field_meta(item_field)
-                value = self.serialize_field(field_meta, output_field, item[item_field])
+                yield field_name
+
+    def _iter_serialized_fields(
+        self,
+        item: Any,
+        default_value: Any = None,
+        include_empty: bool | None = None,
+        *,
+        annotate_errors: bool = False,
+    ) -> Iterable[tuple[str, Any]]:
+        """Yield the ``(name, serialized_value)`` pairs to export for *item*.
+
+        If *annotate_errors* is true, exceptions raised while serializing a
+        field name the field. The field value is never included.
+        """
+        adapter = ItemAdapter(item)
+
+        if include_empty is None:
+            include_empty = self.export_empty_fields
+
+        for item_field, output_field in self._iter_field_names(adapter, include_empty):
+            if item_field in adapter:
+                field_meta = adapter.get_field_meta(item_field)
+                try:
+                    value = self.serialize_field(
+                        field_meta, output_field, adapter[item_field]
+                    )
+                except Exception as exc:
+                    if annotate_errors:
+                        raise (
+                            _annotate_exception(
+                                exc, f"While serializing field {output_field!r}"
+                            )
+                        ) from None
+                    raise
             else:
                 value = default_value
 
             yield output_field, value
 
+    def get_serialized_fields(
+        self, item: Any, default_value: Any = None, include_empty: bool | None = None
+    ) -> Iterable[tuple[str, Any]]:
+        """Return the fields of *item* to export, as an iterable of
+        ``(name, serialized_value)`` tuples, taking :attr:`fields_to_export`
+        into account and applying :meth:`serialize_field` to every value.
+
+        Fields missing from *item* are exported with *default_value*.
+
+        *include_empty* overrides :attr:`export_empty_fields`.
+        """
+        yield from self._iter_serialized_fields(item, default_value, include_empty)
+
 
 class JsonLinesItemExporter(BaseItemExporter):
-    def __init__(self, file: BytesIO, **kwargs: Any):
+    """Exports items as one JSON-encoded line each.
+
+    With *atomic_items*, the exporter serializes, encodes and terminates an
+    item in memory before writing it with a single ``write()`` call, so that a
+    failure in any of those steps writes nothing for that item. This is item
+    validation atomicity only: bytes already written by a failing or short
+    ``write()`` call cannot be taken back, and the exporter never seeks or
+    truncates the stream to try. After such a write error the exporter refuses
+    further items.
+
+    *max_item_bytes*, which only applies with *atomic_items*, limits the size
+    of the complete encoded line, including the trailing newline; ``0`` means
+    no limit.
+
+    .. versionadded:: VERSION
+       The *atomic_items* and *max_item_bytes* parameters.
+    """
+
+    def __init__(
+        self,
+        file: IO[bytes],
+        *,
+        atomic_items: bool = False,
+        max_item_bytes: int = 0,
+        **kwargs: Any,
+    ):
+        if isinstance(max_item_bytes, bool) or not isinstance(max_item_bytes, int):
+            raise ValueError(
+                "max_item_bytes must be 0 or a positive integer, "
+                f"got {max_item_bytes!r}"
+            )
+        if max_item_bytes < 0:
+            raise ValueError(
+                "max_item_bytes must be 0 or a positive integer, "
+                f"got {max_item_bytes!r}"
+            )
         super().__init__(dont_fail=True, **kwargs)
-        self.file: BytesIO = file
+        self.file: IO[bytes] = file
+        self._atomic_items = atomic_items
+        self._max_item_bytes = max_item_bytes
+        self._failed = False
         self._kwargs.setdefault("ensure_ascii", not self.encoding)
         self.encoder: JSONEncoder = ScrapyJSONEncoder(**self._kwargs)
 
     def export_item(self, item: Any) -> None:
-        itemdict = dict(self.get_serialized_fields(item))
-        data = self.encoder.encode(itemdict) + "\n"
-        self.file.write(data.encode(self.encoding or "utf-8"))
+        if not self._atomic_items:
+            itemdict = dict(self.get_serialized_fields(item))
+            data = self.encoder.encode(itemdict) + "\n"
+            self.file.write(data.encode(self.encoding or "utf-8"))
+            return
+        if self._failed:
+            raise RuntimeError(
+                "Cannot export items: an earlier write to the output stream "
+                "failed or was incomplete."
+            )
+        line = self._encode_item(item)
+        try:
+            written = self.file.write(line)
+        except Exception:
+            self._failed = True
+            raise
+        if isinstance(written, int) and written < len(line):
+            self._failed = True
+            raise OSError(
+                f"Short write: {written} of {len(line)} bytes went into the "
+                "output stream."
+            )
+
+    def _encode_item(self, item: Any) -> bytes:
+        """Return the complete encoded line for *item*, without writing.
+
+        Failures identify the field or the limit that caused them, never the
+        field value.
+        """
+        fields = list(self._get_field_pairs(item))
+        try:
+            line = self.encoder.encode(dict(fields)) + "\n"
+        except Exception as exc:
+            raise self._add_error_info(exc, fields, "JSON-encoding") from None
+        try:
+            data = line.encode(self.encoding or "utf-8")
+        except Exception as exc:
+            raise (
+                self._add_error_info(exc, fields, "encoding", self.encoding)
+            ) from None
+        if self._max_item_bytes and len(data) > self._max_item_bytes:
+            raise ValueError(
+                f"The encoded line for this item is {len(data)} bytes long, "
+                f"over the max_item_bytes limit of {self._max_item_bytes}."
+            )
+        return data
+
+    def _get_field_pairs(self, item: Any) -> Iterable[tuple[str, Any]]:
+        """Return the serialized fields of *item*, naming the field in
+        serialization errors.
+
+        An overridden :meth:`~BaseItemExporter.get_serialized_fields` decides
+        the fields, so it is called instead.
+        """
+        if (
+            type(self).get_serialized_fields
+            is not BaseItemExporter.get_serialized_fields
+        ):
+            return self.get_serialized_fields(item)
+        return self._iter_serialized_fields(item, annotate_errors=True)
+
+    def _add_error_info(
+        self,
+        exc: Exception,
+        fields: list[tuple[str, Any]],
+        action: str,
+        encoding: str | None = None,
+    ) -> Exception:
+        """Return an exception that names the field whose value made *exc*
+        happen.
+
+        Encoding the whole item failed, so each field is encoded on its own to
+        find the culprit. A value that only fails in combination with others
+        leaves all the field names in the message.
+        """
+        for name, value in fields:
+            try:
+                self.encoder.encode({name: value}).encode(encoding or "utf-8")
+            except Exception:
+                return _annotate_exception(exc, f"While {action} field {name!r}")
+        names = ", ".join(map(str, (name for name, _ in fields)))
+        return _annotate_exception(exc, f"While {action} fields: {names}")
 
 
 class JsonItemExporter(BaseItemExporter):
