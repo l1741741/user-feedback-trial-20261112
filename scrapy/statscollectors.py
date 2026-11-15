@@ -9,9 +9,15 @@ import pprint
 from collections.abc import MutableMapping
 from typing import TYPE_CHECKING, Any, TypeAlias
 
+from scrapy.utils._stats_snapshot import (
+    build_stats_snapshot,
+    snapshot_params,
+    write_stats_snapshot,
+)
 from scrapy.utils.decorators import _warn_spider_arg
 
 if TYPE_CHECKING:
+    import os
     from collections.abc import Iterator
 
     from scrapy import Spider
@@ -60,6 +66,127 @@ class StatsCollector(MutableMapping[str, Any]):
     def get_stats(self, spider: Spider | None = None) -> StatsT:
         """Return all stats as a dict."""
         return self._stats
+
+    def get_stats_snapshot(
+        self,
+        *,
+        include: list[str] | None = None,
+        sensitive_keys: list[str] | None = None,
+        max_depth: int | None = None,
+        max_nodes: int | None = None,
+        max_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        """Return an independent, JSON-compatible copy of the current stats.
+
+        The returned dict is safe to pass to :func:`json.dumps` and shares no
+        mutable container with the live stats or with other snapshots, so it
+        can be handed to monitoring while the crawl keeps updating its stats.
+        Neither the live stats nor the returned copy are ever modified by
+        this method, and the method does not run user code such as
+        :meth:`object.__repr__`, :func:`iter` or ``__json__`` on stat values.
+
+        Only the top-level stat keys are filtered: *include*, when non-empty,
+        is a list of case-insensitive :mod:`fnmatch` patterns and only the
+        matching stats are copied. At any mapping level, a key matching a
+        sensitive-key pattern is copied as the string ``"[REDACTED]"`` and
+        its value is never read. The built-in patterns cover credentials
+        (``*auth*``, ``*cookie*``, ``*password*``, ``*secret*``, ``*session*``,
+        ``*token*``, ``*api_key*`` and similar); *sensitive_keys* adds more.
+        The default values of all parameters come from the
+        :setting:`STATS_SNAPSHOT_INCLUDE`, :setting:`STATS_SNAPSHOT_SENSITIVE_KEYS`,
+        :setting:`STATS_SNAPSHOT_MAX_DEPTH`, :setting:`STATS_SNAPSHOT_MAX_NODES`
+        and :setting:`STATS_SNAPSHOT_MAX_BYTES` settings.
+
+        Values are converted as follows:
+
+        -   ``None``, :class:`bool`, :class:`int`, finite :class:`float` and
+            :class:`str` are copied as they are.
+
+        -   :class:`bytes` become a single-key object whose
+            ``"__scrapy_bytes_base64__"`` value is the standard Base64
+            encoding of the bytes.
+
+        -   :class:`datetime.datetime` objects become ISO 8601 strings. An
+            aware datetime keeps its UTC offset; a naive one is assumed to be
+            in UTC and gets a ``+00:00`` suffix. :class:`datetime.date` and
+            :class:`datetime.time` objects become their :meth:`~object.__str__`
+            ISO 8601 form. A :class:`datetime.timedelta` becomes a number of
+            seconds.
+
+        -   Mappings keyed by strings become JSON objects, recursively; list
+            and tuple values become JSON arrays, recursively. A set or
+            frozenset becomes a JSON array sorted by the canonical JSON
+            encoding of its items, so repeated snapshots can be compared.
+
+        -   Any other value, a non-finite float, a mapping key that is not a
+            string, or a value reached through a circular reference raises
+            :exc:`~scrapy.exceptions.StatsSnapshotError`. No partial snapshot
+            is returned or logged.
+
+        The copy is bounded: nesting deeper than *max_depth* levels, more
+        than *max_nodes* values and mapping keys, or more than *max_bytes*
+        UTF-8 bytes of the equivalent JSON raise
+        :exc:`~scrapy.exceptions.StatsSnapshotError` as soon as a limit is
+        crossed, before the rest of the value is copied.
+
+        .. versionadded:: VERSION
+        """
+        (
+            effective_include,
+            effective_sensitive,
+            effective_depth,
+            effective_nodes,
+            effective_bytes,
+        ) = snapshot_params(
+            self._crawler.settings,
+            include=include,
+            sensitive_keys=sensitive_keys,
+            max_depth=max_depth,
+            max_nodes=max_nodes,
+            max_bytes=max_bytes,
+        )
+        return build_stats_snapshot(
+            self._stats,
+            include=effective_include,
+            sensitive=effective_sensitive,
+            max_depth=effective_depth,
+            max_nodes=effective_nodes,
+            max_bytes=effective_bytes,
+        )
+
+    def save_stats_snapshot(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        include: list[str] | None = None,
+        sensitive_keys: list[str] | None = None,
+        max_depth: int | None = None,
+        max_nodes: int | None = None,
+        max_bytes: int | None = None,
+    ) -> None:
+        """Write :meth:`get_stats_snapshot` output to *path* atomically.
+
+        The snapshot is produced first; if the parameters are invalid or a
+        stat value cannot be copied, nothing is written. The JSON text then
+        goes to a temporary file in the same directory, which is flushed and
+        synced before replacing *path*, so a reader never sees a partial
+        file. If writing fails, *path* keeps its previous contents, if any,
+        the temporary file is removed, and
+        :exc:`~scrapy.exceptions.StatsSnapshotError` is raised with
+        ``reason="write"``.
+
+        .. versionadded:: VERSION
+        """
+        write_stats_snapshot(
+            self.get_stats_snapshot(
+                include=include,
+                sensitive_keys=sensitive_keys,
+                max_depth=max_depth,
+                max_nodes=max_nodes,
+                max_bytes=max_bytes,
+            ),
+            path,
+        )
 
     def set_value(self, key: str, value: Any, spider: Spider | None = None) -> None:
         """Set the *key* stat to *value*."""

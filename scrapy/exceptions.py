@@ -119,6 +119,40 @@ class StopDownload(Exception):
         self.fail = fail
 
 
+class StatsSnapshotError(Exception):
+    """Raised by
+    :meth:`~scrapy.statscollectors.StatsCollector.get_stats_snapshot` and
+    :meth:`~scrapy.statscollectors.StatsCollector.save_stats_snapshot` when no
+    complete snapshot can be produced.
+
+    *path*, *reason*, *maximum* and *actual* describe the failure. *path*
+    locates the offending value inside the snapshot with the same syntax as
+    the returned mapping, e.g. ``stats["nested"][2]``; it is ``None`` when
+    the failure is not tied to a value. *reason* is one of ``"depth"``,
+    ``"nodes"``, ``"bytes"``, ``"circular"``, ``"non-finite"``,
+    ``"unsupported"``, ``"key"``, ``"write"`` or ``"config"``. *maximum*
+    and *actual* are set for the ``"depth"``, ``"nodes"`` and ``"bytes"``
+    limits.
+
+    .. versionadded:: VERSION
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        path: str | None = None,
+        reason: str | None = None,
+        maximum: int | None = None,
+        actual: int | None = None,
+    ):
+        super().__init__(message)
+        self.path = path
+        self.reason = reason
+        self.maximum = maximum
+        self.actual = actual
+
+
 class DownloadConnectionRefusedError(Exception):
     """Indicates that a connection was refused by the server."""
 

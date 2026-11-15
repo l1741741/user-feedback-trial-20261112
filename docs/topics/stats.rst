@@ -97,6 +97,150 @@ stat, and with :class:`DummyStatsCollector` every stat is missing.
 
 .. skip: end
 
+.. _topics-stats-snapshot:
+
+Monitoring snapshots
+====================
+
+.. versionadded:: VERSION
+
+:meth:`~scrapy.statscollectors.StatsCollector.get_stats` returns the live
+stats mapping, which may hold values that :func:`json.dumps` cannot encode
+(dates, :class:`bytes`, plugin objects) and credentials that must not leave
+the process. Use
+:meth:`~scrapy.statscollectors.StatsCollector.get_stats_snapshot` to get an
+independent JSON-compatible copy instead, and
+:meth:`~scrapy.statscollectors.StatsCollector.save_stats_snapshot` to write
+that copy to a local file atomically. Both leave the stats collector and
+:meth:`~scrapy.statscollectors.StatsCollector.get_stats` unchanged.
+
+The snapshot is taken when the method is called, in the same thread, so
+concurrent stat updates that happen after the call are not part of it; two
+calls return two snapshots taken at two different points in time. A snapshot
+never shares a mutable container with the live stats or with another
+snapshot, so a consumer can hold it while the crawl continues.
+
+Which stats are copied, and how much, is controlled by these settings:
+
+-   :setting:`STATS_SNAPSHOT_INCLUDE` selects top-level stat keys with
+    case-insensitive :mod:`fnmatch` patterns. When it is non-empty, only
+    matching stats are copied; it does not filter keys nested inside stat
+    values.
+
+-   :setting:`STATS_SNAPSHOT_SENSITIVE_KEYS` adds case-insensitive
+    :mod:`fnmatch` patterns of stat keys whose values are redacted. At every
+    mapping level, a key matching any pattern is copied as the string
+    ``"[REDACTED]"`` and its value is never read, so a redacted object cannot
+    run any code or reach the log.
+
+    These patterns are always in effect and cannot be replaced:
+    ``*access_key*``, ``*api_key*``, ``*apikey*``, ``*auth*``, ``*cookie*``,
+    ``*credential*``, ``*passwd*``, ``*password*``, ``*private_key*``,
+    ``*secret*``, ``*session*`` and ``*token*``. A matching container is
+    redacted as a whole, so
+    ``stats["request_cookies"] = {"sid": "..."}`` becomes
+    ``{"request_cookies": "[REDACTED]"}``.
+
+-   :setting:`STATS_SNAPSHOT_MAX_DEPTH` limits the nesting depth, counting
+    the top-level stats mapping as level 1.
+
+-   :setting:`STATS_SNAPSHOT_MAX_NODES` limits the total number of values and
+    mapping keys copied across the whole snapshot, counting the top-level
+    stats mapping as one node.
+
+-   :setting:`STATS_SNAPSHOT_MAX_BYTES` limits the size in bytes of the UTF-8
+    JSON text the snapshot would produce, counting the quotes, commas and
+    braces of the equivalent JSON document. A single string, :class:`bytes`
+    value or integer that alone exceeds it is rejected without first being
+    encoded or copied.
+
+All three limits are checked incrementally while the copy is built, so an
+oversized value is rejected as soon as it crosses a limit rather than after a
+full copy of it is made. On any failure,
+:exc:`~scrapy.exceptions.StatsSnapshotError` is raised with a ``path``
+attribute that locates the offending value, e.g. ``stats["nested"][2]``, and
+no snapshot is returned, logged or written.
+
+Value conversion
+----------------
+
+``None``, booleans, integers, finite floats and strings are copied as they
+are. Other values are converted as follows:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 45 25
+
+   * - Python value
+     - Snapshot value
+     - Notes
+   * - :class:`bytes`
+     - ``{"__scrapy_bytes_base64__": "..."}``
+     - Standard Base64, decoded losslessly with :func:`base64.b64decode`.
+   * - :class:`datetime.datetime`
+     - ISO 8601 string
+     - An aware value keeps its offset; a naive one is assumed to be UTC and
+       gets a ``+00:00`` suffix.
+   * - :class:`datetime.date`
+     - ISO 8601 string
+     - ``YYYY-MM-DD``.
+   * - :class:`datetime.time`
+     - ISO 8601 string
+     - As returned by :meth:`datetime.time.isoformat`; a naive time carries
+       no zone.
+   * - :class:`datetime.timedelta`
+     - Number
+     - Total seconds, as returned by
+       :meth:`~datetime.timedelta.total_seconds`; fractional.
+   * - :class:`list`, :class:`tuple`
+     - Array
+     - Items are converted recursively, keeping their order.
+   * - :class:`dict`
+     - Object
+     - Keys must be strings and values are converted recursively. A key whose
+       value matches a sensitive-key pattern becomes ``"[REDACTED]"``.
+   * - :class:`set`, :class:`frozenset`
+     - Array
+     - Sorted by the canonical JSON text of the converted items, so repeated
+       snapshots of the same set compare equal.
+   * - Non-finite float
+     - *error*
+     - ``nan`` and the infinities are not JSON numbers.
+   * - Any other object
+     - *error*
+     - Including plugin objects, :class:`complex`, iterators and generators.
+       They are never converted with :func:`repr`, :func:`str` or any
+       ``__json__`` protocol.
+   * - Circular reference
+     - *error*
+     - Detected through the containers currently being copied; a value that
+       appears twice without a cycle is copied twice.
+
+.. note:: The snapshot reports the stat values unchanged at the time of the
+    call, with their original types and units. Scrapy's
+    :stat:`elapsed_time_seconds` is a number of seconds, :stat:`start_time`
+    and :stat:`finish_time` are :class:`~datetime.datetime` values converted
+    to ISO 8601 strings, byte totals such as
+    :stat:`downloader/response_bytes` are numbers of bytes and stay numbers,
+    and ``*_count`` stats are unitless counters. See
+    :ref:`topics-stats-reference` for the unit and meaning of each built-in
+    stat. Snapshot keys keep their original spelling, including the
+    ``/``-separated prefixes.
+
+.. note:: ``"__scrapy_bytes_base64__"`` is reserved: a stat that is a mapping
+    with exactly that key is indistinguishable from an encoded
+    :class:`bytes` value in the snapshot.
+
+For example, at the end of a crawl:
+
+.. code-block:: python
+
+    import json
+
+    snapshot = crawler.stats.get_stats_snapshot(include=["downloader/*"])
+    print(json.dumps(snapshot, sort_keys=True))
+    crawler.stats.save_stats_snapshot("stats.json")
+
 Available Stats Collectors
 ==========================
 

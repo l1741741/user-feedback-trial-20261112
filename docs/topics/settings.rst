@@ -2407,6 +2407,68 @@ finishes.
 
 For more info see: :ref:`topics-stats`.
 
+.. setting:: STATS_SNAPSHOT_INCLUDE
+
+STATS_SNAPSHOT_INCLUDE
+----------------------
+
+.. versionadded:: VERSION
+
+Default: ``[]`` (empty list)
+
+The case-insensitive :mod:`fnmatch` patterns of top-level stat keys to copy
+into the snapshots returned by
+:meth:`~scrapy.statscollectors.StatsCollector.get_stats_snapshot`. An empty
+list copies every stat.
+
+.. setting:: STATS_SNAPSHOT_MAX_BYTES
+
+STATS_SNAPSHOT_MAX_BYTES
+------------------------
+
+.. versionadded:: VERSION
+
+Default: ``1000000``
+
+The maximum size, in UTF-8 bytes of the equivalent JSON text, of a stats
+snapshot.
+
+.. setting:: STATS_SNAPSHOT_MAX_DEPTH
+
+STATS_SNAPSHOT_MAX_DEPTH
+------------------------
+
+.. versionadded:: VERSION
+
+Default: ``16``
+
+The maximum nesting depth of a stats snapshot.
+
+.. setting:: STATS_SNAPSHOT_MAX_NODES
+
+STATS_SNAPSHOT_MAX_NODES
+------------------------
+
+.. versionadded:: VERSION
+
+Default: ``10000``
+
+The maximum number of values and mapping keys in a stats snapshot.
+
+.. setting:: STATS_SNAPSHOT_SENSITIVE_KEYS
+
+STATS_SNAPSHOT_SENSITIVE_KEYS
+-----------------------------
+
+.. versionadded:: VERSION
+
+Default: ``[]`` (empty list)
+
+Extra case-insensitive :mod:`fnmatch` patterns of stat keys whose values are
+redacted in a stats snapshot, on top of the built-in credential patterns.
+
+See :ref:`topics-stats-snapshot` for how these settings are applied.
+
 .. setting:: STICKY_META_KEYS
 
 STICKY_META_KEYS
