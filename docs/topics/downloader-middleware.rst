@@ -1283,6 +1283,58 @@ Adjust retry request priority relative to original request:
 
 See also: :reqmeta:`priority_adjust`.
 
+.. setting:: RETRY_RETRY_AFTER_ENABLED
+
+RETRY_RETRY_AFTER_ENABLED
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: VERSION
+
+Default: ``False``
+
+Whether requests that receive an ``HTTP 429 (Too Many Requests)`` response with
+a ``Retry-After`` header wait before they are retried.
+
+When enabled, the middleware keeps one wait per origin, identified by its
+scheme, host and port. A ``Retry-After`` header only extends the wait of the
+origin when it asks for a later end time, it never shortens a wait that other
+requests of the same origin are already holding. Requests of different origins
+wait independently.
+
+The header value may be a number of seconds or an HTTP date. A missing or
+malformed header does not hold the request back.
+
+.. setting:: RETRY_RETRY_AFTER_MAX_WAIT
+
+RETRY_RETRY_AFTER_MAX_WAIT
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: VERSION
+
+Default: ``60.0``
+
+Maximum number of seconds a single ``Retry-After`` wait may last: a header
+asking for more is cut to this value. Set to ``-1`` to disable the limit.
+
+See also: :setting:`RETRY_RETRY_AFTER_MAX_TOTAL_WAIT`.
+
+.. setting:: RETRY_RETRY_AFTER_MAX_TOTAL_WAIT
+
+RETRY_RETRY_AFTER_MAX_TOTAL_WAIT
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: VERSION
+
+Default: ``300.0``
+
+Maximum number of seconds that the retries of one request may spend waiting on
+``Retry-After`` headers in total. The budget starts with the first wait and is
+shared by every retry of the request; once it is spent, further ``Retry-After``
+headers do not hold the request back. Set to ``-1`` to disable the limit.
+
+The first wait is limited by :setting:`RETRY_RETRY_AFTER_MAX_WAIT` only, so a
+zero budget allows one capped wait and no further one.
+
 
 .. currentmodule:: None
 

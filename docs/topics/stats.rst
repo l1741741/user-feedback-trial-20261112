@@ -705,6 +705,46 @@ one per actual value of the placeholder.
     custom *stats_base_key*, in which case ``retry`` is replaced with that key
     in the 3 stats above.
 
+.. stat:: retry/wait/count
+
+``retry/wait/count``
+    Number of requests that entered a wait behind a ``Retry-After`` header,
+    once per wait. Set by
+    :class:`~scrapy.downloadermiddlewares.retry.RetryMiddleware` when
+    :setting:`RETRY_RETRY_AFTER_ENABLED` is enabled.
+
+.. stat:: retry/wait/origin_count/{origin}
+
+``retry/wait/origin_count/{origin}``
+    Same count as ``retry/wait/count``, split per origin, identified by its
+    scheme, host and port, e.g.
+    ``retry/wait/origin_count/https://example.com:8443``. The values over all
+    origins sum to ``retry/wait/count``.
+
+.. stat:: retry/wait/extended
+
+``retry/wait/extended``
+    Number of waits that lasted longer than their own header asked because the
+    request joined a later shared wait of its origin.
+
+.. stat:: retry/wait/cancelled
+
+``retry/wait/cancelled``
+    Number of waits interrupted by the cancellation of their request.
+
+.. stat:: retry/wait/invalid_header
+
+``retry/wait/invalid_header``
+    Number of ``Retry-After`` headers that were neither a number of seconds nor
+    a valid HTTP date. The requests carrying them are retried without waiting.
+
+.. stat:: retry/wait/limit_reached
+
+``retry/wait/limit_reached``
+    Number of requests that skipped a wait because
+    :setting:`RETRY_RETRY_AFTER_MAX_WAIT` or
+    :setting:`RETRY_RETRY_AFTER_MAX_TOTAL_WAIT` left no time to wait.
+
 .. stat:: robotstxt/exception_count/{exception_type}
 
 ``robotstxt/exception_count/{exception_type}``
