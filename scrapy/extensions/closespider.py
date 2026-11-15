@@ -10,6 +10,8 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Self
 
+from twisted.python.failure import Failure
+
 from scrapy import Request, Spider, signals
 from scrapy.exceptions import NotConfigured
 from scrapy.utils.asyncio import (
@@ -22,7 +24,6 @@ from scrapy.utils.defer import _schedule_coro
 
 if TYPE_CHECKING:
     from twisted.internet.task import LoopingCall
-    from twisted.python.failure import Failure
 
     from scrapy.crawler import Crawler
     from scrapy.http import Response
@@ -32,8 +33,27 @@ logger = logging.getLogger(__name__)
 
 
 class CloseSpider:
+    """Close a spider when any of the conditions enabled through the
+    ``CLOSESPIDER_*`` settings is met.
+
+    Only the first condition that the extension processes asks the engine to
+    close the spider; it locks the closing reason and the error flag, which
+    later conditions cannot change. See :ref:`closespider-close-reason` for
+    which reason ends up being used.
+    """
+
     def __init__(self, crawler: Crawler):
         self.crawler: Crawler = crawler
+
+        # The closing reason and error flag of the first condition met. They
+        # are set together with _close_requested, so that later conditions do
+        # not change them.
+        self.close_reason: str | None = None
+        self._close_error: bool = False
+        # The exception raised while asking the engine to close the spider.
+        self.close_failure: Failure | None = None
+        self._close_requested: bool = False
+        self._closed: bool = False
 
         # for CLOSESPIDER_TIMEOUT
         self.task: CallLaterResult | None = None
@@ -110,6 +130,8 @@ class CloseSpider:
             self._close_spider("closespider_itemcount")
 
     def spider_closed(self, spider: Spider) -> None:
+        self._closed = True
+
         if self.task:
             self.task.cancel()
             self.task = None
@@ -132,6 +154,11 @@ class CloseSpider:
         self.items_in_period += 1
 
     def _count_items_produced(self) -> None:
+        # A call may still be queued when the spider_closed handler stopped
+        # the looping call, or when another condition already asked to close
+        # the spider.
+        if self._close_requested or self._closed:
+            return
         if self.items_in_period >= 1:
             self.items_in_period = 0
         else:
@@ -142,6 +169,36 @@ class CloseSpider:
             self._close_spider("closespider_timeout_no_item")
 
     def _close_spider(self, reason: str, *, error: bool = False) -> None:
-        _schedule_coro(
-            self.crawler.engine.close_spider_async(reason=reason, error=error)
-        )
+        # The first condition that gets here locks the reason and the error
+        # flag of this crawler, and is the only one that asks the engine to
+        # close the spider. Callbacks that were queued before the spider was
+        # closed, by this or any other component, do nothing.
+        if self._close_requested or self._closed:
+            return
+        self._close_requested = True
+        self.close_reason = reason
+        self._close_error = error
+        _schedule_coro(self._close_spider_async(reason, error=error))
+
+    async def _close_spider_async(self, reason: str, *, error: bool = False) -> None:
+        # Another component may have closed the spider after this close was
+        # scheduled but before the loop ran it.
+        if self._closed:
+            return
+        try:
+            await self.crawler.engine.close_spider_async(reason=reason, error=error)
+        except Exception:
+            # Keep the latch set: retrying could loop forever. The failure is
+            # logged, reported with the spider_error signal, and stored so
+            # that it can be inspected later from self.close_failure.
+            self.close_failure = Failure()
+            logger.exception(
+                f"Error while closing the spider ({reason})",
+                extra={"spider": self.crawler.spider},
+            )
+            self.crawler.signals.send_catch_log(
+                signal=signals.spider_error,
+                failure=self.close_failure,
+                response=None,
+                spider=self.crawler.spider,
+            )

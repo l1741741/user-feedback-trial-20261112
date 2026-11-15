@@ -215,8 +215,26 @@ Close spider extension
 
 .. class:: scrapy.extensions.closespider.CloseSpider
 
-Closes a spider automatically when some conditions are met, using a specific
-closing reason for each condition.
+    Closes a spider automatically when some conditions are met, using a
+    specific closing reason for each condition.
+
+    .. versionchanged:: VERSION
+       Closing conditions no longer compete to set the closing reason; see
+       :ref:`closespider-close-reason`.
+
+    .. attribute:: close_reason
+
+        The closing reason of the condition that locked the close, or ``None``
+        if no condition was met. See :ref:`closespider-close-reason`.
+
+        .. versionadded:: VERSION
+
+    .. attribute:: close_failure
+
+        The :class:`twisted.python.failure.Failure` raised while asking the
+        engine to close the spider, or ``None`` if closing did not raise.
+
+        .. versionadded:: VERSION
 
 The conditions for closing a spider can be configured through the following
 settings:
@@ -233,6 +251,45 @@ settings:
     When a certain closing condition is met, requests that are currently in the
     downloader queue (up to :setting:`CONCURRENT_REQUESTS`
     requests) are still processed.
+
+.. _closespider-close-reason:
+
+Closing reason
+""""""""""""""
+
+Each extension instance asks the engine to close its spider at most once. The
+first condition that the extension processes locks the closing reason and the
+error flag, and the rest are ignored. That reason and flag become the
+:stat:`finish_reason` and :stat:`finish_reason_error` stats unless the spider
+is closed by something else first.
+
+Conditions are processed in the order in which their signals arrive, which
+decides the reason regardless of when the scheduled close actually runs. When
+several conditions are met while processing the same signal, for example when
+:setting:`CLOSESPIDER_PAGECOUNT` and :setting:`CLOSESPIDER_PAGECOUNT_NO_ITEM`
+are both reached by the same response, the extension keeps the order in which
+it checks them: ``closespider_pagecount`` before
+``closespider_pagecount_no_item``.
+
+The close is requested asynchronously. A condition that is met after that
+request, including a callback that the event loop had already queued, cannot
+change the reason nor request another close. If another component closes the
+spider first, the extension keeps its reason but the close request, when it
+runs, does nothing.
+
+Use :meth:`Crawler.get_extension() <scrapy.crawler.Crawler.get_extension>` to
+get the instance after a crawl and read its
+:attr:`~scrapy.extensions.closespider.CloseSpider.close_reason` to find out
+whether this extension asked for the close and why; it is ``None`` if no
+condition was met. Each crawler has its own extension instance, so the state
+of one crawl is not affected by another.
+
+If asking the engine to close the spider raises, the extension logs the
+exception with the ``scrapy.extensions.closespider`` logger, sends the
+:signal:`spider_error` signal with the failure, and stores the failure in
+:attr:`~scrapy.extensions.closespider.CloseSpider.close_failure`. The latch
+stays set: the extension does not retry the close, and later conditions are
+still ignored.
 
 .. setting:: CLOSESPIDER_TIMEOUT
 
