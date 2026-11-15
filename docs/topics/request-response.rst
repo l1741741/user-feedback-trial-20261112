@@ -1635,6 +1635,60 @@ BodyFileResponse objects
 .. autoclass:: BodyFileResponse
     :members: body_file
 
+.. _topics-request-response-headers:
+
+Headers objects
+---------------
+
+.. autoclass:: Headers
+
+    .. automethod:: Headers.redacted_copy
+
+Use :meth:`~Headers.redacted_copy` when you need to store or share the
+headers of a request or response, for example in a log message or a support
+ticket, without exposing credentials. It returns a new
+:class:`Headers` object and never changes the original headers:
+
+.. skip: next
+
+.. code-block:: python
+
+    safe_headers = request.headers.redacted_copy(
+        fields=["X-Api-Key"],
+        allowed_cookies=["theme"],
+    )
+    logger.debug("Request headers: %s", safe_headers.to_string())
+
+In the copy, the ``Authorization`` and ``Proxy-Authorization`` fields and
+every field passed as *fields* have their values replaced with
+``[REDACTED]``; field name matching is case-insensitive. The ``Cookie`` and
+``Set-Cookie`` fields are instead handled by cookie name: a cookie is kept
+unchanged only when its name is listed in *allowed_cookies*, every other
+cookie value is masked, and a cookie header that cannot be parsed safely is
+masked as a whole. Cookie name matching is case-sensitive and only matches
+whole names, so allowing ``sid`` does not expose ``sid`` inside
+``sessionid``. Pass ``strategy="remove"`` to drop sensitive fields and
+cookies instead of masking them:
+
+.. skip: next
+
+.. code-block:: python
+
+    safe_headers = response.headers.redacted_copy(
+        allowed_cookies=["theme"],
+        strategy="remove",
+    )
+
+Each ``Set-Cookie`` value stays a separate entry in the copy, including its
+attributes such as ``Expires``; the commas those attributes contain never
+split one value into several. The copy owns its value lists, so modifying
+it afterwards cannot change the original headers. Calling
+``redacted_copy()`` again on a redacted copy produces the same result.
+
+Invalid arguments, including an unknown strategy, a name containing CR or
+LF, or a failing iterable, raise an error before any header is read, so the
+original headers are left untouched and no partially redacted copy is
+returned.
 
 Other functions related to responses
 ====================================

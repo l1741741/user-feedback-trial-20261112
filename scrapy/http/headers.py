@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Self, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Literal, Self, TypeAlias, cast
 
 from w3lib.http import headers_dict_to_raw
 
@@ -14,6 +14,89 @@ if TYPE_CHECKING:
 
 
 _RawValue: TypeAlias = bytes | str | int
+
+#: Value written in place of a redacted header or cookie value.
+REDACTION_PLACEHOLDER: bytes = b"[REDACTED]"
+
+# Header fields whose values are credentials and are always redacted.
+_DEFAULT_REDACTED_FIELDS: tuple[bytes, ...] = (
+    b"Authorization",
+    b"Proxy-Authorization",
+)
+
+# RFC 9110 token characters, used to recognize a safe cookie name.
+_COOKIE_NAME_CHARS = frozenset(
+    b"!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+)
+
+_RedactionStrategy: TypeAlias = Literal["mask", "remove"]
+
+
+def _is_cookie_name(name: bytes) -> bool:
+    """Return whether *name* is an RFC 9110 token usable as a cookie name."""
+    return bool(name) and all(char in _COOKIE_NAME_CHARS for char in name)
+
+
+def _parse_cookie_pairs(value: bytes) -> list[tuple[bytes, bytes]] | None:
+    """Split a ``Cookie`` request header into ``(name, raw_pair)`` pairs.
+
+    The raw pair keeps the original spelling, including any ``=`` inside the
+    cookie value. Return ``None`` when the header cannot be parsed safely, so
+    the caller can redact it as a whole without inspecting its contents.
+    """
+    pairs: list[tuple[bytes, bytes]] = []
+    # RFC 6265 separates cookie pairs with "; "; a ";" without a space would
+    # make the bytes after it part of the previous cookie's value, so it
+    # could smuggle a non-whitelisted cookie past the name check.
+    if b";" in value.replace(b"; ", b""):
+        return None
+    for raw_pair in value.split(b"; "):
+        if b"=" not in raw_pair:
+            return None
+        name = raw_pair.split(b"=", 1)[0]
+        if not _is_cookie_name(name):
+            return None
+        pairs.append((name, raw_pair))
+    return pairs
+
+
+def _parse_set_cookie_name(value: bytes) -> bytes | None:
+    """Return the cookie name of a ``Set-Cookie`` header value, or ``None``.
+
+    Only the leading ``name=value`` pair is inspected; attributes after the
+    first semicolon, whose values may contain commas (e.g. ``Expires``), are
+    never split or otherwise interpreted.
+    """
+    first_pair = value.split(b";", 1)[0].strip()
+    if b"=" not in first_pair:
+        return None
+    name = first_pair.split(b"=", 1)[0]
+    return name if _is_cookie_name(name) else None
+
+
+def _validate_names(names: Iterable[str | bytes], encoding: str) -> list[bytes]:
+    """Materialize and validate header or cookie names from a parameter.
+
+    The iterable is consumed eagerly so a failing parameter cannot leave the
+    caller's iterator partially consumed. Names containing CR or LF are
+    rejected to keep redacted output free of injected header lines.
+    """
+    normalized: list[bytes] = []
+    for name in tuple(names):
+        if not isinstance(name, (str, bytes)):
+            raise TypeError(
+                "Header and cookie names must be str or bytes, got "
+                f"{type(name).__name__}"
+            )
+        raw_name = name.encode(encoding) if isinstance(name, str) else name
+        if not raw_name:
+            raise ValueError("Header and cookie names must not be empty")
+        if b"\r" in raw_name or b"\n" in raw_name:
+            raise ValueError(
+                "Header and cookie names must not contain CR or LF characters"
+            )
+        normalized.append(raw_name)
+    return normalized
 
 
 class Headers(dict):  # type: ignore[type-arg]
@@ -225,6 +308,111 @@ class Headers(dict):  # type: ignore[type-arg]
             for key, values in self.items()
             for value in values
         ]
+
+    def redacted_copy(
+        self,
+        *,
+        fields: Iterable[str | bytes] = (),
+        allowed_cookies: Iterable[str | bytes] = (),
+        strategy: _RedactionStrategy = "mask",
+    ) -> Self:
+        """Return a copy with credentials and sensitive headers redacted.
+
+        The object itself is never modified, and the returned copy does not
+        share any value lists with it, so the copy can be logged or attached
+        to a support ticket safely.
+
+        Header field names in *fields* are matched case-insensitively; the
+        ``Authorization`` and ``Proxy-Authorization`` fields are always
+        redacted. With the default ``"mask"`` *strategy*, every value of a
+        redacted field is replaced by :data:`REDACTION_PLACEHOLDER`, keeping
+        one placeholder per original value. With ``"remove"``, redacted
+        fields are left out of the copy.
+
+        ``Cookie`` and ``Set-Cookie`` are handled by cookie name instead of
+        as opaque fields: cookies whose name is in *allowed_cookies*
+        (case-sensitive) are kept verbatim. In a ``Cookie`` request header
+        each other cookie keeps its name while its value is masked, and a
+        header whose cookie names cannot safely be parsed is redacted as a
+        whole. Each ``Set-Cookie`` value is treated as one cookie, so its
+        multi-value boundaries and attributes such as ``Expires`` are
+        preserved; non-whitelisted and unparseable values are redacted as a
+        whole. Under ``"remove"``, non-allowed cookies and unparseable
+        values are dropped.
+
+        All parameters are validated before any data is read from the
+        object, so an invalid argument raises without modifying the source
+        or producing a partially redacted result.
+
+        .. versionadded:: VERSION
+        """
+        if strategy not in ("mask", "remove"):
+            raise ValueError(f"strategy must be 'mask' or 'remove', got {strategy!r}")
+        extra_fields = _validate_names(fields, self.encoding)
+        allowed = frozenset(_validate_names(allowed_cookies, self.encoding))
+        redacted_fields = frozenset(
+            name.lower() for name in (*_DEFAULT_REDACTED_FIELDS, *extra_fields)
+        )
+
+        redacted: dict[bytes, list[bytes]] = {}
+        for key, values in dict.items(self):
+            lower_key = key.lower()
+            if lower_key in redacted_fields:
+                if strategy == "mask":
+                    # One placeholder per original value; an empty list is a
+                    # header set to None and is kept as an empty list.
+                    redacted[key] = [REDACTION_PLACEHOLDER for _ in values]
+                continue
+            if lower_key == b"cookie":
+                new_values = self._redact_cookie_values(values, allowed, strategy)
+            elif lower_key == b"set-cookie":
+                new_values = self._redact_set_cookie_values(values, allowed, strategy)
+            else:
+                new_values = list(values)
+            if new_values or not values:
+                redacted[key] = new_values
+        return self.__class__(redacted, encoding=self.encoding)
+
+    @staticmethod
+    def _redact_cookie_values(
+        values: list[bytes],
+        allowed: frozenset[bytes],
+        strategy: _RedactionStrategy,
+    ) -> list[bytes]:
+        redacted_values: list[bytes] = []
+        for value in values:
+            pairs = _parse_cookie_pairs(value)
+            if pairs is None:
+                if strategy == "mask":
+                    redacted_values.append(REDACTION_PLACEHOLDER)
+                continue
+            if all(name in allowed for name, _ in pairs):
+                redacted_values.append(value)
+                continue
+            kept_pairs: list[bytes] = []
+            for name, raw_pair in pairs:
+                if name in allowed:
+                    kept_pairs.append(raw_pair)
+                elif strategy == "mask":
+                    kept_pairs.append(name + b"=" + REDACTION_PLACEHOLDER)
+            if kept_pairs:
+                redacted_values.append(b"; ".join(kept_pairs))
+        return redacted_values
+
+    @staticmethod
+    def _redact_set_cookie_values(
+        values: list[bytes],
+        allowed: frozenset[bytes],
+        strategy: _RedactionStrategy,
+    ) -> list[bytes]:
+        redacted_values: list[bytes] = []
+        for value in values:
+            name = _parse_set_cookie_name(value)
+            if name is not None and name in allowed:
+                redacted_values.append(value)
+            elif strategy == "mask":
+                redacted_values.append(REDACTION_PLACEHOLDER)
+        return redacted_values
 
     def __copy__(self) -> Self:
         return self.__class__(self)

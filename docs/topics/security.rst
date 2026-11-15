@@ -311,6 +311,13 @@ and a crawl that spans multiple domains can leak them to unintended hosts:
   HTTPS to HTTP, but you can tighten it further (for example, to
   ``same-origin`` or ``no-referrer``) if needed.
 
+When you log headers or attach them to a support ticket, use
+:meth:`Headers.redacted_copy() <scrapy.http.headers.Headers.redacted_copy>`
+to obtain a copy with the ``Authorization`` and ``Proxy-Authorization``
+headers, any other fields you name, and non-whitelisted cookies masked, so
+the credentials above and session cookies are not written to logs or shared
+outside the crawl.
+
 .. _security-job-state:
 
 Job state integrity
