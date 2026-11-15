@@ -2006,6 +2006,35 @@ Example:
 
     NEWSPIDER_MODULE = "mybot.spiders_dev"
 
+.. setting:: OFFSITE_RULES_SNAPSHOT
+
+OFFSITE_RULES_SNAPSHOT
+----------------------
+
+.. versionadded:: VERSION
+
+Default: ``False``
+
+Whether :class:`~scrapy.downloadermiddlewares.offsite.OffsiteMiddleware`
+validates the allowed-domain rules when the spider opens and then keeps them
+frozen for the whole crawl.
+
+When enabled, the spider's :attr:`~scrapy.Spider.allowed_domains` is read once
+in
+:meth:`~scrapy.downloadermiddlewares.offsite.OffsiteMiddleware.spider_opened`,
+and changing it later has no effect. Rules can be replaced only through
+:meth:`~scrapy.downloadermiddlewares.offsite.OffsiteMiddleware.reload_rules`,
+which validates every new rule before publishing any of them. Each published
+set of rules has a version identifier that requests carry in their
+:reqmeta:`offsite_rules_version` :attr:`~scrapy.Request.meta` key.
+
+Enabling this setting also switches the rules to the stricter syntax
+described in :ref:`offsite-rules-snapshots`: an exact host, ``*.`` for
+subdomains only, an optional port, and bracketed IPv6 addresses. Invalid rules
+close the spider as failed when it opens; invalid rules passed to
+:meth:`~scrapy.downloadermiddlewares.offsite.OffsiteMiddleware.reload_rules`
+raise :exc:`ValueError` and leave the current rules in place.
+
 .. setting:: REACTOR_THREADPOOL_MAXSIZE
 
 REACTOR_THREADPOOL_MAXSIZE

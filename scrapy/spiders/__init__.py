@@ -92,6 +92,13 @@ class Spider(object_ref):
     .. versionchanged:: 2.18.0
        Changes to this attribute during a crawl are now taken into account.
 
+    .. versionchanged:: VERSION
+       When :setting:`OFFSITE_RULES_SNAPSHOT` is enabled, this attribute is
+       read once when the spider opens, and the rules it holds are then
+       frozen until
+       :meth:`~scrapy.downloadermiddlewares.offsite.OffsiteMiddleware.reload_rules`
+       publishes new ones. See :ref:`offsite-rules-snapshots`.
+
     Let's say your target URL is ``https://www.example.com/1.html``, then add
     ``'example.com'`` to the list.
 

@@ -601,12 +601,18 @@ one per actual value of the placeholder.
     Number of distinct domains for which at least 1 request was dropped for
     being offsite.
 
+    When :setting:`OFFSITE_RULES_SNAPSHOT` is enabled, domains are counted in
+    their normalized form, so equivalent spellings of the same host, such as
+    different letter case, a trailing dot, or a Unicode name and its IDNA
+    form, count once.
+
     Set by :class:`~scrapy.downloadermiddlewares.offsite.OffsiteMiddleware`.
 
 .. stat:: offsite/filtered
 
 ``offsite/filtered``
-    Number of requests dropped for being offsite.
+    Number of requests dropped for being offsite. Requests dropped for
+    carrying an unknown :reqmeta:`offsite_rules_version` are included.
 
     Set by :class:`~scrapy.downloadermiddlewares.offsite.OffsiteMiddleware`.
 

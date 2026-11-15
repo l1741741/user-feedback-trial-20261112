@@ -837,6 +837,7 @@ Those are:
 * :reqmeta:`is_start_request`
 * :reqmeta:`link_text`
 * :reqmeta:`max_retry_times`
+* :reqmeta:`offsite_rules_version`
 * :reqmeta:`priority_adjust`
 * :reqmeta:`proxy`
 * :reqmeta:`proxy_headers`
@@ -1075,6 +1076,42 @@ max_retry_times
 The meta key is used set retry times per request. When set, the
 :reqmeta:`max_retry_times` meta key takes higher precedence over the
 :setting:`RETRY_TIMES` setting.
+
+.. reqmeta:: offsite_rules_version
+
+offsite_rules_version
+---------------------
+
+.. versionadded:: VERSION
+
+The identifier of the snapshot of the :ref:`offsite rules
+<offsite-rules-snapshots>` that
+:class:`~scrapy.downloadermiddlewares.offsite.OffsiteMiddleware` evaluates this
+request with, when :setting:`OFFSITE_RULES_SNAPSHOT` is enabled.
+
+The middleware writes this key and treats it as its own: it stamps requests
+that do not carry it with the current version and evaluates them with that
+snapshot on every later check, including after a reload. An identifier that a
+request already carries is never replaced. A request that carries an
+identifier the middleware does not know, because it was never published or is
+no longer retained, is filtered with an
+:exc:`~scrapy.exceptions.IgnoreRequest` that mentions the version. A value
+that is not a string is treated the same way.
+
+The identifier is derived from the normalized rules, so the same rules have
+the same identifier in another process. Requests persisted in a
+:setting:`JOBDIR` therefore resume with the rules they were admitted under,
+and are filtered when a later run publishes different rules.
+
+Selecting a snapshot never grants access by itself: the request still has to
+match the rules of that snapshot. :attr:`~scrapy.Request.dont_filter` and the
+:reqmeta:`allow_offsite` key keep their precedence and allow the request
+before the version is looked up, so a request with an unknown version is
+still allowed when either of them is set.
+
+Because the key lives in :attr:`~scrapy.Request.meta`, requests created with
+:meth:`~scrapy.Request.replace` or :meth:`~scrapy.Request.copy` keep the
+snapshot they were stamped with.
 
 .. reqmeta:: proxy_headers
 

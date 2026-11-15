@@ -905,6 +905,48 @@ OffsiteMiddleware
 
    .. automethod:: should_follow
 
+   .. automethod:: reload_rules
+
+   .. automethod:: get_rules_version
+
+.. _offsite-rules-snapshots:
+
+Offsite rule snapshots
+~~~~~~~~~~~~~~~~~~~~~~
+
+By default,
+:attr:`Spider.allowed_domains <scrapy.Spider.allowed_domains>` is read for
+each request, so changing it while the spider runs affects the requests
+scheduled afterwards. When the list is changed from outside the crawl, e.g.
+by configuration code running in the same process, requests that were already
+admitted for a batch can change their verdict halfway through.
+
+Enable :setting:`OFFSITE_RULES_SNAPSHOT` to freeze the rules instead:
+
+.. code-block:: python
+
+    OFFSITE_RULES_SNAPSHOT = True
+
+The rules are then validated when the spider opens, and each request is
+evaluated with a snapshot identified by the :reqmeta:`offsite_rules_version`
+request meta key. Publish new rules explicitly with
+:meth:`~scrapy.downloadermiddlewares.offsite.OffsiteMiddleware.reload_rules`:
+
+.. code-block:: python
+
+    from scrapy.downloadermiddlewares.offsite import OffsiteMiddleware
+
+
+    def reload_offsite_rules(crawler, spider, rules):
+        for middleware in crawler.engine.downloader.middleware.middlewares:
+            if isinstance(middleware, OffsiteMiddleware):
+                return middleware.reload_rules(spider, rules)
+        raise RuntimeError("OffsiteMiddleware is not enabled")
+
+All rules are validated first. If one is invalid, :exc:`ValueError` (or
+:exc:`TypeError` for an entry that is not a string) is raised and the current
+snapshot stays in place, so a reload never publishes part of its input.
+
 RedirectMiddleware
 ------------------
 
