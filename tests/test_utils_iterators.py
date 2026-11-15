@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import json
+from typing import Any
+
 import pytest
 
 from scrapy.http import Response, TextResponse, XmlResponse
-from scrapy.utils.iterators import _body_or_str, csviter, xmliter_lxml
+from scrapy.utils.iterators import (
+    JsonlBudgetError,
+    JsonlError,
+    _body_or_str,
+    csviter,
+    jsonl_iter,
+    xmliter_lxml,
+)
 from tests import get_testdata
 
 
@@ -484,6 +494,368 @@ class TestUtilsCsv:
                 "value": "\u255a\u2569\u2569\u2569\u2550\u2550\u2557",
             },
         ]
+
+
+class _OneShotStream:
+    """A forward-only binary stream with short reads and no seek."""
+
+    def __init__(self, data: bytes, max_read: int | None = None) -> None:
+        self._data = data
+        self._max_read = max_read
+        self.read_sizes: list[int] = []
+        self.close_calls = 0
+
+    def read(self, size: int) -> bytes:
+        self.read_sizes.append(size)
+        if size < 0:
+            raise AssertionError("jsonl_iter() must bound every read")
+        limit = size if self._max_read is None else min(size, self._max_read)
+        chunk = self._data[:limit]
+        self._data = self._data[limit:]
+        return chunk
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class TestJsonlIter:
+    @pytest.mark.parametrize(
+        ("data", "expected"),
+        [
+            (b'{"a": 1}\n{"b": 2}\n', [{"a": 1}, {"b": 2}]),
+            (b'{"a": 1}\n{"b": 2}', [{"a": 1}, {"b": 2}]),
+            (b'{"a": 1}\r\n{"b": 2}\r\n', [{"a": 1}, {"b": 2}]),
+            (b'\xef\xbb\xbf{"a": 1}\n', [{"a": 1}]),
+            (b'{"a": 1}\n\n\n{"b": 2}\n', [{"a": 1}, {"b": 2}]),
+            (b"", []),
+            (b"\n\r\n\n", []),
+            (b'{"a": {"b": [1, 2, {"c": "}"}]}}\n', [{"a": {"b": [1, 2, {"c": "}"}]}}]),
+            (b'{"a": "\xc3\xa9\xe2\x82\xac"}\n', [{"a": "é€"}]),
+        ],
+    )
+    def test_rows(self, data: bytes, expected: list[dict[str, Any]]) -> None:
+        assert list(jsonl_iter(data)) == expected
+
+    def test_bytes_and_text_response_are_equivalent(self) -> None:
+        body = b'{"id": 1}\n{"id": 2}\n'
+        response = TextResponse(url="http://example.com/", body=body)
+        assert (
+            list(jsonl_iter(response))
+            == list(jsonl_iter(body))
+            == [
+                {"id": 1},
+                {"id": 2},
+            ]
+        )
+
+    def test_non_text_response_is_serialized_bytes(self) -> None:
+        response = Response(url="http://example.com/", body=b'{"id": 1}\n')
+        assert list(jsonl_iter(response)) == [{"id": 1}]
+
+    @pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 7])
+    def test_arbitrary_chunk_boundaries(self, chunk_size: int) -> None:
+        data = (
+            '{"id": 1}\n{"text": "déjà vu 名前"}\n{"nested": {"a": [1, 2]}}\n'.encode()
+        )
+        expected = list(jsonl_iter(data))
+        stream = _OneShotStream(data, max_read=chunk_size)
+        assert list(jsonl_iter(stream, chunk_size=chunk_size)) == expected
+        assert stream.read_sizes
+        assert all(1 <= size <= chunk_size for size in stream.read_sizes)
+        assert stream.close_calls == 0
+
+    def test_multibyte_character_split_across_chunks(self) -> None:
+        # "€" is three bytes and "€" alone is never returned by a chunk_size=1
+        # read that ends at a character boundary.
+        data = '{"value": "€"}\n'.encode()
+        stream = _OneShotStream(data, max_read=1)
+        assert list(jsonl_iter(stream, chunk_size=1)) == [{"value": "€"}]
+
+    def test_short_reads_are_not_eof(self) -> None:
+        data = b'{"a": 1}\n{"b": 2}\n'
+        for max_read in (1, 2, 3, 4):
+            stream = _OneShotStream(data, max_read=max_read)
+            assert list(jsonl_iter(stream, chunk_size=8)) == [{"a": 1}, {"b": 2}]
+
+    def test_bom_only_on_first_line(self) -> None:
+        data = b'\xef\xbb\xbf{"a": 1}\n\xef\xbb\xbf{"b": 2}\n'
+        with pytest.raises(JsonlError) as exc_info:
+            list(jsonl_iter(data))
+        assert exc_info.value.line == 2
+        assert exc_info.value.exception is json.JSONDecodeError
+
+    def test_bom_splits_across_chunks(self) -> None:
+        data = b'\xef\xbb\xbf{"a": 1}\n'
+        stream = _OneShotStream(data, max_read=1)
+        assert list(jsonl_iter(stream, chunk_size=1)) == [{"a": 1}]
+
+    @pytest.mark.parametrize(
+        ("data", "line", "exception"),
+        [
+            (b'{"a": 1}\nBAD\n', 2, json.JSONDecodeError),
+            (b'{"a": 1}\n[1, 2]\n', 2, JsonlError),
+            (b'{"a": 1}\n"text"\n', 2, JsonlError),
+            (b'{"a": 1}\nnull\n', 2, JsonlError),
+            (b'{"a": 1}\n{"detail": "\xff"}\n', 2, UnicodeDecodeError),
+            (b"\xff\n", 1, UnicodeDecodeError),
+        ],
+    )
+    def test_invalid_row_fails_with_line_number(
+        self, data: bytes, line: int, exception: type[BaseException]
+    ) -> None:
+        iterator = jsonl_iter(data)
+        with pytest.raises(JsonlError) as exc_info:
+            list(iterator)
+        assert exc_info.value.line == line
+        assert exc_info.value.exception is exception
+        assert isinstance(exc_info.value.__cause__, exception)
+
+    def test_invalid_utf8_split_across_chunks(self) -> None:
+        # The leading byte of a two-byte sequence arrives at the end of one
+        # chunk and the invalid continuation byte starts the next.
+        data = b'{"a": 1}\n\xc3\x28\n'
+        stream = _OneShotStream(data, max_read=1)
+        with pytest.raises(JsonlError) as exc_info:
+            list(jsonl_iter(stream, chunk_size=1))
+        assert exc_info.value.line == 2
+        assert exc_info.value.exception is UnicodeDecodeError
+
+    def test_truncated_multibyte_line_fails(self) -> None:
+        data = b'{"a": "\xe2\x82"\n'
+        with pytest.raises(JsonlError) as exc_info:
+            list(jsonl_iter(data))
+        assert exc_info.value.line == 1
+        assert exc_info.value.exception is UnicodeDecodeError
+
+    def test_rows_before_a_bad_row_are_returned(self) -> None:
+        iterator = jsonl_iter(b'{"a": 1}\n{"b": 2}\nBAD\n{"d": 4}\n')
+        assert next(iterator) == {"a": 1}
+        assert next(iterator) == {"b": 2}
+        with pytest.raises(JsonlError):
+            next(iterator)
+
+    def test_skip_invalid_records_only_line_and_exception_class(self) -> None:
+        data = b'{"a": 1}\nBAD\n{"detail": "\xff"}\n[1, 2]\n{"d": 4}\n'
+        iterator = jsonl_iter(data, skip_invalid=True)
+        assert list(iterator) == [{"a": 1}, {"d": 4}]
+        assert [(r.line, r.exception) for r in iterator.rejections] == [
+            (2, json.JSONDecodeError),
+            (3, UnicodeDecodeError),
+            (4, JsonlError),
+        ]
+        for rejection in iterator.rejections:
+            assert not hasattr(rejection, "data")
+
+    def test_blank_lines_do_not_shift_line_numbers(self) -> None:
+        data = b'{"a": 1}\n\n\nBAD\n'
+        with pytest.raises(JsonlError) as exc_info:
+            list(jsonl_iter(data))
+        assert exc_info.value.line == 4
+
+    def test_skip_invalid_does_not_replay_input(self) -> None:
+        data = b'{"a": 1}\nBAD\n{"b": 2}\n'
+        stream = _OneShotStream(data, max_read=2)
+        iterator = jsonl_iter(stream, skip_invalid=True, chunk_size=4)
+        assert list(iterator) == [{"a": 1}, {"b": 2}]
+        assert iterator.rejections[0].line == 2
+        # Every byte is read once, in short reads, with no seek or replay.
+        assert sum(stream.read_sizes) >= len(data)
+        assert len(stream.read_sizes) <= (len(data) // 2) + 2
+
+    def test_does_not_close_caller_stream_or_read_at_construction(self) -> None:
+        stream = _OneShotStream(b'{"a": 1}\n')
+        iterator = jsonl_iter(stream)
+        assert stream.read_sizes == []
+        assert list(iterator) == [{"a": 1}]
+        assert stream.close_calls == 0
+
+    def test_close_releases_buffers_and_stops_iteration(self) -> None:
+        stream = _OneShotStream(b'{"a": 1}\n{"b": 2}\n')
+        iterator = jsonl_iter(stream)
+        assert next(iterator) == {"a": 1}
+        iterator.close()
+        assert stream.close_calls == 0
+        assert list(iterator) == []
+        # A closed iterator never reads again.
+        assert len(stream.read_sizes) == 1
+
+    def test_context_manager_closes(self) -> None:
+        stream = _OneShotStream(b'{"a": 1}\n{"b": 2}\n')
+        with jsonl_iter(stream) as iterator:
+            assert next(iterator) == {"a": 1}
+        assert list(iterator) == []
+        assert stream.close_calls == 0
+
+    def test_rows_are_not_repeated(self) -> None:
+        iterator = jsonl_iter(b'{"a": 1}\n{"b": 2}\n')
+        assert [next(iterator), next(iterator)] == [{"a": 1}, {"b": 2}]
+        with pytest.raises(StopIteration):
+            next(iterator)
+
+    def test_two_iterators_are_independent(self) -> None:
+        first = jsonl_iter(
+            _OneShotStream(b'{"a": 1}\n{"a": 2}\n', max_read=2), chunk_size=3
+        )
+        second = jsonl_iter(
+            _OneShotStream(b'{"b": 1}\n{"b": 2}\n', max_read=2), chunk_size=3
+        )
+        assert next(first) == {"a": 1}
+        assert next(second) == {"b": 1}
+        assert list(first) == [{"a": 2}]
+        assert list(second) == [{"b": 2}]
+
+    def test_line_budget_boundary(self) -> None:
+        data = b'{"a": 1}\n'
+        assert list(jsonl_iter(data, max_line_bytes=8)) == [{"a": 1}]
+        with pytest.raises(JsonlBudgetError) as exc_info:
+            list(jsonl_iter(data, max_line_bytes=7))
+        assert exc_info.value.line == 1
+
+    def test_line_budget_ignores_terminators(self) -> None:
+        data = b'{"a": 1}\r\n'
+        assert list(jsonl_iter(data, max_line_bytes=8)) == [{"a": 1}]
+        data = b'{"a": 1}'
+        assert list(jsonl_iter(data, max_line_bytes=8)) == [{"a": 1}]
+
+    def test_line_budget_checked_before_delivery(self) -> None:
+        iterator = jsonl_iter(b'{"a": 1}\n{"bb": 2}\n', max_line_bytes=8)
+        assert next(iterator) == {"a": 1}
+        with pytest.raises(JsonlBudgetError):
+            next(iterator)
+
+    def test_overlong_line_is_skipped_with_bounded_reads(self) -> None:
+        stream = _OneShotStream(
+            b'{"a": 1}\n' + b"x" * 10_000 + b'\n{"b": 2}\n', max_read=1
+        )
+        iterator = jsonl_iter(
+            stream, skip_invalid=True, max_line_bytes=16, chunk_size=32
+        )
+        assert list(iterator) == [{"a": 1}, {"b": 2}]
+        assert [(r.line, r.exception) for r in iterator.rejections] == [
+            (2, JsonlBudgetError)
+        ]
+        assert all(size <= 32 for size in stream.read_sizes)
+
+    def test_overlong_line_fails_before_reading_the_rest(self) -> None:
+        stream = _OneShotStream(b'{"a": 1}\n' + b"x" * 10_000 + b'\n{"b": 2}\n')
+        with pytest.raises(JsonlBudgetError) as exc_info:
+            list(jsonl_iter(stream, max_line_bytes=16, chunk_size=32))
+        assert exc_info.value.line == 2
+        assert sum(stream.read_sizes) < 1000
+
+    def test_encoded_budget(self) -> None:
+        data = b'{"a": 1}\n{"b": 2}\n'
+        assert list(jsonl_iter(data, max_encoded_bytes=len(data))) == [
+            {"a": 1},
+            {"b": 2},
+        ]
+        with pytest.raises(JsonlBudgetError):
+            list(jsonl_iter(data, max_encoded_bytes=len(data) - 1))
+
+    def test_encoded_budget_cannot_be_skipped(self) -> None:
+        iterator = jsonl_iter(
+            b'{"a": 1}\n{"b": 2}\n', skip_invalid=True, max_encoded_bytes=8
+        )
+        with pytest.raises(JsonlBudgetError):
+            list(iterator)
+
+    def test_encoded_budget_bounds_reads(self) -> None:
+        stream = _OneShotStream(b'{"a": 1}\n{"b": 2}\n')
+        with pytest.raises(JsonlBudgetError):
+            list(jsonl_iter(stream, chunk_size=65536, max_encoded_bytes=8))
+        assert sum(stream.read_sizes) <= 9
+
+    def test_depth_budget_boundary(self) -> None:
+        data = b'{"a": {"b": {"c": 1}}}\n'
+        assert list(jsonl_iter(data, max_depth=3)) == [{"a": {"b": {"c": 1}}}]
+        with pytest.raises(JsonlBudgetError) as exc_info:
+            list(jsonl_iter(data, max_depth=2))
+        assert exc_info.value.line == 1
+
+    def test_depth_ignores_brackets_inside_strings(self) -> None:
+        data = b'{"a": "[[[{{{"}\n'
+        assert list(jsonl_iter(data, max_depth=1)) == [{"a": "[[[{{{"}]
+
+    def test_depth_budget_can_be_skipped(self) -> None:
+        iterator = jsonl_iter(
+            b'{"a": {"b": {"c": 1}}}\n{"ok": 1}\n', skip_invalid=True, max_depth=2
+        )
+        assert list(iterator) == [{"ok": 1}]
+        assert [(r.line, r.exception) for r in iterator.rejections] == [
+            (1, JsonlBudgetError)
+        ]
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"chunk_size": 0}, "chunk_size"),
+            ({"chunk_size": True}, "chunk_size"),
+            ({"max_line_bytes": 0}, "max_line_bytes"),
+            ({"max_depth": 0}, "max_depth"),
+            ({"max_encoded_bytes": -1}, "max_encoded_bytes"),
+            ({"skip_invalid": 1}, "skip_invalid"),
+        ],
+    )
+    def test_invalid_arguments(self, kwargs: dict[str, Any], match: str) -> None:
+        stream = _OneShotStream(b'{"a": 1}\n')
+        with pytest.raises(ValueError, match=match):
+            jsonl_iter(stream, **kwargs)
+        assert stream.read_sizes == []
+
+    def test_invalid_input_type(self) -> None:
+        with pytest.raises(TypeError, match="must be a Response, bytes or"):
+            jsonl_iter("text")  # type: ignore[arg-type]
+
+    def test_stream_returning_text_is_rejected(self) -> None:
+        class TextStream:
+            def read(self, size: int) -> str:
+                return '{"a": 1}\n'
+
+        with pytest.raises(TypeError, match="must return bytes"):
+            list(jsonl_iter(TextStream()))  # type: ignore[arg-type]
+
+    def test_parser_recursion_is_a_budget_error(self) -> None:
+        depth = 20_000
+        data = ('{"a":' * depth + "1" + "}" * depth + "\n").encode()
+        with pytest.raises(JsonlBudgetError) as exc_info:
+            list(jsonl_iter(data, max_depth=depth + 1))
+        assert exc_info.value.line == 1
+        assert isinstance(exc_info.value.__cause__, RecursionError)
+
+    def test_error_closes_the_iterator(self) -> None:
+        iterator = jsonl_iter(b'{"a": 1}\nBAD\n')
+        assert next(iterator) == {"a": 1}
+        with pytest.raises(JsonlError):
+            next(iterator)
+        assert list(iterator) == []
+
+    def test_iterator_returns_itself(self) -> None:
+        iterator = jsonl_iter(b'{"a": 1}\n')
+        assert iter(iterator) is iterator
+
+    def test_crlf_split_across_chunks(self) -> None:
+        data = b'{"a": 1}\r\n{"b": 2}\r\n'
+        stream = _OneShotStream(data, max_read=1)
+        assert list(jsonl_iter(stream, chunk_size=2)) == [{"a": 1}, {"b": 2}]
+
+    def test_no_trailing_newline_with_short_reads(self) -> None:
+        stream = _OneShotStream(b'{"a": 1}', max_read=1)
+        assert list(jsonl_iter(stream, chunk_size=3)) == [{"a": 1}]
+
+    def test_bom_on_a_later_line_is_rejected(self) -> None:
+        data = b'\n\xef\xbb\xbf{"a": 1}\n'
+        with pytest.raises(JsonlError) as exc_info:
+            list(jsonl_iter(data))
+        assert exc_info.value.line == 2
+        assert exc_info.value.exception is json.JSONDecodeError
+
+    def test_rejections_are_not_shared_between_iterators(self) -> None:
+        first = jsonl_iter(b"BAD\n", skip_invalid=True)
+        second = jsonl_iter(b'{"a": 1}\n', skip_invalid=True)
+        assert list(first) == []
+        assert list(second) == [{"a": 1}]
+        assert first.rejections != second.rejections
+        assert second.rejections == []
 
 
 class TestBodyOrStr:

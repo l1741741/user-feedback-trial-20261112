@@ -278,22 +278,34 @@ which scrapes one of these sites.
 .. _this page: https://metacpan.org/release/ECARROLL/HTML-TreeBuilderX-ASP_NET-0.09/view/lib/HTML/TreeBuilderX/ASP_NET.pm
 .. _example spider: https://github.com/AmbientLighter/rpn-fas/blob/master/fas/spiders/rnp.py
 
-What's the best way to parse big XML/CSV data feeds?
-----------------------------------------------------
+What's the best way to parse big XML/CSV/JSON Lines data feeds?
+---------------------------------------------------------------
 
 Parsing big feeds with XPath selectors can be problematic since they need to
 build the DOM of the entire feed in memory, and this can be quite slow and
 consume a lot of memory.
 
 In order to avoid parsing the entire feed at once in memory, you can use the
-:func:`~scrapy.utils.iterators.xmliter_lxml` and
-:func:`~scrapy.utils.iterators.csviter` functions. In fact, this is what
+:func:`~scrapy.utils.iterators.xmliter_lxml`,
+:func:`~scrapy.utils.iterators.csviter` and
+:func:`~scrapy.utils.iterators.jsonl_iter` functions. In fact, this is what
 :class:`~scrapy.spiders.XMLFeedSpider` and
 :class:`~scrapy.spiders.CSVFeedSpider` use.
 
 .. autofunction:: scrapy.utils.iterators.xmliter_lxml
 
 .. autofunction:: scrapy.utils.iterators.csviter
+
+.. autofunction:: scrapy.utils.iterators.jsonl_iter
+
+.. autoclass:: scrapy.utils.iterators.JsonlIterator
+    :members: close
+
+.. autoexception:: scrapy.utils.iterators.JsonlError
+
+.. autoexception:: scrapy.utils.iterators.JsonlBudgetError
+
+.. autoclass:: scrapy.utils.iterators.JsonlRejection
 
 Does Scrapy manage cookies automatically?
 -----------------------------------------
