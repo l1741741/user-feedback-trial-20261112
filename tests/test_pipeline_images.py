@@ -11,6 +11,7 @@ from shutil import rmtree
 from tempfile import mkdtemp
 from typing import Any
 from unittest import mock
+from unittest.mock import MagicMock
 
 import attr
 import pytest
@@ -19,14 +20,19 @@ from itemadapter import ItemAdapter
 from scrapy.exceptions import NotConfigured, ScrapyDeprecationWarning
 from scrapy.http import Request, Response
 from scrapy.item import Field, Item
-from scrapy.pipelines.files import FilesPipeline, GCSFilesStore, S3FilesStore
+from scrapy.pipelines.files import (
+    FilesPipeline,
+    FSFilesStore,
+    GCSFilesStore,
+    S3FilesStore,
+)
 from scrapy.pipelines.images import ImageException, ImagesPipeline
 from scrapy.utils.misc import build_from_crawler
 from scrapy.utils.test import get_crawler
 from tests.test_pipeline_files import CrawlerAwareStore
 from tests.utils.cloud import mock_google_cloud_storage
 from tests.utils.decorators import coroutine_test
-from tests.utils.media_pipelines import DUMMY_SPIDER_INFO
+from tests.utils.media_pipelines import DUMMY_SPIDER_INFO, mocked_download_func
 
 try:
     from PIL import Image
@@ -431,6 +437,93 @@ class TestImagesPipeline:
 
         with pytest.raises(TypeError, match="image_urls must be a list of URLs"):
             list(pipeline.get_media_requests(item, DUMMY_SPIDER_INFO))
+
+
+class TestImagesPipelinePathCollisionProtection:
+    def setup_method(self):
+        self.tempdir = mkdtemp()
+        crawler = get_crawler(
+            None,
+            {
+                "IMAGES_STORE": self.tempdir,
+                "FILES_PATH_COLLISION_PROTECTION": True,
+                "IMAGES_THUMBS": {"small": (20, 20)},
+            },
+        )
+        crawler.spider = crawler._create_spider()
+        crawler.engine = MagicMock(download_async=mocked_download_func)
+        self.pipeline = build_from_crawler(ImagesPipeline, crawler)
+        self.pipeline.open_spider()
+
+    def teardown_method(self):
+        rmtree(self.tempdir)
+
+    def test_thumbnail_paths_are_reserved(self) -> None:
+        url = "https://example.com/image.gif"
+        request = Request(url)
+        info = self.pipeline.spiderinfo
+        paths = self.pipeline._media_paths(request, info, item=None)
+        assert paths == [
+            self.pipeline.file_path(request, info=info),
+            self.pipeline.thumb_path(request, "small", info=info),
+        ]
+        self.pipeline._reserve_media_paths(request, info, item=None)
+        assert isinstance(self.pipeline.store, FSFilesStore)
+        reserved = self.pipeline.store._reservations[info]
+        assert set(reserved) == set(paths)
+
+    @coroutine_test
+    async def test_colliding_image_request_is_rejected(self) -> None:
+        """Two image URLs mapping to one path: only one is stored, and both the
+        full-size image and thumbnail keep their first bytes."""
+        _, buf = _create_image("JPEG", "RGB", (50, 50), (0, 0, 0))
+
+        class CollidingImagesPipeline(ImagesPipeline):
+            def file_path(self, request, response=None, info=None, *, item=None):
+                return "full/shared.jpg"
+
+            def thumb_path(
+                self, request, thumb_id, response=None, info=None, *, item=None
+            ):
+                return f"thumbs/{thumb_id}/shared.jpg"
+
+        crawler = get_crawler(
+            None,
+            {
+                "IMAGES_STORE": self.tempdir,
+                "FILES_PATH_COLLISION_PROTECTION": True,
+                "IMAGES_THUMBS": {"small": (20, 20)},
+            },
+        )
+        crawler.spider = crawler._create_spider()
+        crawler.engine = MagicMock(download_async=mocked_download_func)
+        pipeline = build_from_crawler(CollidingImagesPipeline, crawler)
+        pipeline.open_spider()
+
+        requests = [
+            Request(
+                f"https://example.com/{name}",
+                meta={
+                    "response": Response(
+                        f"https://example.com/{name}", body=buf.getvalue()
+                    )
+                },
+            )
+            for name in ("a", "b")
+        ]
+        item = ImagesPipelineTestItem()
+        item["image_urls"] = [r.url for r in requests]
+        with mock.patch.object(
+            ImagesPipeline, "get_media_requests", return_value=requests
+        ):
+            result = await pipeline.process_item(item)
+
+        assert len(result["images"]) == 1
+        full = Path(self.tempdir) / "full/shared.jpg"
+        thumb = Path(self.tempdir) / "thumbs/small/shared.jpg"
+        assert full.exists()
+        assert thumb.exists()
+        assert full.read_bytes() == buf.getvalue()
 
 
 class TestImagesPipelineFieldsMixin(ABC):

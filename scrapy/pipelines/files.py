@@ -12,6 +12,8 @@ import functools
 import hashlib
 import logging
 import mimetypes
+import os
+import tempfile
 import time
 import warnings
 from collections import defaultdict
@@ -19,7 +21,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from ftplib import FTP
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -30,7 +32,7 @@ from typing import (
     TypedDict,
     cast,
 )
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from itemadapter import ItemAdapter
 
@@ -75,6 +77,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class FilePathError(Exception):
+    """Raised when a media relative path cannot be written inside the storage
+    root, e.g. because it is absolute, it escapes the root with ``..``
+    components, or a symlink along it points outside of the root."""
+
+
+class FilePathCollisionError(FilePathError):
+    """Raised when two media requests with different request fingerprints map
+    to the same normalized relative path."""
+
+
+def _sanitize_url(url: str) -> str:
+    """Return *url* without any userinfo (username and password), so that the
+    URL can be included in error messages without leaking credentials."""
+    parsed = urlsplit(url)
+    if not parsed.username and not parsed.password:
+        return url
+    host = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    netloc = f"{host}{port}"
+    return urlunsplit(
+        (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
+    )
+
+
 def _to_string(path: str | PathLike[str]) -> str:
     return str(path)  # convert a Path object to string
 
@@ -114,6 +141,24 @@ class FilesStoreProtocol(Protocol):
     ) -> StatInfo | Deferred[StatInfo]: ...
 
 
+class _PathReservation:
+    """A path that a media download has reserved within a storage root.
+
+    *fingerprint* identifies the request that owns the reservation. *source_url*
+    is the request URL with its credentials removed, kept so that a later
+    collision can name both sources. *committed* marks reservations of paths
+    that have already been written or verified as up to date, which are kept
+    for the lifetime of the spider instead of being released.
+    """
+
+    __slots__ = ("committed", "fingerprint", "source_url")
+
+    def __init__(self, fingerprint: bytes, source_url: str) -> None:
+        self.fingerprint: bytes = fingerprint
+        self.source_url: str = source_url
+        self.committed: bool = False
+
+
 class FSFilesStore:
     checksum_algorithm: str = "md5"
 
@@ -126,6 +171,173 @@ class FSFilesStore:
             defaultdict(set)
         )
         self._mkdir(Path(self.basedir))
+        # When True, paths are validated and reserved before being written.
+        # The FilesPipeline turns this on through the
+        # FILES_PATH_COLLISION_PROTECTION setting; it stays off for stores used
+        # directly, so the historical behavior is preserved.
+        self.path_collision_protection: bool = False
+        self._reservations: defaultdict[
+            MediaPipeline.SpiderInfo, dict[str, _PathReservation]
+        ] = defaultdict(dict)
+        self._fingerprint_paths: defaultdict[
+            MediaPipeline.SpiderInfo, dict[bytes, set[str]]
+        ] = defaultdict(dict)
+
+    @property
+    def _root(self) -> Path:
+        return Path(self.basedir).resolve(strict=True)
+
+    def _validate_relative_path(self, path: str | PathLike[str]) -> str:
+        """Validate *path* as a relative path and return its normalized form.
+
+        The normalized form uses POSIX separators, with ``.`` components
+        removed, ``..`` components collapsed where possible and duplicate
+        separators collapsed. Absolute paths, and paths whose ``..`` components
+        climb above the storage root, are refused.
+        """
+        relative = _to_string(path)
+        pure_path = PurePosixPath(relative)
+        if pure_path.is_absolute() or pure_path.anchor or pure_path.drive:
+            raise FilePathError(
+                f"Absolute media paths are not allowed: {relative!r} must be "
+                f"relative to the storage root {self.basedir!r}."
+            )
+        normalized = PurePosixPath()
+        for component in pure_path.parts:
+            if component == "..":
+                if str(normalized) in {"", "."}:
+                    raise FilePathError(
+                        f"Media paths cannot escape the storage root with '..' "
+                        f"components: {relative!r}."
+                    )
+                normalized = normalized.parent
+            else:
+                normalized = normalized / component
+        normalized_str = normalized.as_posix()
+        if normalized_str in {"", "."}:
+            raise FilePathError(
+                f"Media paths must name a file inside the storage root, got "
+                f"{relative!r}."
+            )
+        return normalized_str
+
+    def _resolve_inside_root(self, relative: str) -> Path:
+        """Return the absolute filesystem path of *relative*, refusing
+        symlinks that resolve outside of the storage root."""
+        root = self._root
+        absolute_path = (root / relative).resolve(strict=False)
+        if absolute_path != root and root not in absolute_path.parents:
+            raise FilePathError(
+                f"Media path {relative!r} resolves to {str(absolute_path)!r}, "
+                f"which is outside of the storage root {self.basedir!r}."
+            )
+        return absolute_path
+
+    def reserve_path(
+        self,
+        path: str | PathLike[str],
+        info: MediaPipeline.SpiderInfo,
+        fingerprint: bytes,
+        source_url: str,
+    ) -> None:
+        """Reserve *path* for the request identified by *fingerprint*.
+
+        Reservations are scoped to *info*, i.e. to a single spider. Reserving a
+        path that the same fingerprint already holds is a no-op. A path held by
+        another fingerprint raises :class:`FilePathCollisionError` before
+        anything is written.
+        """
+        if not self.path_collision_protection:
+            return
+        relative = self._validate_relative_path(path)
+        # Fail on a symlink escape as early as possible, even before the file
+        # exists.
+        self._resolve_inside_root(relative)
+        reservations = self._reservations[info]
+        reservation = reservations.get(relative)
+        if reservation is not None:
+            if reservation.fingerprint == fingerprint:
+                return
+            raise FilePathCollisionError(
+                f"Media path {relative!r} is already reserved by a request to "
+                f"{_sanitize_url(reservation.source_url)} and cannot be reused "
+                f"by a different request to {_sanitize_url(source_url)}."
+            )
+        reservations[relative] = _PathReservation(
+            fingerprint, _sanitize_url(source_url)
+        )
+        self._fingerprint_paths[info].setdefault(fingerprint, set()).add(relative)
+
+    def release_path(
+        self,
+        path: str | PathLike[str],
+        info: MediaPipeline.SpiderInfo,
+        fingerprint: bytes,
+    ) -> None:
+        """Release an uncommitted reservation of *path* held by *fingerprint*.
+
+        Committed reservations, i.e. paths that were written or verified as up
+        to date, are kept for the rest of the spider run. Releasing a path that
+        is not reserved, or not reserved by this fingerprint, is a no-op.
+        """
+        if not self.path_collision_protection:
+            return
+        relative = self._validate_relative_path(path)
+        reservation = self._reservations[info].get(relative)
+        if reservation is None or reservation.fingerprint != fingerprint:
+            return
+        if reservation.committed:
+            return
+        del self._reservations[info][relative]
+        owned = self._fingerprint_paths[info].get(fingerprint)
+        if owned is not None:
+            owned.discard(relative)
+            if not owned:
+                del self._fingerprint_paths[info][fingerprint]
+
+    def release_fingerprint(
+        self, info: MediaPipeline.SpiderInfo, fingerprint: bytes
+    ) -> None:
+        """Release every uncommitted reservation held by *fingerprint*.
+
+        This drops the reservations of downloads that failed or were canceled
+        before their files were published.
+        """
+        if not self.path_collision_protection:
+            return
+        owned = self._fingerprint_paths[info].pop(fingerprint, set())
+        for relative in owned:
+            reservation = self._reservations[info].get(relative)
+            if reservation is not None and not reservation.committed:
+                del self._reservations[info][relative]
+
+    def commit_path(
+        self,
+        path: str | PathLike[str],
+        info: MediaPipeline.SpiderInfo,
+        fingerprint: bytes,
+    ) -> None:
+        """Keep the reservation of *path* for the rest of the spider run.
+
+        Called once a file has been published or an existing file was verified
+        as up to date. The path then stays occupied, so a later request with a
+        different fingerprint cannot treat this file as its own cache.
+        """
+        if not self.path_collision_protection:
+            return
+        relative = self._validate_relative_path(path)
+        reservation = self._reservations[info].get(relative)
+        if reservation is not None and reservation.fingerprint == fingerprint:
+            reservation.committed = True
+
+    def close(self) -> None:
+        """Forget every reservation.
+
+        Reservation state lives in memory only and is not inherited by a later
+        spider run.
+        """
+        self._reservations.clear()
+        self._fingerprint_paths.clear()
 
     def persist_file(
         self,
@@ -135,14 +347,53 @@ class FSFilesStore:
         meta: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> None:
+        if self.path_collision_protection:
+            relative = self._validate_relative_path(path)
+            absolute_path = self._resolve_inside_root(relative)
+            reservation = self._reservations[info].get(relative)
+            if reservation is None:
+                raise FilePathError(
+                    f"Media path {relative!r} has not been reserved before "
+                    f"being written."
+                )
+            self._mkdir(absolute_path.parent, info)
+            try:
+                self._atomic_write(absolute_path, buf.getvalue())
+            except BaseException:
+                # The file was never published, so free the reservation.
+                self.release_path(relative, info, reservation.fingerprint)
+                raise
+            reservation.committed = True
+            return
         absolute_path = self._get_filesystem_path(path)
         self._mkdir(absolute_path.parent, info)
         absolute_path.write_bytes(buf.getvalue())
 
+    def _atomic_write(self, absolute_path: Path, data: bytes) -> None:
+        """Write *data* to *absolute_path* through a temporary file in the same
+        directory, publishing it with an atomic rename. The temporary file is
+        removed if anything fails."""
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{absolute_path.name}.", suffix=".tmp", dir=absolute_path.parent
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as tmp_file:
+                tmp_file.write(data)
+            tmp_path.replace(absolute_path)
+        except BaseException:
+            with suppress(OSError):
+                tmp_path.unlink()
+            raise
+
     def stat_file(
         self, path: str | PathLike[str], info: MediaPipeline.SpiderInfo
     ) -> StatInfo:
-        absolute_path = self._get_filesystem_path(path)
+        if self.path_collision_protection:
+            relative = self._validate_relative_path(path)
+            absolute_path = self._resolve_inside_root(relative)
+        else:
+            absolute_path = self._get_filesystem_path(path)
         try:
             last_modified = absolute_path.stat().st_mtime
         except OSError:
@@ -688,6 +939,18 @@ class FilesPipeline(MediaPipeline):
         resolve = functools.partial(
             self._key_for_pipe, base_class_name=cls_name, settings=settings
         )
+        self.path_collision_protection: bool = settings.getbool(
+            resolve("FILES_PATH_COLLISION_PROTECTION"), False
+        )
+        if self.path_collision_protection:
+            if isinstance(self.store, FSFilesStore):
+                self.store.path_collision_protection = True
+            else:
+                logger.warning(
+                    f"FILES_PATH_COLLISION_PROTECTION only protects the local "
+                    f"filesystem storage (FSFilesStore); the configured "
+                    f"{type(self.store).__name__} does not support it."
+                )
         self.store.checksum_algorithm = _checksum_algorithm(
             settings, resolve("FILES_CHECKSUM_ALGORITHM")
         )
@@ -794,7 +1057,13 @@ class FilesPipeline(MediaPipeline):
             self.store.stat_file, False, path, info
         )
         dfd2: Deferred[FileInfo | None] = dfd.addCallback(
-            functools.partial(self._onsuccess, request=request, info=info, path=path)
+            functools.partial(
+                self._onsuccess_stat,
+                request=request,
+                info=info,
+                path=path,
+                fingerprint=self._fingerprinter.fingerprint(request),
+            )
         )
         dfd2.addErrback(lambda _: None)
         dfd2.addErrback(
@@ -805,6 +1074,88 @@ class FilesPipeline(MediaPipeline):
             )
         )
         return dfd2
+
+    def _onsuccess_stat(
+        self,
+        result: StatInfo,
+        request: Request,
+        info: MediaPipeline.SpiderInfo,
+        path: str,
+        fingerprint: bytes,
+    ) -> FileInfo | None:
+        file_info = self._onsuccess(result, request, info, path)
+        if file_info is not None:
+            # The existing file on disk is now an accepted result for this
+            # fingerprint, so keep its path occupied for the rest of the run.
+            self._commit_media_path(path, info, fingerprint)
+        return file_info
+
+    def _reserve_media_paths(
+        self, request: Request, info: MediaPipeline.SpiderInfo, item: Any
+    ) -> None:
+        """Reserve every storage path that this request may write, before the
+        download starts. Subclasses that store more than one file per request,
+        e.g. thumbnails, add their paths through :meth:`_media_paths`."""
+        if not self.path_collision_protection:
+            return
+        store = self.store
+        if not isinstance(store, FSFilesStore):
+            return
+        fingerprint = self._fingerprinter.fingerprint(request)
+        for path in self._media_paths(request, info, item):
+            store.reserve_path(path, info, fingerprint, request.url)
+
+    def _media_paths(
+        self,
+        request: Request,
+        info: MediaPipeline.SpiderInfo,
+        item: Any,
+    ) -> list[str]:
+        """Relative paths that processing *request* writes to. Overridden by
+        subclasses storing several files per request."""
+        return [self.file_path(request, info=info, item=item)]
+
+    def _commit_media_path(
+        self, path: str, info: MediaPipeline.SpiderInfo, fingerprint: bytes
+    ) -> None:
+        if not self.path_collision_protection:
+            return
+        store = self.store
+        if isinstance(store, FSFilesStore):
+            store.commit_path(path, info, fingerprint)
+
+    def _release_media_reservations(
+        self, info: MediaPipeline.SpiderInfo, fingerprint: bytes
+    ) -> None:
+        """Release the uncommitted reservations of a download that did not
+        publish its files."""
+        if not self.path_collision_protection:
+            return
+        store = self.store
+        if isinstance(store, FSFilesStore):
+            store.release_fingerprint(info, fingerprint)
+
+    async def _process_request(
+        self, request: Request, info: MediaPipeline.SpiderInfo, item: Any
+    ) -> FileInfo:
+        fingerprint = self._fingerprinter.fingerprint(request)
+        # Only the request that actually starts a download reserves paths;
+        # cached results and in-flight waiters reserve nothing. The reservation
+        # runs before the base machinery, so a collision or an unsafe path
+        # raises its specific error instead of a generic download failure.
+        is_leader = (
+            fingerprint not in info.downloaded and fingerprint not in info.downloading
+        )
+        if is_leader:
+            self._reserve_media_paths(request, info, item)
+        try:
+            return await super()._process_request(request, info, item)
+        finally:
+            if is_leader:
+                # A download that did not publish nor verify any file leaves
+                # only uncommitted reservations, which this releases. Committed
+                # paths are kept for the rest of the spider run.
+                self._release_media_reservations(info, fingerprint)
 
     def media_failed(
         self, failure: Failure, request: Request, info: MediaPipeline.SpiderInfo

@@ -17,7 +17,7 @@ from pathlib import Path
 from posixpath import split
 from shutil import rmtree
 from tempfile import mkdtemp
-from typing import Any
+from typing import Any, cast
 from unittest import mock
 from unittest.mock import MagicMock
 from urllib.parse import urlparse
@@ -34,13 +34,15 @@ from scrapy.http import Request, Response
 from scrapy.item import Field, Item
 from scrapy.pipelines import files
 from scrapy.pipelines.files import (
+    FilePathCollisionError,
+    FilePathError,
     FilesPipeline,
     FSFilesStore,
     FTPFilesStore,
     GCSFilesStore,
     S3FilesStore,
 )
-from scrapy.pipelines.media import FileException, _MediaRequestFiltered
+from scrapy.pipelines.media import FileException, MediaPipeline, _MediaRequestFiltered
 from scrapy.settings import Settings
 from scrapy.utils.asyncio import call_later
 from scrapy.utils.defer import maybe_deferred_to_future
@@ -125,9 +127,15 @@ class TestFilesPipeline:
         self.pipeline.store.close.assert_awaited_once_with()
 
     @coroutine_test
-    async def test_close_spider_without_store_close(self):
-        assert not hasattr(self.pipeline.store, "close")
+    async def test_close_spider_calls_sync_store_close(self):
+        # FSFilesStore.close() is synchronous; it must still be awaited safely
+        # and be idempotent.
+        store = self.pipeline.store
+        assert isinstance(store, FSFilesStore)
         await self.pipeline.close_spider()
+        await self.pipeline.close_spider()
+        assert not store._reservations
+        assert not store._fingerprint_paths
 
     def test_file_path_query_parameters(self):
         file_path = self.pipeline.file_path
@@ -1152,6 +1160,631 @@ class TestFSFilesStore:
     def test_stat_missing_file(self, tmp_path: Path) -> None:
         store = FSFilesStore(tmp_path)
         assert store.stat_file("full/filename", DUMMY_SPIDER_INFO) == {}
+
+
+class _CountingFSFilesStore(FSFilesStore):
+    """FSFilesStore that counts how many times each relative path is
+    published, and can block the write to control concurrency."""
+
+    def __init__(self, basedir: Any) -> None:
+        super().__init__(basedir)
+        self.write_counts: dict[str, int] = {}
+
+    def _atomic_write(self, absolute_path: Path, data: bytes) -> None:
+        relative = absolute_path.relative_to(self._root).as_posix()
+        self.write_counts[relative] = self.write_counts.get(relative, 0) + 1
+        super()._atomic_write(absolute_path, data)
+
+
+class TestFSFilesStorePathCollisionProtection:
+    def setup_method(self) -> None:
+        self.tempdir = mkdtemp()
+        self.store = FSFilesStore(self.tempdir)
+        self.store.path_collision_protection = True
+        self.info = DUMMY_SPIDER_INFO
+        self.fp1 = b"\x01" * 8
+        self.fp2 = b"\x02" * 8
+
+    def teardown_method(self) -> None:
+        rmtree(self.tempdir)
+
+    def _persist(self, path: str, data: bytes, fp: bytes, url: str) -> None:
+        self.store.reserve_path(path, self.info, fp, url)
+        self.store.persist_file(path, BytesIO(data), self.info)
+
+    @pytest.mark.parametrize(
+        ("raw", "normalized"),
+        [
+            ("full/name.bin", "full/name.bin"),
+            ("full//name.bin", "full/name.bin"),
+            ("full/./name.bin", "full/name.bin"),
+            ("full/a/b/../c.bin", "full/a/c.bin"),
+            ("a//b", "a/b"),
+        ],
+    )
+    def test_normalized_relative_path_used_for_collision(
+        self, raw: str, normalized: str
+    ) -> None:
+        assert self.store._validate_relative_path(raw) == normalized
+        self.store.reserve_path(raw, self.info, self.fp1, "http://example.com/a")
+        with pytest.raises(FilePathCollisionError):
+            self.store.reserve_path(
+                normalized, self.info, self.fp2, "http://example.com/b"
+            )
+
+    @pytest.mark.parametrize(
+        "bad_path",
+        [
+            "/absolute/path",
+            "/",
+            "..",
+            "../escape",
+            "full/../../escape",
+            "a/../../b",
+            "",
+            ".",
+            "./",
+        ],
+    )
+    def test_rejects_absolute_and_parent_escape(self, bad_path: str) -> None:
+        with pytest.raises(FilePathError):
+            self.store._validate_relative_path(bad_path)
+        with pytest.raises(FilePathError):
+            self.store.reserve_path(
+                bad_path, self.info, self.fp1, "http://example.com/a"
+            )
+
+    def test_rejects_symlink_escape(self, tmp_path: Path) -> None:
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "secret").write_bytes(b"secret")
+        link_dir = Path(self.tempdir) / "full"
+        link_dir.mkdir()
+        (link_dir / "link").symlink_to(outside_dir, target_is_directory=True)
+        with pytest.raises(FilePathError):
+            self.store.reserve_path(
+                "full/link/secret", self.info, self.fp1, "http://example.com/a"
+            )
+        with pytest.raises(FilePathError):
+            self.store.stat_file("full/link/secret", self.info)
+        # The target outside of the root is untouched.
+        assert (outside_dir / "secret").read_bytes() == b"secret"
+
+    def test_rejects_persist_without_reservation(self) -> None:
+        with pytest.raises(FilePathError, match="has not been reserved"):
+            self.store.persist_file("full/name.bin", BytesIO(b"data"), self.info)
+
+    def test_same_fingerprint_reuses_reservation_once(self) -> None:
+        url = "http://example.com/a"
+        self.store.reserve_path("full/name.bin", self.info, self.fp1, url)
+        # Idempotent for the same fingerprint.
+        self.store.reserve_path("full/name.bin", self.info, self.fp1, url)
+        self.store.persist_file("full/name.bin", BytesIO(b"data"), self.info)
+        assert (Path(self.tempdir) / "full/name.bin").read_bytes() == b"data"
+
+    def test_different_fingerprints_same_path_rejected_before_write(self) -> None:
+        target = Path(self.tempdir) / "full/name.bin"
+        self._persist("full/name.bin", b"first", self.fp1, "http://example.com/a")
+        with pytest.raises(FilePathCollisionError) as exc_info:
+            self.store.reserve_path(
+                "full/name.bin", self.info, self.fp2, "http://example.com/b"
+            )
+        message = str(exc_info.value)
+        assert "http://example.com/a" in message
+        assert "http://example.com/b" in message
+        assert "full/name.bin" in message
+        # The first file is untouched and the second download never wrote.
+        assert target.read_bytes() == b"first"
+        assert target.stat().st_size == len(b"first")
+
+    def test_collision_message_hides_url_credentials(self) -> None:
+        self.store.reserve_path(
+            "full/name.bin",
+            self.info,
+            self.fp1,
+            "https://user:password@example.com/a?token=secret",
+        )
+        with pytest.raises(FilePathCollisionError) as exc_info:
+            self.store.reserve_path(
+                "full/name.bin",
+                self.info,
+                self.fp2,
+                "https://other:hunter2@example.com/b",
+            )
+        message = str(exc_info.value)
+        assert "user" not in message
+        assert "password" not in message
+        assert "hunter2" not in message
+        assert "https://example.com/a?token=secret" in message
+        assert "https://example.com/b" in message
+
+    def test_released_path_can_be_reserved_again(self) -> None:
+        self.store.reserve_path(
+            "full/name.bin", self.info, self.fp1, "http://example.com/a"
+        )
+        self.store.release_path("full/name.bin", self.info, self.fp1)
+        self.store.reserve_path(
+            "full/name.bin", self.info, self.fp2, "http://example.com/b"
+        )
+        self.store.persist_file("full/name.bin", BytesIO(b"second"), self.info)
+        assert (Path(self.tempdir) / "full/name.bin").read_bytes() == b"second"
+
+    def test_release_fingerprint_keeps_committed_paths(self) -> None:
+        self._persist("full/committed.bin", b"kept", self.fp1, "http://example.com/a")
+        self.store.reserve_path(
+            "full/pending.bin", self.info, self.fp1, "http://example.com/a"
+        )
+        self.store.release_fingerprint(self.info, self.fp1)
+        # The uncommitted reservation is gone, the committed one stays.
+        self.store.reserve_path(
+            "full/pending.bin", self.info, self.fp2, "http://example.com/b"
+        )
+        with pytest.raises(FilePathCollisionError):
+            self.store.reserve_path(
+                "full/committed.bin", self.info, self.fp2, "http://example.com/b"
+            )
+
+    def test_release_path_is_a_noop_for_other_fingerprint(self) -> None:
+        self.store.reserve_path(
+            "full/name.bin", self.info, self.fp1, "http://example.com/a"
+        )
+        self.store.release_path("full/name.bin", self.info, self.fp2)
+        with pytest.raises(FilePathCollisionError):
+            self.store.reserve_path(
+                "full/name.bin", self.info, self.fp2, "http://example.com/b"
+            )
+
+    def test_write_failure_removes_temporary_file_and_reservation(self) -> None:
+        self.store.reserve_path(
+            "full/name.bin", self.info, self.fp1, "http://example.com/a"
+        )
+        target = Path(self.tempdir) / "full/name.bin"
+        with (
+            mock.patch.object(
+                FSFilesStore,
+                "_atomic_write",
+                side_effect=OSError("disk full"),
+            ),
+            pytest.raises(OSError, match="disk full"),
+        ):
+            self.store.persist_file("full/name.bin", BytesIO(b"data"), self.info)
+        assert not target.exists()
+        assert list(Path(self.tempdir, "full").iterdir()) == []
+        # The reservation is released so the path can be retried.
+        self.store.reserve_path(
+            "full/name.bin", self.info, self.fp2, "http://example.com/b"
+        )
+
+    def test_atomic_write_leaves_no_temp_file_on_failure(self, tmp_path: Path) -> None:
+        store = FSFilesStore(tmp_path)
+        target = tmp_path / "name.bin"
+        with (
+            mock.patch.object(Path, "replace", side_effect=OSError("no space")),
+            pytest.raises(OSError, match="no space"),
+        ):
+            store._atomic_write(target, b"data")
+        assert list(tmp_path.iterdir()) == []
+
+    def test_close_clears_reservations_and_is_repeatable(self) -> None:
+        self.store.reserve_path(
+            "full/name.bin", self.info, self.fp1, "http://example.com/a"
+        )
+        self.store.close()
+        self.store.close()
+        assert self.store._reservations == {}
+        assert self.store._fingerprint_paths == {}
+        # After close, the path is free again for a fresh reservation.
+        self.store.reserve_path(
+            "full/name.bin", self.info, self.fp2, "http://example.com/b"
+        )
+
+    def test_reservations_are_scoped_per_spider_info(self) -> None:
+        other_info = MediaPipeline.SpiderInfo(DefaultSpider("other"))
+        self.store.reserve_path(
+            "full/name.bin", self.info, self.fp1, "http://example.com/a"
+        )
+        # A different spider can reserve the same normalized path.
+        self.store.reserve_path(
+            "full/name.bin", other_info, self.fp1, "http://example.com/a"
+        )
+        self.store.persist_file("full/name.bin", BytesIO(b"other"), other_info)
+
+    def test_disabled_by_default_keeps_legacy_behavior(self, tmp_path: Path) -> None:
+        store = FSFilesStore(tmp_path)
+        assert store.path_collision_protection is False
+        # No reservation needed, and overwriting the same path is allowed.
+        store.persist_file("full/name.bin", BytesIO(b"one"), DUMMY_SPIDER_INFO)
+        store.persist_file("full/name.bin", BytesIO(b"two"), DUMMY_SPIDER_INFO)
+        assert (tmp_path / "full/name.bin").read_bytes() == b"two"
+        # Reservation APIs are no-ops when protection is off.
+        store.reserve_path("full/name.bin", DUMMY_SPIDER_INFO, self.fp1, "u")
+        store.release_fingerprint(DUMMY_SPIDER_INFO, self.fp1)
+        store.close()
+
+
+class TestFilesPipelinePathCollisionProtection:
+    def setup_method(self):
+        self.tempdir = mkdtemp()
+
+    def teardown_method(self):
+        rmtree(self.tempdir)
+
+    def _create_pipeline(
+        self,
+        pipeline_cls: type[FilesPipeline] = FilesPipeline,
+        settings: dict[str, Any] | None = None,
+    ) -> FilesPipeline:
+        crawler = get_crawler(
+            DefaultSpider,
+            {"FILES_STORE": self.tempdir, **(settings or {})},
+        )
+        crawler.spider = crawler._create_spider()
+        crawler.engine = MagicMock(download_async=mocked_download_func)
+        pipeline = build_from_crawler(pipeline_cls, crawler)
+        pipeline.open_spider()
+        return pipeline
+
+    @staticmethod
+    def _fs_store(pipeline: FilesPipeline) -> FSFilesStore:
+        assert isinstance(pipeline.store, FSFilesStore)
+        return pipeline.store
+
+    async def _process(self, pipeline: FilesPipeline, *urls: str | Request) -> Any:
+        requests = [
+            u if isinstance(u, Request) else _prepare_request_object(u) for u in urls
+        ]
+        item = ItemWithFiles()
+        item["file_urls"] = [r.url for r in requests]
+        with mock.patch.object(
+            FilesPipeline, "get_media_requests", return_value=requests
+        ):
+            return await pipeline.process_item(item)
+
+    def test_disabled_by_default(self) -> None:
+        pipeline = self._create_pipeline()
+        assert pipeline.path_collision_protection is False
+        assert self._fs_store(pipeline).path_collision_protection is False
+
+    def test_enabled_setting_turns_store_protection_on(self) -> None:
+        pipeline = self._create_pipeline(
+            settings={"FILES_PATH_COLLISION_PROTECTION": True}
+        )
+        assert pipeline.path_collision_protection is True
+        assert self._fs_store(pipeline).path_collision_protection is True
+
+    def test_remote_store_keeps_compatible(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # A non-FS store cannot be protected; the pipeline stays usable and
+        # only logs a warning.
+        crawler = get_crawler(
+            DefaultSpider,
+            {
+                "FILES_STORE": "mystore://example.com/",
+                "FILES_PATH_COLLISION_PROTECTION": True,
+                "MEDIA_STORAGES": {"mystore": "tests.test_pipeline_files.SimpleStore"},
+            },
+        )
+        with caplog.at_level(logging.WARNING):
+            pipeline = build_from_crawler(FilesPipeline, crawler)
+        assert pipeline.path_collision_protection is True
+        assert isinstance(pipeline.store, SimpleStore)
+        assert "does not support it" in caplog.text
+
+    @coroutine_test
+    async def test_same_content_different_urls_collide(self) -> None:
+        """Two URLs whose custom file_path maps to one path: the second result
+        fails instead of silently reusing the first file's bytes."""
+
+        class CollidingPipeline(FilesPipeline):
+            def file_path(self, request, response=None, info=None, *, item=None):
+                return "full/shared.bin"
+
+        pipeline = self._create_pipeline(
+            CollidingPipeline, {"FILES_PATH_COLLISION_PROTECTION": True}
+        )
+        result = await self._process(
+            pipeline,
+            "http://example.com/a",
+            "http://example.com/b",
+        )
+        assert len(result["files"]) == 1
+        info = result["files"][0]
+        assert info["path"] == "full/shared.bin"
+        target = Path(self.tempdir) / "full/shared.bin"
+        assert target.read_bytes() == b"data"
+        assert info["checksum"] == hashlib.md5(b"data").hexdigest()
+
+    @coroutine_test
+    async def test_different_content_same_path_no_overwrite(self) -> None:
+        class CollidingPipeline(FilesPipeline):
+            def file_path(self, request, response=None, info=None, *, item=None):
+                return "full/shared.bin"
+
+        pipeline = self._create_pipeline(
+            CollidingPipeline, {"FILES_PATH_COLLISION_PROTECTION": True}
+        )
+        pipeline.store = _CountingFSFilesStore(self.tempdir)
+        pipeline.store.path_collision_protection = True
+        request_a = _prepare_request_object("http://example.com/a", body=b"AAAA")
+        request_b = _prepare_request_object("http://example.com/b", body=b"BBBB")
+        item = ItemWithFiles()
+        item["file_urls"] = [request_a.url, request_b.url]
+        with mock.patch.object(
+            FilesPipeline,
+            "get_media_requests",
+            return_value=[request_a, request_b],
+        ):
+            result = await pipeline.process_item(item)
+
+        assert len(result["files"]) == 1
+        target = Path(self.tempdir) / "full/shared.bin"
+        assert target.read_bytes() == b"AAAA"
+        # The pipeline never treated the foreign file as a cache: one write.
+        assert pipeline.store.write_counts == {"full/shared.bin": 1}
+
+    @coroutine_test
+    async def test_same_url_merged_into_single_download(self) -> None:
+        """The in-flight merge for identical fingerprints is preserved: one
+        download, one write, two successful results sharing the file."""
+        pipeline = self._create_pipeline(
+            settings={"FILES_PATH_COLLISION_PROTECTION": True}
+        )
+        pipeline.store = _CountingFSFilesStore(self.tempdir)
+        pipeline.store.path_collision_protection = True
+
+        url = "http://example.com/duplicate.pdf"
+        result = await self._process(pipeline, url, url)
+        assert len(result["files"]) == 2
+        assert all(f["status"] == "downloaded" for f in result["files"])
+        assert pipeline.store.write_counts == {result["files"][0]["path"]: 1}
+
+    @coroutine_test
+    async def test_deferred_persist_keeps_reservation(self) -> None:
+        """A persist_file() that returns a deferred keeps the path occupied
+        until the file is actually published."""
+        store = DeferredFSFilesStore(self.tempdir)
+        store.path_collision_protection = True
+        pipeline = self._create_pipeline(
+            settings={"FILES_PATH_COLLISION_PROTECTION": True}
+        )
+        pipeline.store = store
+        result = await self._process(pipeline, "http://example.com/a")
+        assert len(result["files"]) == 1
+        target = Path(self.tempdir) / result["files"][0]["path"]
+        assert target.read_bytes() == b"data"
+        reservation = store._reservations[pipeline.spiderinfo][
+            result["files"][0]["path"]
+        ]
+        assert reservation.committed is True
+
+    @coroutine_test
+    async def test_failed_download_releases_path_for_retry(self) -> None:
+        pipeline = self._create_pipeline(
+            settings={"FILES_PATH_COLLISION_PROTECTION": True}
+        )
+        bad_request = Request(
+            "http://example.com/bad",
+            meta={"response": RuntimeError("boom")},
+        )
+        good_request = _prepare_request_object("http://example.com/good")
+        item = ItemWithFiles()
+        item["file_urls"] = [bad_request.url]
+        with mock.patch.object(
+            FilesPipeline, "get_media_requests", return_value=[bad_request]
+        ):
+            failed = await pipeline.process_item(item)
+        assert failed["files"] == []
+        # No reservation survives the failure.
+        assert self._fs_store(pipeline)._reservations[pipeline.spiderinfo] == {}
+
+        item2 = ItemWithFiles()
+        item2["file_urls"] = [good_request.url]
+        with mock.patch.object(
+            FilesPipeline, "get_media_requests", return_value=[good_request]
+        ):
+            retried = await pipeline.process_item(item2)
+        assert len(retried["files"]) == 1
+        target = Path(self.tempdir) / retried["files"][0]["path"]
+        assert target.read_bytes() == b"data"
+
+    @coroutine_test
+    async def test_reused_path_after_failure_writes_once(self) -> None:
+        class FixedPathPipeline(FilesPipeline):
+            def file_path(self, request, response=None, info=None, *, item=None):
+                return "full/fixed.bin"
+
+        pipeline = self._create_pipeline(
+            FixedPathPipeline, {"FILES_PATH_COLLISION_PROTECTION": True}
+        )
+        pipeline.store = _CountingFSFilesStore(self.tempdir)
+        pipeline.store.path_collision_protection = True
+
+        bad = Request("http://example.com/bad", meta={"response": RuntimeError()})
+        good = _prepare_request_object("http://example.com/good", body=b"payload")
+        item = ItemWithFiles()
+        item["file_urls"] = [bad.url]
+        with mock.patch.object(FilesPipeline, "get_media_requests", return_value=[bad]):
+            assert (await pipeline.process_item(item))["files"] == []
+        item2 = ItemWithFiles()
+        item2["file_urls"] = [good.url]
+        with mock.patch.object(
+            FilesPipeline, "get_media_requests", return_value=[good]
+        ):
+            result = await pipeline.process_item(item2)
+        assert len(result["files"]) == 1
+        assert pipeline.store.write_counts == {"full/fixed.bin": 1}
+        assert (Path(self.tempdir) / "full/fixed.bin").read_bytes() == b"payload"
+
+    @coroutine_test
+    async def test_uptodate_file_blocks_colliding_fingerprint(self) -> None:
+        """A file accepted as up to date keeps occupying its path for another
+        fingerprint."""
+
+        class CollidingPipeline(FilesPipeline):
+            def file_path(self, request, response=None, info=None, *, item=None):
+                return "full/shared.bin"
+
+        pipeline = self._create_pipeline(
+            CollidingPipeline,
+            {
+                "FILES_PATH_COLLISION_PROTECTION": True,
+                "FILES_EXPIRES": -1,
+            },
+        )
+        with (
+            mock.patch.object(FilesPipeline, "inc_stats"),
+            mock.patch.object(
+                FSFilesStore,
+                "stat_file",
+                return_value={"checksum": "abc", "last_modified": time.time()},
+            ),
+        ):
+            first = await self._process(pipeline, "http://example.com/a")
+        assert first["files"][0]["status"] == "uptodate"
+        result = await self._process(pipeline, "http://example.com/b")
+        assert result["files"] == []
+
+    @coroutine_test
+    async def test_two_spiders_do_not_share_conflict_records(self) -> None:
+        class CollidingPipeline(FilesPipeline):
+            def file_path(self, request, response=None, info=None, *, item=None):
+                return "full/shared.bin"
+
+        first = self._create_pipeline(
+            CollidingPipeline, {"FILES_PATH_COLLISION_PROTECTION": True}
+        )
+        await self._process(first, "http://example.com/a")
+        await first.close_spider()
+
+        # A brand new spider starts with no in-memory conflict record, even
+        # though the same on-disk file exists.
+        second = self._create_pipeline(
+            CollidingPipeline, {"FILES_PATH_COLLISION_PROTECTION": True}
+        )
+        assert self._fs_store(second)._reservations == {}
+        result = await self._process(second, "http://example.com/b")
+        assert len(result["files"]) == 1
+
+    @coroutine_test
+    async def test_concurrent_downloads_reserve_exclusively(self) -> None:
+        """Two in-flight downloads mapping to one path: the later reservation
+        fails before either file is published."""
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocking_download(request: Request) -> Response:
+            started.set()
+            await release.wait()
+            return cast("Response", request.meta["response"])
+
+        class CollidingPipeline(FilesPipeline):
+            def file_path(self, request, response=None, info=None, *, item=None):
+                return "full/shared.bin"
+
+        pipeline = self._create_pipeline(
+            CollidingPipeline, {"FILES_PATH_COLLISION_PROTECTION": True}
+        )
+        pipeline.store = _CountingFSFilesStore(self.tempdir)
+        pipeline.store.path_collision_protection = True
+        pipeline.crawler.engine = MagicMock(download_async=blocking_download)
+        request_a = _prepare_request_object("http://example.com/a", body=b"AAAA")
+        request_b = _prepare_request_object("http://example.com/b", body=b"BBBB")
+
+        async def run(req: Request) -> Any:
+            item = ItemWithFiles()
+            item["file_urls"] = [req.url]
+            with mock.patch.object(
+                FilesPipeline, "get_media_requests", return_value=[req]
+            ):
+                return await pipeline.process_item(item)
+
+        task_a = asyncio.ensure_future(run(request_a))
+        await started.wait()
+        task_b = asyncio.ensure_future(run(request_b))
+        # Give task_b time to hit the reservation check.
+        await asyncio.sleep(0.05)
+        release.set()
+        results = await asyncio.gather(task_a, task_b)
+
+        successes = [r for r in results if r["files"]]
+        assert len(successes) == 1
+        target = Path(self.tempdir) / "full/shared.bin"
+        assert target.read_bytes() == b"AAAA"
+        assert pipeline.store.write_counts == {"full/shared.bin": 1}
+
+    @coroutine_test
+    async def test_unsafe_path_rejected_without_changing_request_or_item(
+        self,
+    ) -> None:
+        class UnsafePipeline(FilesPipeline):
+            def file_path(self, request, response=None, info=None, *, item=None):
+                return "../escape.bin"
+
+        pipeline = self._create_pipeline(
+            UnsafePipeline, {"FILES_PATH_COLLISION_PROTECTION": True}
+        )
+        request = _prepare_request_object("http://example.com/a")
+        item = ItemWithFiles()
+        item["file_urls"] = [request.url]
+        request_url = request.url
+        item_urls = list(item["file_urls"])
+        with mock.patch.object(
+            FilesPipeline, "get_media_requests", return_value=[request]
+        ):
+            result = await pipeline.process_item(item)
+        assert result["files"] == []
+        # The request and item are unchanged and nothing escaped the root.
+        assert request.url == request_url
+        assert item["file_urls"] == item_urls
+        assert not (Path(self.tempdir).parent / "escape.bin").exists()
+
+    @coroutine_test
+    async def test_collision_does_not_leak_credentials(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        class CollidingPipeline(FilesPipeline):
+            def file_path(self, request, response=None, info=None, *, item=None):
+                return "full/shared.bin"
+
+        pipeline = self._create_pipeline(
+            CollidingPipeline, {"FILES_PATH_COLLISION_PROTECTION": True}
+        )
+        await self._process(pipeline, "https://user:pw@example.com/a")
+        request_b = _prepare_request_object("https://other:secret@example.com/b")
+        with caplog.at_level(logging.ERROR):
+            result = await self._process(pipeline, request_b)
+        # The colliding request fails and never overwrites the first file.
+        assert result["files"] == []
+        assert (Path(self.tempdir) / "full/shared.bin").read_bytes() == b"data"
+        # Neither the credentials nor the raw usernames reach any log line.
+        assert "pw" not in caplog.text
+        assert "secret" not in caplog.text
+        assert "user:pw" not in caplog.text
+        assert "other:secret" not in caplog.text
+
+    @coroutine_test
+    async def test_default_behavior_allows_overwrite(self) -> None:
+        class CollidingPipeline(FilesPipeline):
+            def file_path(self, request, response=None, info=None, *, item=None):
+                return "full/shared.bin"
+
+        pipeline = self._create_pipeline(CollidingPipeline)
+        request_a = _prepare_request_object("http://example.com/a", body=b"AAAA")
+        request_b = _prepare_request_object("http://example.com/b", body=b"BBBB")
+        item = ItemWithFiles()
+        item["file_urls"] = [request_a.url, request_b.url]
+        with mock.patch.object(
+            FilesPipeline,
+            "get_media_requests",
+            return_value=[request_a, request_b],
+        ):
+            result = await pipeline.process_item(item)
+        # Legacy behavior: both succeed and share the single target path.
+        assert len(result["files"]) == 2
+        assert {f["path"] for f in result["files"]} == {"full/shared.bin"}
+        target = Path(self.tempdir) / "full/shared.bin"
+        assert target.read_bytes() in {b"AAAA", b"BBBB"}
 
 
 @pytest.mark.requires_botocore

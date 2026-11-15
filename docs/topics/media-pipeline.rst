@@ -592,6 +592,45 @@ A :ref:`custom storage <media-pipeline-custom-storage>` that calculates
 checksums in ``stat_file`` must use the algorithm that the pipeline sets as its
 ``checksum_algorithm`` attribute.
 
+.. _media-pipeline-path-collision-protection:
+
+Path collision protection
+-------------------------
+
+.. versionadded:: 2.21.0
+
+.. setting:: FILES_PATH_COLLISION_PROTECTION
+
+When a custom :meth:`~scrapy.pipelines.files.FilesPipeline.file_path`
+implementation maps two different media URLs to the same relative path, the
+second download overwrites the first file, and both items report success while
+pointing at content that only one of them actually downloaded. Set
+:setting:`FILES_PATH_COLLISION_PROTECTION` to ``True`` to detect this situation
+with the local filesystem storage (:class:`~scrapy.pipelines.files.FSFilesStore`):
+
+.. code-block:: python
+
+    FILES_PATH_COLLISION_PROTECTION = True
+
+The protection compares the normalized relative paths inside the storage root.
+A path that is absolute, that climbs outside of the root through ``..``
+components, or that reaches outside of it through a symlink is rejected. When
+two requests with different request fingerprints resolve to the same path, the
+second one fails before anything is written, so the first file is kept.
+Requests with the same fingerprint still share a single download through the
+usual in-flight merge.
+
+Files are written through a temporary file and published with an atomic rename,
+and a download that fails or is canceled releases the paths it reserved. Paths
+of files that were written, or verified as up to date, stay occupied for the
+rest of the spider run; the in-memory records are not carried over to a later
+spider run. The error messages identify both colliding source URLs with their
+credentials removed.
+
+The setting only affects the local filesystem storage. Remote storages, such
+as Amazon S3, Google Cloud Storage or FTP, keep their existing behavior. The
+protection is disabled by default.
+
 .. _topics-images-thumbnails:
 
 Thumbnail generation for images

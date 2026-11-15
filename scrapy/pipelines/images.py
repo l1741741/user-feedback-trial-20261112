@@ -303,6 +303,19 @@ class ImagesPipeline(FilesPipeline):
         ext = "" if self.preserve_format else ".jpg"
         return f"full/{image_guid}{ext}"
 
+    def _media_paths(
+        self,
+        request: Request,
+        info: MediaPipeline.SpiderInfo,
+        item: Any,
+    ) -> list[str]:
+        paths = [self.file_path(request, info=info, item=item)]
+        paths.extend(
+            self.thumb_path(request, thumb_id, info=info, item=item)
+            for thumb_id in self.thumbs
+        )
+        return paths
+
     def thumb_path(
         self,
         request: Request,

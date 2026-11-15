@@ -108,6 +108,7 @@ __all__ = [
     "FEED_TEMPDIR",
     "FEED_URI",
     "FEED_URI_PARAMS",
+    "FILES_PATH_COLLISION_PROTECTION",
     "FILES_STORE",
     "FILES_STORE_GCS_ACL",
     "FILES_STORE_S3_ACL",
@@ -436,6 +437,7 @@ FEED_TEMPDIR = None
 FEED_URI = None
 FEED_URI_PARAMS = None  # a function to extend uri arguments
 
+FILES_PATH_COLLISION_PROTECTION = False
 FILES_STORE = None
 FILES_STORE_GCS_ACL = ""
 FILES_STORE_S3_ACL = "private"
