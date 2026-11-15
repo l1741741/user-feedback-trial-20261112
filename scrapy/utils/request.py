@@ -8,8 +8,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Protocol, Self
-from urllib.parse import urlunparse
+from urllib.parse import urlsplit, urlunparse, urlunsplit
 from weakref import WeakKeyDictionary
 
 from w3lib.url import canonicalize_url
@@ -20,8 +21,6 @@ from scrapy.utils.misc import load_object
 from scrapy.utils.python import to_bytes
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-
     from scrapy.crawler import Crawler
     from scrapy.http.request import CookiesT, VerboseCookie
 
@@ -149,6 +148,219 @@ class RequestFingerprinter:
 
     def fingerprint(self, request: Request) -> bytes:
         return self._fingerprint(request)
+
+
+def _parse_query_pairs(query: str) -> tuple[tuple[str, str, bool], ...]:
+    """Split a query string into ``(key, value, has_equal_sign)`` triples.
+
+    The text is split on the ``&`` separator without decoding percent-escapes,
+    so repeated keys, empty values and the difference between a key without a
+    value (``a``) and a key with an empty value (``a=``) are all preserved.
+    """
+    if not query:
+        return ()
+    pairs: list[tuple[str, str, bool]] = []
+    for segment in query.split("&"):
+        key, sep, value = segment.partition("=")
+        pairs.append((key, value, bool(sep)))
+    return tuple(pairs)
+
+
+def _frame(buff: bytearray, field: bytes) -> None:
+    """Append a length-prefixed field, so adjacent fields cannot be confused."""
+    buff.extend(len(field).to_bytes(4, "big"))
+    buff.extend(field)
+
+
+def _validate_header_names(
+    include_headers: Iterable[bytes | str] | None,
+) -> tuple[bytes, ...]:
+    if include_headers is None:
+        return ()
+    if isinstance(include_headers, (str, bytes)):
+        raise TypeError(
+            "include_headers must be an iterable of header names, not a single string"
+        )
+    if not isinstance(include_headers, Iterable):
+        raise TypeError("include_headers must be an iterable of header names or None")
+    names: set[bytes] = set()
+    for header in include_headers:
+        if not isinstance(header, (str, bytes)):
+            raise TypeError(
+                "include_headers entries must be str or bytes, got"
+                f" {type(header).__name__}"
+            )
+        name = to_bytes(header).lower()
+        if not name:
+            raise ValueError("include_headers entries must not be empty")
+        names.add(name)
+    return tuple(sorted(names))
+
+
+def _validate_query_names(
+    names: Iterable[str] | None, setting_name: str
+) -> tuple[str, ...]:
+    if names is None:
+        return ()
+    if isinstance(names, str) or not isinstance(names, Iterable):
+        raise TypeError(f"{setting_name} must be an iterable of strings or None")
+    validated: set[str] = set()
+    for name in names:
+        if not isinstance(name, str):
+            raise TypeError(
+                f"{setting_name} entries must be str, got {type(name).__name__}"
+            )
+        if not name:
+            raise ValueError(f"{setting_name} entries must not be empty")
+        validated.add(name)
+    return tuple(sorted(validated))
+
+
+class VersionedRequestFingerprinter:
+    """Configurable, versioned request fingerprinter.
+
+    .. versionadded:: VERSION
+
+    Unlike :class:`RequestFingerprinter`, this fingerprinter does not
+    canonicalize the URL. It builds each fingerprint from explicit, framed
+    components: the request method and body, the URL split into its parts,
+    selected request headers, and a version marker. That makes two behaviors
+    configurable:
+
+    - *include_headers* names the headers that participate in the fingerprint,
+      matched case-insensitively. This distinguishes requests that return
+      different content for the same URL depending on headers such as
+      ``Accept-Language`` or ``X-Tenant``.
+    - *ignore_query_parameters* and *ignore_query_parameter_namespaces* drop
+      tracking query parameters by name. Names are matched after parsing the
+      query into key/value pairs, so a name only matches itself or, for a
+      namespace, a key that starts with the namespace followed by more
+      characters; percent-escaped text and other keys are never touched.
+
+    Query parameters keep their original order, including repeated keys, and
+    empty values keep their meaning. Every field is prefixed with its length,
+    so concatenated fields cannot be ambiguous.
+
+    The fingerprint is a 32-byte SHA-256 digest, so it never collides with the
+    20-byte SHA-1 digests of :class:`RequestFingerprinter`; fingerprints
+    stored by the duplicate filter or the HTTP cache from a previous
+    configuration therefore cannot be mistaken for new ones. The same is true
+    when the framing :data:`VERSION` or *namespace* change: changing
+    *namespace* is the intended way to separate crawls or configurations on
+    purpose.
+
+    The configuration is copied and validated in the constructor, so it
+    cannot be mutated through the objects passed by the caller later. Each
+    instance keeps its own cache keyed by request, and caching only stores
+    successful results. Requests are never modified and header values are
+    never logged.
+    """
+
+    #: Prefix of every fingerprint input. Bump it if this framing changes.
+    VERSION = 1
+    _MAGIC = b"SP"
+
+    def __init__(
+        self,
+        crawler: Crawler | None = None,
+        *,
+        include_headers: Iterable[bytes | str] | None = None,
+        ignore_query_parameters: Iterable[str] | None = None,
+        ignore_query_parameter_namespaces: Iterable[str] | None = None,
+        namespace: str = "",
+    ) -> None:
+        if not isinstance(namespace, str):
+            raise TypeError("namespace must be a string")
+        self._include_headers = _validate_header_names(include_headers)
+        self._ignore_query_parameters = _validate_query_names(
+            ignore_query_parameters, "ignore_query_parameters"
+        )
+        self._ignore_query_parameter_namespaces = _validate_query_names(
+            ignore_query_parameter_namespaces,
+            "ignore_query_parameter_namespaces",
+        )
+        self._namespace = namespace
+        self._cache: WeakKeyDictionary[Request, bytes] = WeakKeyDictionary()
+
+    @classmethod
+    def from_crawler(cls, crawler: Crawler) -> Self:
+        settings = crawler.settings
+        return cls(
+            crawler,
+            include_headers=settings.getlist("REQUEST_FINGERPRINTER_INCLUDE_HEADERS")
+            or None,
+            ignore_query_parameters=settings.getlist(
+                "REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMETERS"
+            )
+            or None,
+            ignore_query_parameter_namespaces=settings.getlist(
+                "REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMETER_NAMESPACES"
+            )
+            or None,
+            namespace=settings.get("REQUEST_FINGERPRINTER_NAMESPACE", ""),
+        )
+
+    @property
+    def include_headers(self) -> tuple[bytes, ...]:
+        """Names of the headers that participate in fingerprints."""
+        return self._include_headers
+
+    @property
+    def ignore_query_parameters(self) -> tuple[str, ...]:
+        """Query parameter names excluded from fingerprints."""
+        return self._ignore_query_parameters
+
+    @property
+    def ignore_query_parameter_namespaces(self) -> tuple[str, ...]:
+        """Query parameter name prefixes excluded from fingerprints."""
+        return self._ignore_query_parameter_namespaces
+
+    @property
+    def namespace(self) -> str:
+        """Partition label mixed into every fingerprint input."""
+        return self._namespace
+
+    def _filter_query(self, query: str) -> str:
+        exact = set(self._ignore_query_parameters)
+        namespaces = tuple(self._ignore_query_parameter_namespaces)
+        kept: list[str] = []
+        for key, value, has_equal_sign in _parse_query_pairs(query):
+            if key in exact or any(
+                key.startswith(prefix) and len(key) > len(prefix)
+                for prefix in namespaces
+            ):
+                continue
+            kept.append(f"{key}={value}" if has_equal_sign else key)
+        return "&".join(kept)
+
+    def fingerprint(self, request: Request) -> bytes:
+        cached = self._cache.get(request)
+        if cached is not None:
+            return cached
+
+        parts = urlsplit(request.url)
+        query = self._filter_query(parts.query)
+        filtered_url = urlunsplit(parts._replace(query=query, fragment=""))
+
+        buff = bytearray()
+        buff.extend(self._MAGIC)
+        buff.extend(self.VERSION.to_bytes(2, "big"))
+        _frame(buff, self._namespace.encode())
+        _frame(buff, to_bytes(request.method))
+        _frame(buff, filtered_url.encode())
+        _frame(buff, request.body or b"")
+        for header in self._include_headers:
+            if header in request.headers:
+                framed_values = b"".join(
+                    len(value).to_bytes(4, "big") + value
+                    for value in request.headers.getlist(header)
+                )
+                _frame(buff, header)
+                _frame(buff, framed_values)
+
+        digest = hashlib.sha256(buff).digest()
+        self._cache[request] = digest
+        return digest
 
 
 def request_httprepr(request: Request) -> bytes:

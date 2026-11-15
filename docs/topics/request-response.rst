@@ -279,6 +279,53 @@ import path.
 
 .. autoclass:: scrapy.utils.request.RequestFingerprinter
 
+The :class:`~scrapy.utils.request.VersionedRequestFingerprinter` is an
+alternative fingerprinter for cases where the same URL can return different
+content depending on request headers, or where tracking query parameters must
+not make the same resource look like different requests. It is configured
+through settings rather than subclassing:
+
+- :setting:`REQUEST_FINGERPRINTER_INCLUDE_HEADERS` lists the headers that
+  participate in the fingerprint, matched case-insensitively. Use it for
+  headers that change the response, such as ``Accept-Language`` or
+  ``X-Tenant``.
+- :setting:`REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMETERS` lists query
+  parameter names that never participate, such as ``utm_source``.
+- :setting:`REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMETER_NAMESPACES` lists
+  name prefixes: every parameter whose name starts with one of them followed
+  by more characters is ignored. For example, a ``track`` namespace ignores
+  ``tracking`` and ``track_id`` but keeps ``track`` itself.
+- :setting:`REQUEST_FINGERPRINTER_NAMESPACE` is a label mixed into every
+  fingerprint. Change it to deliberately invalidate fingerprints from a
+  previous configuration.
+
+Query parameters are parsed into key/value pairs rather than edited as text:
+repeated keys and the difference between a key without a value (``a``) and a
+key with an empty value (``a=``) are preserved, and percent-escaped text is
+never matched or removed. Selected headers keep the order of their multiple
+values, and a header that is missing is distinguished from one that is present
+but empty.
+
+.. code-block:: python
+
+    REQUEST_FINGERPRINTER_CLASS = (
+        "scrapy.utils.request.VersionedRequestFingerprinter"
+    )
+    REQUEST_FINGERPRINTER_INCLUDE_HEADERS = ["Accept-Language", "X-Tenant"]
+    REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMETERS = ["utm_source"]
+    REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMETER_NAMESPACES = ["track"]
+
+This fingerprinter emits 32-byte SHA-256 digests, while the default
+:class:`~scrapy.utils.request.RequestFingerprinter` emits 20-byte SHA-1
+digests, so switching between them never matches a fingerprint stored by the
+other one: existing entries used by :setting:`DUPEFILTER_CLASS` and
+:class:`~scrapy.downloadermiddlewares.httpcache.HttpCacheMiddleware` are
+treated as a clean boundary rather than as wrong hits or misses. The same
+applies when :setting:`REQUEST_FINGERPRINTER_NAMESPACE` changes. Old stored
+fingerprints are not deleted; they simply stop matching.
+
+.. autoclass:: scrapy.utils.request.VersionedRequestFingerprinter
+
 .. _custom-request-fingerprinter:
 
 Writing your own request fingerprinter

@@ -109,6 +109,42 @@ class DupeFilterTestMixin:
         assert case_insensitive_dupefilter.request_seen(r2)
         case_insensitive_dupefilter.close("finished")
 
+    def test_fingerprinter_migration_boundary(self, tmp_path: Path) -> None:
+        # Fingerprints stored by one fingerprinter must never be treated as
+        # seen by another. The versioned fingerprinter emits 32-byte digests
+        # while the default emits 20-byte digests, and the versioned namespace
+        # separates configurations on top of that.
+        request = Request("https://example.com/p?a=1&utm_source=x")
+
+        legacy = self._get_dupefilter(JOBDIR=str(tmp_path))
+        assert not legacy.request_seen(request)
+        legacy.close("finished")
+
+        versioned_settings: dict[str, Any] = {
+            "REQUEST_FINGERPRINTER_CLASS": (
+                "scrapy.utils.request.VersionedRequestFingerprinter"
+            ),
+            "REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMETERS": ["utm_source"],
+        }
+        migrated = self._get_dupefilter(JOBDIR=str(tmp_path), **versioned_settings)
+        assert not migrated.request_seen(request)
+        assert migrated.request_seen(request)
+        migrated.close("finished")
+
+        # Reopening with the same versioned configuration keeps dedup working.
+        resumed = self._get_dupefilter(JOBDIR=str(tmp_path), **versioned_settings)
+        assert resumed.request_seen(request)
+        resumed.close("finished")
+
+        # A different namespace starts from a clean boundary again.
+        namespaced = self._get_dupefilter(
+            JOBDIR=str(tmp_path),
+            **versioned_settings,
+            REQUEST_FINGERPRINTER_NAMESPACE="other",
+        )
+        assert not namespaced.request_seen(request)
+        namespaced.close("finished")
+
 
 class TestRFPDupeFilter(DupeFilterTestMixin):
     dupefilter_class = RFPDupeFilter

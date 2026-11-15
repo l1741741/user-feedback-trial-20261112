@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha1
 from typing import TYPE_CHECKING, Any, Protocol
 from weakref import WeakKeyDictionary
@@ -9,6 +10,7 @@ import pytest
 
 from scrapy.http import Request
 from scrapy.utils.request import (
+    VersionedRequestFingerprinter,
     _fingerprint_cache,
     fingerprint,
     request_httprepr,
@@ -412,6 +414,412 @@ class TestCustomRequestFingerprinter:
         request = Request("http://www.example.com")
         fingerprint = crawler.request_fingerprinter.fingerprint(request)
         assert fingerprint == settings["FINGERPRINT"]
+
+
+class TestVersionedRequestFingerprinter:
+    def _fingerprinter(self, **kwargs: Any) -> VersionedRequestFingerprinter:
+        return VersionedRequestFingerprinter(**kwargs)
+
+    def test_fixed_vector_default(self) -> None:
+        fp = self._fingerprinter()
+        assert fp.fingerprint(Request("https://example.com/")).hex() == (
+            "77abceee40e7b2b072b3d5fdc68dfb3a36a1daafd3cc43e911478a7fac3692a6"
+        )
+
+    def test_fixed_vector_configured(self) -> None:
+        fp = self._fingerprinter(
+            include_headers=["Accept-Language", "X-Tenant"],
+            ignore_query_parameters=["utm_source"],
+            ignore_query_parameter_namespaces=["track"],
+            namespace="shop-eu",
+        )
+        request = Request(
+            "https://example.com/p?a=1&utm_source=x&tracking=z",
+            method="POST",
+            body=b"body",
+            headers={"Accept-Language": "zh-CN", "X-Tenant": "acme"},
+        )
+        assert fp.fingerprint(request).hex() == (
+            "41eaabc573fc9542d66464c6fd9b4570700c72091d7f308d10b4d58aedb6a038"
+        )
+
+    def test_digest_length_differs_from_legacy(self) -> None:
+        request = Request("https://example.com/")
+        assert len(self._fingerprinter().fingerprint(request)) == 32
+        assert len(fingerprint(request)) == 20
+        assert self._fingerprinter().fingerprint(request) != fingerprint(request)
+
+    def test_deterministic(self) -> None:
+        fp = self._fingerprinter(include_headers=["X-Tenant"])
+        request = Request("https://example.com/", headers={"X-Tenant": "a"})
+        assert fp.fingerprint(request) == fp.fingerprint(request)
+
+    @pytest.mark.parametrize(
+        ("url_a", "url_b"),
+        [
+            # tracking query parameters are ignored
+            (
+                "https://example.com/p?a=1&utm_source=x",
+                "https://example.com/p?a=1",
+            ),
+            # ignored namespaces remove keys that extend the prefix, anywhere
+            (
+                "https://example.com/p?tracking=1&a=2",
+                "https://example.com/p?a=2",
+            ),
+            # dropping an ignored trailing parameter leaves the same query
+            (
+                "https://example.com/p?a=1&utm_source=",
+                "https://example.com/p?a=1",
+            ),
+            # fragments never participate
+            ("https://example.com/p#frag", "https://example.com/p"),
+        ],
+    )
+    def test_equivalent_requests(self, url_a: str, url_b: str) -> None:
+        fp = self._fingerprinter(
+            ignore_query_parameters=["utm_source"],
+            ignore_query_parameter_namespaces=["track"],
+        )
+        assert fp.fingerprint(Request(url_a)) == fp.fingerprint(Request(url_b))
+
+    @pytest.mark.parametrize(
+        ("url_a", "url_b"),
+        [
+            # a namespace is a prefix rule, so the exact name is kept
+            (
+                "https://example.com/p?track=1",
+                "https://example.com/p",
+            ),
+            # percent-escapes are parsed as text, never string-replaced
+            (
+                "https://example.com/p?a=%3D%26",
+                "https://example.com/p?a=%3d%26",
+            ),
+            # repeated keys keep their multiplicity
+            (
+                "https://example.com/p?a=1&a=1",
+                "https://example.com/p?a=1",
+            ),
+            # a key without a value differs from a key with an empty value
+            ("https://example.com/p?a", "https://example.com/p?a="),
+            # parameter order is meaningful
+            (
+                "https://example.com/p?a=1&b=2",
+                "https://example.com/p?b=2&a=1",
+            ),
+            # a semicolon is part of the value, not a separator, matching
+            # urllib.parse and w3lib.url behavior
+            (
+                "https://example.com/p?a=1;b=2",
+                "https://example.com/p?a=1&b=2",
+            ),
+        ],
+    )
+    def test_distinct_requests(self, url_a: str, url_b: str) -> None:
+        fp = self._fingerprinter(
+            ignore_query_parameters=["utm_source"],
+            ignore_query_parameter_namespaces=["track"],
+        )
+        assert fp.fingerprint(Request(url_a)) != fp.fingerprint(Request(url_b))
+
+    def test_ignored_parameter_does_not_match_longer_key(self) -> None:
+        # exact-name ignoring must not delete keys that merely start with it
+        fp = self._fingerprinter(ignore_query_parameters=["id"])
+        assert fp.fingerprint(Request("https://example.com/p?id=1")) == fp.fingerprint(
+            Request("https://example.com/p")
+        )
+        assert fp.fingerprint(
+            Request("https://example.com/p?idempotent=1")
+        ) != fp.fingerprint(Request("https://example.com/p"))
+
+    def test_ignored_parameters_keep_empty_value_semantics(self) -> None:
+        fp = self._fingerprinter(ignore_query_parameters=["utm"])
+        # both forms of the ignored key disappear, the surviving key stays
+        assert (
+            fp.fingerprint(Request("https://example.com/p?a=1&utm"))
+            == fp.fingerprint(Request("https://example.com/p?utm=&a=1"))
+            == fp.fingerprint(Request("https://example.com/p?a=1"))
+        )
+
+    def test_header_case_insensitive_selection(self) -> None:
+        fp = self._fingerprinter(include_headers=["Accept-Language"])
+        lower = Request("https://example.com/", headers={"accept-language": "en"})
+        upper = Request("https://example.com/", headers={"Accept-Language": "en"})
+        assert fp.fingerprint(lower) == fp.fingerprint(upper)
+        other = Request("https://example.com/", headers={"Accept-Language": "fr"})
+        assert fp.fingerprint(lower) != fp.fingerprint(other)
+
+    def test_unselected_header_ignored(self) -> None:
+        fp = self._fingerprinter(include_headers=["X-Tenant"])
+        without = Request("https://example.com/")
+        with_token = Request(
+            "https://example.com/", headers={"Authorization": "Bearer secret"}
+        )
+        assert fp.fingerprint(without) == fp.fingerprint(with_token)
+
+    def test_missing_and_empty_header_distinguished(self) -> None:
+        fp = self._fingerprinter(include_headers=["Accept-Language"])
+        missing = Request("https://example.com/")
+        empty = Request("https://example.com/", headers={"Accept-Language": None})
+        assert fp.fingerprint(missing) != fp.fingerprint(empty)
+
+    def test_multi_value_header_order(self) -> None:
+        fp = self._fingerprinter(include_headers=["X-Tenant"])
+        first = Request(
+            "https://example.com/",
+            headers=[("X-Tenant", b"a"), ("x-tenant", b"b")],
+        )
+        reversed_order = Request(
+            "https://example.com/",
+            headers=[("X-Tenant", b"b"), ("x-tenant", b"a")],
+        )
+        same = Request(
+            "https://example.com/",
+            headers=[("X-Tenant", b"a"), ("x-tenant", b"b")],
+        )
+        assert fp.fingerprint(first) != fp.fingerprint(reversed_order)
+        assert fp.fingerprint(first) == fp.fingerprint(same)
+
+    def test_framing_prevents_field_boundary_collision(self) -> None:
+        fp = self._fingerprinter()
+        url_only = Request("https://example.com/ab")
+        split_across_fields = Request("https://example.com/a", body=b"b")
+        assert fp.fingerprint(url_only) != fp.fingerprint(split_across_fields)
+
+    def test_method_and_post_body(self) -> None:
+        fp = self._fingerprinter()
+        get = Request("https://example.com/")
+        post_empty = Request("https://example.com/", method="POST")
+        post_body = Request("https://example.com/", method="POST", body="中文".encode())
+        post_other = Request(
+            "https://example.com/", method="POST", body="中文x".encode()
+        )
+        fingerprints = {
+            fp.fingerprint(get),
+            fp.fingerprint(post_empty),
+            fp.fingerprint(post_body),
+            fp.fingerprint(post_other),
+        }
+        assert len(fingerprints) == 4
+
+    def test_idna_and_chinese_urls(self) -> None:
+        fp = self._fingerprinter()
+        # Scrapy encodes the unicode host to punycode when building the request
+        unicode_host = Request("https://例え.jp/")
+        punycode_host = Request("https://xn--r8jz45g.jp/")
+        assert unicode_host.url == punycode_host.url
+        assert fp.fingerprint(unicode_host) == fp.fingerprint(punycode_host)
+        # distinct percent-encoded Chinese paths stay distinct
+        product_one = Request("https://example.example/产品/1")
+        product_two = Request("https://example.example/产品/2")
+        assert fp.fingerprint(product_one) != fp.fingerprint(product_two)
+
+    def test_namespace_separates_fingerprints(self) -> None:
+        request = Request("https://example.com/")
+        first = self._fingerprinter(namespace="tenant-a")
+        second = self._fingerprinter(namespace="tenant-b")
+        assert first.fingerprint(request) != second.fingerprint(request)
+
+    def test_config_snapshot_isolated_from_caller(self) -> None:
+        headers = ["X-Tenant"]
+        ignored = ["utm_source"]
+        namespaces = ["track"]
+        fp = self._fingerprinter(
+            include_headers=headers,
+            ignore_query_parameters=ignored,
+            ignore_query_parameter_namespaces=namespaces,
+        )
+        headers.append("X-Evil")
+        ignored.append("evil")
+        namespaces.append("evilns")
+        assert fp.include_headers == (b"x-tenant",)
+        assert fp.ignore_query_parameters == ("utm_source",)
+        assert fp.ignore_query_parameter_namespaces == ("track",)
+
+    def test_exposed_config_is_immutable(self) -> None:
+        fp = self._fingerprinter(include_headers=["X-Tenant"])
+        with pytest.raises(AttributeError):
+            fp.include_headers.append(b"x")  # type: ignore[attr-defined]
+
+    def test_request_is_not_mutated(self) -> None:
+        fp = self._fingerprinter(
+            include_headers=["X-Tenant"],
+            ignore_query_parameters=["utm_source"],
+        )
+        request = Request(
+            "https://example.com/p?a=1&utm_source=x",
+            method="POST",
+            body=b"body",
+            headers={"X-Tenant": "acme"},
+        )
+        snapshot = (
+            request.url,
+            request.body,
+            request.headers.copy(),
+            dict(request.meta),
+        )
+        fp.fingerprint(request)
+        assert (
+            request.url,
+            request.body,
+            request.headers.copy(),
+            dict(request.meta),
+        ) == snapshot
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"include_headers": "X-Tenant"},
+            {"include_headers": b"X-Tenant"},
+            {"include_headers": [""]},
+            {"include_headers": [1]},
+            {"ignore_query_parameters": "utm_source"},
+            {"ignore_query_parameters": [""]},
+            {"ignore_query_parameters": [b"utm_source"]},
+            {"ignore_query_parameter_namespaces": [""]},
+            {"ignore_query_parameter_namespaces": [1]},
+            {"namespace": b"tenant"},
+        ],
+    )
+    def test_invalid_config_rejected(self, kwargs: dict[str, Any]) -> None:
+        with pytest.raises((TypeError, ValueError)):
+            self._fingerprinter(**kwargs)
+
+    def test_invalid_config_rejected_before_requests(self) -> None:
+        with pytest.raises(TypeError):
+            get_crawler(
+                settings_dict={
+                    "REQUEST_FINGERPRINTER_CLASS": (
+                        "scrapy.utils.request.VersionedRequestFingerprinter"
+                    ),
+                    "REQUEST_FINGERPRINTER_INCLUDE_HEADERS": [1],
+                }
+            )
+
+    def test_error_is_not_cached(self) -> None:
+        class BrokenUrlRequest:
+            method = "GET"
+            body = b""
+            headers: dict[Any, Any] = {}
+
+            @property
+            def url(self) -> str:
+                raise RuntimeError("url unavailable")
+
+        fp = self._fingerprinter()
+        with pytest.raises(RuntimeError, match="url unavailable"):
+            fp.fingerprint(BrokenUrlRequest())  # type: ignore[arg-type]
+        assert len(fp._cache) == 0
+
+    def test_instances_have_independent_caches(self) -> None:
+        first = self._fingerprinter(include_headers=["X-Tenant"])
+        second = self._fingerprinter(include_headers=["X-Tenant"])
+        request = Request("https://example.com/", headers={"X-Tenant": "a"})
+        first.fingerprint(request)
+        assert request in first._cache
+        assert request not in second._cache
+
+    def test_does_not_use_legacy_cache(self) -> None:
+        request = Request("https://example.com/legacy")
+        self._fingerprinter().fingerprint(request)
+        assert request not in _fingerprint_cache
+
+    def test_parallel_instances_equivalent_and_distinct(self) -> None:
+        request = Request(
+            "https://example.com/p?a=1&utm_source=x",
+            headers={"Accept-Language": "zh-CN", "X-Tenant": "acme"},
+        )
+        shared = {
+            "include_headers": ["Accept-Language", "x-tenant"],
+            "ignore_query_parameters": ["utm_source"],
+            "namespace": "shop-eu",
+        }
+        instances = [self._fingerprinter(**shared) for _ in range(4)]
+        fingerprints = {fp.fingerprint(request) for fp in instances}
+        assert len(fingerprints) == 1
+
+        other_namespace = self._fingerprinter(**{**shared, "namespace": "other"})
+        assert other_namespace.fingerprint(request) not in fingerprints
+
+    def test_concurrent_fingerprints_are_stable(self) -> None:
+        # Many threads hammering independent instances of the same
+        # configuration must agree, while each instance only caches its own
+        # work; shared request objects must not be mutated along the way.
+        fingerprinter = self._fingerprinter(
+            include_headers=["Accept-Language", "X-Tenant"],
+            ignore_query_parameters=["utm_source"],
+        )
+        requests = [
+            Request(
+                f"https://example.com/p/{i}?a={i}&utm_source=track",
+                headers={"Accept-Language": "zh-CN", "X-Tenant": str(i % 3)},
+            )
+            for i in range(32)
+        ]
+        expected = {request: fingerprinter.fingerprint(request) for request in requests}
+        instances = [
+            self._fingerprinter(
+                include_headers=["Accept-Language", "X-Tenant"],
+                ignore_query_parameters=["utm_source"],
+            )
+            for _ in range(8)
+        ]
+        snapshots = [
+            (request.url, request.body, request.headers.copy()) for request in requests
+        ]
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [
+                pool.submit(fp.fingerprint, request)
+                for fp in instances
+                for request in requests
+            ]
+            results = [future.result() for future in futures]
+
+        assert set(results) == set(expected.values())
+        for request, digest in expected.items():
+            assert all(fp.fingerprint(request) == digest for fp in instances)
+        assert [
+            (request.url, request.body, request.headers.copy()) for request in requests
+        ] == snapshots
+
+    def test_from_crawler_settings(self) -> None:
+        crawler = get_crawler(
+            settings_dict={
+                "REQUEST_FINGERPRINTER_CLASS": (
+                    "scrapy.utils.request.VersionedRequestFingerprinter"
+                ),
+                "REQUEST_FINGERPRINTER_INCLUDE_HEADERS": [
+                    "Accept-Language",
+                    "x-tenant",
+                ],
+                "REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMETERS": ["utm_source"],
+                "REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMETER_NAMESPACES": ["track"],
+                "REQUEST_FINGERPRINTER_NAMESPACE": "shop-eu",
+            }
+        )
+        fingerprinter = crawler.request_fingerprinter
+        assert isinstance(fingerprinter, VersionedRequestFingerprinter)
+        assert fingerprinter.include_headers == (
+            b"accept-language",
+            b"x-tenant",
+        )
+        assert fingerprinter.ignore_query_parameters == ("utm_source",)
+        assert fingerprinter.ignore_query_parameter_namespaces == ("track",)
+        assert fingerprinter.namespace == "shop-eu"
+
+        request = Request(
+            "https://example.com/p?a=1&utm_source=9&tracking=z",
+            headers={"X-TENANT": "acme"},
+        )
+        direct = VersionedRequestFingerprinter(
+            include_headers=["Accept-Language", "x-tenant"],
+            ignore_query_parameters=["utm_source"],
+            ignore_query_parameter_namespaces=["track"],
+            namespace="shop-eu",
+        )
+        assert fingerprinter.fingerprint(request) == direct.fingerprint(request)
 
 
 class TestRequestToCurl:

@@ -258,6 +258,49 @@ class StorageTestMixin(TestBase):
             assert isinstance(cached_response, HtmlResponse)
             self.assertEqualResponse(self.response, cached_response)
 
+    def test_storage_fingerprinter_migration_boundary(self):
+        # An entry stored under one fingerprinter must not be read back through
+        # another: their digests differ in length and content, so switching
+        # fingerprinters is a clean cache miss rather than a wrong hit.
+        versioned = (
+            "scrapy.utils.request.VersionedRequestFingerprinter",
+            {
+                "REQUEST_FINGERPRINTER_INCLUDE_HEADERS": ["X-Tenant"],
+                "REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMETERS": ["utm_source"],
+            },
+        )
+
+        legacy_dir = Path(self.tmpdir, "legacy")
+        versioned_dir = Path(self.tmpdir, "versioned")
+
+        with self._storage(HTTPCACHE_DIR=str(legacy_dir)) as (storage, crawler):
+            storage.store_response(crawler.spider, self.request, self.response)
+            legacy_key = storage._fingerprinter.fingerprint(self.request)
+            assert len(legacy_key) == 20
+
+        with self._storage(
+            HTTPCACHE_DIR=str(versioned_dir),
+            REQUEST_FINGERPRINTER_CLASS=versioned[0],
+            **versioned[1],
+        ) as (storage, crawler):
+            versioned_key = storage._fingerprinter.fingerprint(self.request)
+            assert len(versioned_key) == 32
+            assert versioned_key != legacy_key
+            # A fresh cache directory is a miss, then stores and reads back.
+            assert storage.retrieve_response(crawler.spider, self.request) is None
+            storage.store_response(crawler.spider, self.request, self.response)
+            cached_response = storage.retrieve_response(crawler.spider, self.request)
+            assert isinstance(cached_response, HtmlResponse)
+            self.assertEqualResponse(self.response, cached_response)
+
+        # Pointing the legacy fingerprinter at the versioned cache still misses:
+        # the on-disk key is a versioned digest it cannot reproduce.
+        with self._storage(HTTPCACHE_DIR=str(versioned_dir)) as (
+            storage,
+            crawler,
+        ):
+            assert storage.retrieve_response(crawler.spider, self.request) is None
+
 
 class PolicyTestMixin(TestBase):
     """Mixin containing policy-specific test methods."""

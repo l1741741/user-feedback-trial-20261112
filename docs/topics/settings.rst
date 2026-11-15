@@ -2087,6 +2087,55 @@ stat.
     garbage collector frees them. To find out whether your crawl keeps
     responses alive, see :ref:`topics-leaks`.
 
+.. setting:: REQUEST_FINGERPRINTER_INCLUDE_HEADERS
+
+REQUEST_FINGERPRINTER_INCLUDE_HEADERS
+-------------------------------------
+
+Default: ``[]``
+
+Names of the request headers taken into account by
+:class:`~scrapy.utils.request.VersionedRequestFingerprinter`, matched
+case-insensitively. Has no effect on other request fingerprinters. See
+:ref:`request-fingerprints`.
+
+.. setting:: REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMETERS
+
+REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMETERS
+---------------------------------------------
+
+Default: ``[]``
+
+Names of query parameters excluded from fingerprints by
+:class:`~scrapy.utils.request.VersionedRequestFingerprinter`, matched on the
+parsed key/value pairs. Has no effect on other request fingerprinters. See
+:ref:`request-fingerprints`.
+
+.. setting:: REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMETER_NAMESPACES
+
+REQUEST_FINGERPRINTER_IGNORE_QUERY_PARAMETER_NAMESPACES
+-------------------------------------------------------
+
+Default: ``[]``
+
+Query parameter name prefixes excluded from fingerprints by
+:class:`~scrapy.utils.request.VersionedRequestFingerprinter`: a parameter is
+ignored when its name starts with one of the prefixes followed by more
+characters. Has no effect on other request fingerprinters. See
+:ref:`request-fingerprints`.
+
+.. setting:: REQUEST_FINGERPRINTER_NAMESPACE
+
+REQUEST_FINGERPRINTER_NAMESPACE
+-------------------------------
+
+Default: ``""``
+
+Label mixed into every fingerprint of
+:class:`~scrapy.utils.request.VersionedRequestFingerprinter`. Changing it
+deliberately separates fingerprints from a previous configuration. Has no
+effect on other request fingerprinters. See :ref:`request-fingerprints`.
+
 .. setting:: RESPONSE_ROUGH_SIZE
 
 RESPONSE_ROUGH_SIZE
