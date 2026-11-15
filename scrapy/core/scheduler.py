@@ -31,6 +31,18 @@ logger = logging.getLogger(__name__)
 _P = ParamSpec("_P")
 
 
+def _supports_admission_transaction(dupefilter: BaseDupeFilter) -> bool:
+    """Whether *dupefilter* implements the optional reservation protocol."""
+    return all(
+        callable(getattr(dupefilter, name, None))
+        for name in (
+            "reserve_fingerprint",
+            "confirm_fingerprint",
+            "revoke_fingerprint",
+        )
+    )
+
+
 def _call_dupefilter(
     f: Callable[_P, Coroutine[Any, Any, None] | Deferred[None] | None],
     *args: _P.args,
@@ -301,6 +313,19 @@ class Scheduler(BaseScheduler):
 
     This scheduler class also uses the configured :setting:`DUPEFILTER_CLASS`,
     which may also write data inside the job directory.
+
+    Admission transactions
+    ======================
+
+    When :setting:`SCHEDULER_ADMISSION_TRANSACTION` is enabled and the
+    dupefilter implements the optional reservation protocol
+    (``reserve_fingerprint()``, ``confirm_fingerprint()`` and
+    ``revoke_fingerprint()``), each request is admitted in four ordered
+    steps: serialization, fingerprint reservation, queue push and fingerprint
+    confirmation. A failure before the request is stored revokes the
+    reservation, while a failure with an unknown storage result keeps it and
+    is counted by the :stat:`scheduler/admission/uncertain` stat; the request
+    is never re-scheduled automatically.
     """
 
     supports_skip_dupefilter_once = True
@@ -316,6 +341,9 @@ class Scheduler(BaseScheduler):
             logunser=crawler.settings.getbool("SCHEDULER_DEBUG"),
             stats=crawler.stats,
             pqclass=load_object(crawler.settings["SCHEDULER_PRIORITY_QUEUE"]),
+            admission_transaction=crawler.settings.getbool(
+                "SCHEDULER_ADMISSION_TRANSACTION"
+            ),
             crawler=crawler,
         )
 
@@ -329,6 +357,8 @@ class Scheduler(BaseScheduler):
         stats: StatsCollector | None = None,
         pqclass: type[PriorityQueueProtocol] | None = None,
         crawler: Crawler | None = None,
+        *,
+        admission_transaction: bool = False,
     ):
         """Initialize the scheduler.
 
@@ -374,6 +404,9 @@ class Scheduler(BaseScheduler):
         self.logunser: bool = logunser
         self.stats: StatsCollector | None = stats
         self.crawler: Crawler | None = crawler
+        self._admission_transaction: bool = admission_transaction
+        self._admission_transaction_active: bool = False
+        self._closing: bool = False
         self._sync_every: int = (
             crawler.settings.getint("JOBDIR_SYNC_EVERY") if crawler else 0
         )
@@ -404,6 +437,20 @@ class Scheduler(BaseScheduler):
         (3) return the result of the dupefilter's ``open`` method
         """
         self.spider: Spider = spider
+        self._closing = False
+        self._admission_transaction_active = (
+            self._admission_transaction and _supports_admission_transaction(self.df)
+        )
+        if self._admission_transaction and not self._admission_transaction_active:
+            logger.warning(
+                f"SCHEDULER_ADMISSION_TRANSACTION is enabled but"
+                f" {global_object_name(type(self.df))} does not implement the"
+                f" reservation protocol"
+                f" (reserve_fingerprint(), confirm_fingerprint(),"
+                f" revoke_fingerprint()); requests are admitted without"
+                f" transactions.",
+                extra={"spider": spider},
+            )
         self.mqs: PriorityQueueProtocol = self._mq()
         self.dqs: PriorityQueueProtocol | None = self._dq() if self.dqdir else None
         self._dqs_changes = 0
@@ -415,6 +462,7 @@ class Scheduler(BaseScheduler):
         (1) dump pending requests to disk if there is a disk queue
         (2) return the result of the dupefilter's ``close`` method
         """
+        self._closing = True
         if self.dqs is not None:
             state = self.dqs.close()
             assert isinstance(self.dqdir, str)
@@ -430,8 +478,23 @@ class Scheduler(BaseScheduler):
         :stat:`scheduler/enqueued/disk`, :stat:`scheduler/enqueued/memory`.
 
         Return ``True`` if the request was stored successfully, ``False`` otherwise.
+
+        When :setting:`SCHEDULER_ADMISSION_TRANSACTION` is enabled and the
+        dupefilter supports the reservation protocol, the request goes through
+        an admission transaction: serialization, fingerprint reservation,
+        queue push and fingerprint confirmation. A failure before the push
+        revokes the reservation, so the request is not permanently considered
+        scheduled. A failure whose storage result is unknown keeps the
+        reservation and is reported as an uncertain admission instead.
         """
         skip_dupefilter = request.meta.pop("skip_dupefilter_once", False)
+        if self._admission_transaction_active:
+            return self._enqueue_request_transactional(
+                request, skip_dupefilter=skip_dupefilter
+            )
+        return self._enqueue_request_legacy(request, skip_dupefilter)
+
+    def _enqueue_request_legacy(self, request: Request, skip_dupefilter: bool) -> bool:
         if (
             not request.dont_filter
             and not skip_dupefilter
@@ -448,6 +511,165 @@ class Scheduler(BaseScheduler):
             self.stats.inc_value("scheduler/enqueued/memory")
         self.stats.inc_value("scheduler/enqueued")
         return True
+
+    def _enqueue_request_transactional(
+        self, request: Request, *, skip_dupefilter: bool
+    ) -> bool:
+        assert self.stats is not None
+        if self._closing:
+            logger.warning(
+                f"Rejecting {request} while the scheduler is closing.",
+                extra={"spider": self.spider},
+            )
+            self.stats.inc_value("scheduler/admission/rejected")
+            return False
+
+        # (1) Serialization, with no side effects: a request that cannot be
+        # written to disk goes to the memory queue before any fingerprint is
+        # reserved.
+        use_disk = self._probe_serialization(request)
+        if use_disk is None:
+            return False
+
+        # dont_filter requests and requests with skip_dupefilter_once skip the
+        # dupefilter entirely, including its reservation protocol.
+        reserved = not request.dont_filter and not skip_dupefilter
+        # (2) Fingerprint reservation.
+        if reserved and self.df.reserve_fingerprint(request):
+            self.df.log(request, self.spider)
+            self.stats.inc_value("scheduler/admission/rejected")
+            return False
+
+        # (3) Queue push.
+        target = self._admission_push(request, use_disk=use_disk, reserved=reserved)
+        if target is None:
+            return False
+
+        # (4) Final confirmation. If it fails, the reservation still prevents
+        # duplicate admissions within the process, while the durable state of
+        # the fingerprint is unknown.
+        if reserved and not self._confirm_reservation(request):
+            return False
+
+        self.stats.inc_value(f"scheduler/enqueued/{target}")
+        self.stats.inc_value("scheduler/enqueued")
+        self.stats.inc_value("scheduler/admission/succeeded")
+        return True
+
+    def _probe_serialization(self, request: Request) -> bool | None:
+        """Return whether *request* can be pushed to the disk queue.
+
+        ``None`` means an unexpected error made the admission result
+        uncertain.
+        """
+        if self.dqs is None:
+            return False
+        try:
+            self.dqs.serialize(request)
+        except ValueError as exc:
+            self._log_unserializable(request, exc)
+            assert self.stats is not None
+            self.stats.inc_value("scheduler/unserializable")
+            return False
+        except Exception as exc:
+            self._uncertain(
+                request,
+                "request serialization failed with an unexpected error",
+                exc,
+            )
+            return None
+        return True
+
+    def _admission_push(
+        self, request: Request, *, use_disk: bool, reserved: bool
+    ) -> str | None:
+        """Push *request* to the disk or memory queue as part of a transaction.
+
+        Return the target queue name (``"disk"`` or ``"memory"``), or ``None``
+        if the admission failed or its result is uncertain.
+        """
+        disk_queue = self.dqs
+        try:
+            if use_disk:
+                assert disk_queue is not None
+                disk_queue.push(request)
+                target = "disk"
+            else:
+                self.mqs.push(request)
+                target = "memory"
+        except ValueError as exc:
+            # The request could not be serialized, hence was not stored, so
+            # the reservation can safely be revoked.
+            if reserved:
+                self.df.revoke_fingerprint(request)
+            self._log_unserializable(request, exc)
+            assert self.stats is not None
+            self.stats.inc_value("scheduler/unserializable")
+            try:
+                self.mqs.push(request)
+            except Exception as fallback_exc:
+                self._uncertain(
+                    request,
+                    "the memory queue failed to store the request",
+                    fallback_exc,
+                )
+                return None
+            target = "memory"
+        except Exception as exc:
+            # The push may or may not have stored the request, so the
+            # reservation is kept: re-scheduling the same request in this
+            # process must not enqueue it a second time. The request is never
+            # silently re-submitted to the engine.
+            self._uncertain(
+                request,
+                "the request queue failed while storing the request",
+                exc,
+            )
+            return None
+        finally:
+            self._sync_dqs_state()
+        return target
+
+    def _confirm_reservation(self, request: Request) -> bool:
+        try:
+            self.df.confirm_fingerprint(request)
+        except Exception as exc:
+            self._uncertain(
+                request,
+                "the dupefilter failed to confirm the request fingerprint",
+                exc,
+            )
+            return False
+        return True
+
+    def _uncertain(self, request: Request, reason: str, exc: BaseException) -> None:
+        """Record an admission whose storage or fingerprint result is unknown.
+
+        The fingerprint reservation (if any) is intentionally kept, and the
+        request is never re-scheduled automatically.
+        """
+        assert self.stats is not None
+        logger.error(
+            f"Uncertain admission for {request}: {reason} ({exc!r})."
+            " The request is not re-scheduled; its fingerprint stays reserved"
+            " until the process ends.",
+            exc_info=exc,
+            extra={"spider": self.spider},
+        )
+        self.stats.inc_value("scheduler/admission/uncertain")
+
+    def _log_unserializable(self, request: Request, reason: BaseException) -> None:
+        if not self.logunser:
+            return
+        logger.warning(
+            "Unable to serialize request: %(request)s - reason:"
+            " %(reason)s - no more unserializable requests will be"
+            " logged (stats being collected)",
+            {"request": request, "reason": reason},
+            exc_info=reason,
+            extra={"spider": self.spider},
+        )
+        self.logunser = False
 
     def next_request(self) -> Request | None:
         """
@@ -485,19 +707,7 @@ class Scheduler(BaseScheduler):
         try:
             self.dqs.push(request)
         except ValueError as e:  # non serializable request
-            if self.logunser:
-                msg = (
-                    "Unable to serialize request: %(request)s - reason:"
-                    " %(reason)s - no more unserializable requests will be"
-                    " logged (stats being collected)"
-                )
-                logger.warning(
-                    msg,
-                    {"request": request, "reason": e},
-                    exc_info=True,
-                    extra={"spider": self.spider},
-                )
-                self.logunser = False
+            self._log_unserializable(request, e)
             assert self.stats is not None
             self.stats.inc_value("scheduler/unserializable")
             return False

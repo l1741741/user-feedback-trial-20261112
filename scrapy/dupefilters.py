@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 from pathlib import Path
 from shutil import rmtree
 from tempfile import mkdtemp
@@ -54,6 +55,39 @@ class BaseDupeFilter:
     def request_seen(self, request: Request) -> bool:
         return False
 
+    def reserve_fingerprint(self, request: Request) -> bool:
+        """Reserve the fingerprint of *request* before it is stored into a
+        queue, without recording it as a confirmed duplicate.
+
+        Return ``True`` if the fingerprint is already taken, by a confirmed or
+        reserved request, and ``False`` otherwise. A reservation that returns
+        ``False`` must later be finalized with either
+        :meth:`confirm_fingerprint` or :meth:`revoke_fingerprint`.
+
+        The scheduler only calls this method when
+        :setting:`SCHEDULER_ADMISSION_TRANSACTION` is enabled. Filters that do
+        not implement the reservation protocol keep using
+        :meth:`request_seen` as before.
+
+        .. versionadded:: VERSION
+        """
+        return False
+
+    def confirm_fingerprint(self, request: Request) -> None:
+        """Record the fingerprint of a previously reserved *request* as a
+        confirmed duplicate.
+
+        .. versionadded:: VERSION
+        """
+
+    def revoke_fingerprint(self, request: Request) -> None:
+        """Release a reservation made with :meth:`reserve_fingerprint`,
+        typically because the request could not be stored into any queue
+        before its fingerprint would be confirmed.
+
+        .. versionadded:: VERSION
+        """
+
     def open(self) -> Coroutine[Any, Any, None] | Deferred[None] | None:
         pass
 
@@ -101,6 +135,10 @@ class RFPDupeFilter(BaseDupeFilter):
             fingerprinter or RequestFingerprinter()
         )
         self._fingerprints: set[bytes] = set()
+        self._reservations: set[bytes] = set()
+        # Serializes the check-then-add of reservations so that concurrent
+        # requests with the same fingerprint only reserve it once.
+        self._reservation_lock = threading.Lock()
         self.logdupes = True
         self.debug = debug
         self.logger = logging.getLogger(__name__)
@@ -139,12 +177,37 @@ class RFPDupeFilter(BaseDupeFilter):
 
     def request_seen(self, request: Request) -> bool:
         fp = self._fingerprint(request)
-        if fp in self._fingerprints:
+        if fp in self._fingerprints or fp in self._reservations:
             return True
         self._fingerprints.add(fp)
         if self.file:
             self.file.write(len(fp).to_bytes(_SIZE_BYTES, "big") + fp)
         return False
+
+    def reserve_fingerprint(self, request: Request) -> bool:
+        fp = self._fingerprint(request)
+        with self._reservation_lock:
+            if fp in self._fingerprints or fp in self._reservations:
+                return True
+            self._reservations.add(fp)
+        return False
+
+    def confirm_fingerprint(self, request: Request) -> None:
+        fp = self._fingerprint(request)
+        # A reservation may be missing if the scheduler fell back to the
+        # non-transactional path, e.g. with a custom filter subclass.
+        with self._reservation_lock:
+            self._reservations.discard(fp)
+            if fp in self._fingerprints:
+                return
+            self._fingerprints.add(fp)
+        if self.file:
+            self.file.write(len(fp).to_bytes(_SIZE_BYTES, "big") + fp)
+
+    def revoke_fingerprint(self, request: Request) -> None:
+        fp = self._fingerprint(request)
+        with self._reservation_lock:
+            self._reservations.discard(fp)
 
     def _fingerprint(self, request: Request) -> bytes:
         if self._legacy_fingerprint:
@@ -236,6 +299,37 @@ class DiskDupeFilter(RFPDupeFilter):
                 self._changes = 0
                 self._db.commit()
         return False
+
+    def reserve_fingerprint(self, request: Request) -> bool:
+        fp = self._fingerprint(request)
+        with self._reservation_lock:
+            if fp in self._reservations:
+                return True
+            if self._db.execute(
+                "SELECT 1 FROM seen WHERE fingerprint = ?", (fp,)
+            ).fetchone():
+                return True
+            self._reservations.add(fp)
+        return False
+
+    def confirm_fingerprint(self, request: Request) -> None:
+        fp = self._fingerprint(request)
+        with self._reservation_lock:
+            if fp not in self._reservations:
+                return
+            self._reservations.remove(fp)
+            cursor = self._db.execute("INSERT OR IGNORE INTO seen VALUES (?)", (fp,))
+            changed = bool(cursor.rowcount)
+        if changed and self._sync_every:
+            self._changes += 1
+            if self._changes >= self._sync_every:
+                self._changes = 0
+                self._db.commit()
+
+    def revoke_fingerprint(self, request: Request) -> None:
+        fp = self._fingerprint(request)
+        with self._reservation_lock:
+            self._reservations.discard(fp)
 
     def close(self, reason: str) -> None:
         self._db.commit()

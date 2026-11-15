@@ -750,6 +750,27 @@ one per actual value of the placeholder.
     Set by
     :class:`~scrapy.downloadermiddlewares.robotstxt.RobotsTxtMiddleware`.
 
+.. stat:: scheduler/admission/rejected
+
+``scheduler/admission/rejected``
+    Number of requests that the :ref:`scheduler <topics-scheduler>` rejected
+    during a :setting:`SCHEDULER_ADMISSION_TRANSACTION` admission, either as
+    duplicates or because the scheduler was closing.
+
+.. stat:: scheduler/admission/succeeded
+
+``scheduler/admission/succeeded``
+    Number of requests stored into the :ref:`scheduler <topics-scheduler>`
+    through a successful :setting:`SCHEDULER_ADMISSION_TRANSACTION` admission.
+
+.. stat:: scheduler/admission/uncertain
+
+``scheduler/admission/uncertain``
+    Number of requests whose storage or fingerprint result could not be
+    determined during a :setting:`SCHEDULER_ADMISSION_TRANSACTION` admission.
+    Such requests are not re-scheduled; their fingerprints stay reserved until
+    the process ends.
+
 .. stat:: scheduler/dequeued
 
 ``scheduler/dequeued``

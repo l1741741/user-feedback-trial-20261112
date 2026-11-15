@@ -215,6 +215,7 @@ __all__ = [
     "ROBOTSTXT_PARSER",
     "ROBOTSTXT_USER_AGENT",
     "SCHEDULER",
+    "SCHEDULER_ADMISSION_TRANSACTION",
     "SCHEDULER_DEBUG",
     "SCHEDULER_DISK_QUEUE",
     "SCHEDULER_MEMORY_QUEUE",
@@ -604,6 +605,7 @@ ROBOTSTXT_PARSER = "scrapy.robotstxt.ProtegoRobotParser"
 ROBOTSTXT_USER_AGENT = None
 
 SCHEDULER = "scrapy.core.scheduler.Scheduler"
+SCHEDULER_ADMISSION_TRANSACTION = False
 SCHEDULER_DEBUG = False
 SCHEDULER_DISK_QUEUE = "scrapy.squeues.PickleLifoDiskQueue"
 SCHEDULER_MEMORY_QUEUE = "scrapy.squeues.LifoMemoryQueue"

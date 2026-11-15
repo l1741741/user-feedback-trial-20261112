@@ -76,6 +76,15 @@ class PriorityQueueProtocol(Protocol):
     def push(self, request: Request) -> None:
         """Store *request*."""
 
+    def serialize(self, request: Request) -> None:
+        """Perform the serialization that :meth:`push` would perform on
+        *request*, without storing anything.
+
+        Raise the same exception (typically :exc:`ValueError`) that
+        :meth:`push` would raise when *request* cannot be serialized. Queue
+        classes that keep requests in memory do not need to implement this.
+        """
+
     def pop(self) -> Request | None:
         """Remove and return the next request, or return ``None`` if the queue
         is empty.
@@ -218,6 +227,11 @@ class ScrapyPriorityQueue:
 
     def priority(self, request: Request) -> int:
         return -request.priority
+
+    def serialize(self, request: Request) -> None:
+        serialize = getattr(self.downstream_queue_cls, "serialize", None)
+        if serialize is not None:
+            serialize(request, spider=self.crawler.spider)
 
     def push(self, request: Request) -> None:
         priority = self.priority(request)
@@ -470,6 +484,11 @@ class DownloaderAwarePriorityQueue:
         queue = self.pqueues[slot]
         queue.push(request)
         self._collect_change(queue)
+
+    def serialize(self, request: Request) -> None:
+        serialize = getattr(self.downstream_queue_cls, "serialize", None)
+        if serialize is not None:
+            serialize(request, spider=self.crawler.spider)
 
     def peek(self) -> Request | None:
         """Returns the next object to be returned by :meth:`pop`,

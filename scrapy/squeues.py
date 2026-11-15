@@ -83,8 +83,16 @@ def _scrapy_serialization_queue(
             return cls(crawler, key)
 
         def push(self, request: Request) -> None:
-            request_dict = request.to_dict(spider=self.spider)
-            super().push(request_dict)
+            super().push(request.to_dict(spider=self.spider))
+
+        @classmethod
+        def serialize(cls, request: Request, *, spider: Any = None) -> dict[str, Any]:
+            """Return the serialized form of *request* without storing it.
+
+            This raises the same errors as :meth:`push` when *request* cannot
+            be serialized.
+            """
+            return request.to_dict(spider=spider)
 
         def pop(self) -> Request | None:
             request = super().pop()

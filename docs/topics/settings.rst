@@ -1429,6 +1429,22 @@ interface:
             otherwise."""
             return False
 
+        def reserve_fingerprint(self, request):
+            """Optional. Used instead of :meth:`request_seen` when
+            :setting:`SCHEDULER_ADMISSION_TRANSACTION` is enabled. Returns
+            ``True`` if the fingerprint of *request* is already confirmed or
+            reserved, and reserves it otherwise."""
+            return False
+
+        def confirm_fingerprint(self, request):
+            """Optional. Confirms a fingerprint reserved with
+            :meth:`reserve_fingerprint`, after the request has been stored."""
+
+        def revoke_fingerprint(self, request):
+            """Optional. Releases a reservation made with
+            :meth:`reserve_fingerprint`, when the request could not be stored
+            before its fingerprint would be confirmed."""
+
         def open(self):
             """Called before the spider opens. It may be a coroutine function."""
             pass
@@ -2148,6 +2164,52 @@ Default: :class:`~scrapy.core.scheduler.Scheduler`
 
 The scheduler class to be used for crawling. See :ref:`topics-scheduler` for
 details.
+
+.. setting:: SCHEDULER_ADMISSION_TRANSACTION
+
+SCHEDULER_ADMISSION_TRANSACTION
+-------------------------------
+
+.. versionadded:: VERSION
+
+Default: ``False``
+
+Whether the default :class:`~scrapy.core.scheduler.Scheduler` admits requests
+through a transaction when :setting:`DUPEFILTER_CLASS` supports it.
+
+Without transactions, a request is marked as seen by the dupefilter before it
+is written to a queue, so a serialization or storage failure can leave the
+request permanently considered as scheduled even though it was never stored.
+
+When enabled, each request goes through four ordered steps:
+
+#. The request is serialized without storing anything, to decide whether it
+   can go to the disk queue or must use the memory queue.
+
+#. Its fingerprint is *reserved* in the dupefilter, which keeps rejecting the
+   same fingerprint until the reservation is either confirmed or revoked.
+
+#. The request is pushed to the selected queue.
+
+#. The fingerprint reservation is *confirmed*, making the fingerprint
+   durable like a regular duplicate filter entry.
+
+A failure before the request is stored revokes the reservation, so the
+request can be scheduled again. If the storage result of a push cannot be
+determined (for example the queue raises after writing), the reservation is
+kept instead: the request is never re-scheduled automatically, and the
+:stat:`scheduler/admission/uncertain` stat is incremented. Concurrent
+requests with the same fingerprint still result in a single stored request.
+
+Requests with ``dont_filter=True`` or the :reqmeta:`skip_dupefilter_once`
+meta key skip the dupefilter steps. A custom dupefilter must implement the
+``reserve_fingerprint()``, ``confirm_fingerprint()`` and
+``revoke_fingerprint()`` methods; otherwise the scheduler logs a warning and
+keeps using the non-transactional admission.
+
+The three outcomes are counted separately by the
+:stat:`scheduler/admission/succeeded`, :stat:`scheduler/admission/rejected`
+and :stat:`scheduler/admission/uncertain` stats.
 
 .. setting:: SCHEDULER_DEBUG
 
