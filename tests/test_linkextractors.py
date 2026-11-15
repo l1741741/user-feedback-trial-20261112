@@ -968,3 +968,223 @@ class TestLxmlParserLinkExtractor:
             strip=False, process=reject_trailing_whitespace
         )
         assert lx_no_strip.extract_links(response) == []
+
+
+class TestLxmlLinkExtractorBudgets:
+    @staticmethod
+    def _response(html: str, url: str = "http://example.com/index") -> HtmlResponse:
+        return HtmlResponse(url=url, body=html.encode(), encoding="utf-8")
+
+    @staticmethod
+    def _counting_extractor(
+        monkeypatch, produced: list[Link], **kwargs
+    ) -> LxmlLinkExtractor:
+        original = LxmlParserLinkExtractor._iter_extracted_links
+
+        def counting(self, *args, **kw):
+            for link in original(self, *args, **kw):
+                produced.append(link)
+                yield link
+
+        monkeypatch.setattr(
+            LxmlParserLinkExtractor, "_iter_extracted_links", counting
+        )
+        return LxmlLinkExtractor(**kwargs)
+
+    @pytest.mark.parametrize("param", ["max_candidates", "max_url_bytes"])
+    @pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "3"])
+    def test_invalid_budget_values(self, param: str, value: Any) -> None:
+        with pytest.raises(ValueError, match="must be a positive integer or None"):
+            LxmlLinkExtractor(**{param: value})
+
+    @pytest.mark.parametrize("param", ["max_candidates", "max_url_bytes"])
+    @pytest.mark.parametrize("value", [None, 1, 100])
+    def test_valid_budget_values(self, param: str, value: Any) -> None:
+        lx = LxmlLinkExtractor(**{param: value})
+        assert getattr(lx, param) == value
+
+    def test_max_candidates_stops_consuming_generator(self, monkeypatch) -> None:
+        links_html = "".join(
+            f'<a href="/p{i}.html" rel="nofollow">p{i}</a>' for i in range(10)
+        )
+        response = self._response(f"<html><body>{links_html}</body></html>")
+        produced: list[Link] = []
+        lx = self._counting_extractor(monkeypatch, produced, max_candidates=3)
+
+        links = lx.extract_links(response)
+
+        # The generator is not asked for an (N+1)-th candidate.
+        assert len(produced) == 3
+        assert [link.url for link in links] == [
+            "http://example.com/p0.html",
+            "http://example.com/p1.html",
+            "http://example.com/p2.html",
+        ]
+        assert all(link.nofollow for link in links)
+
+    def test_max_candidates_counts_links_filtered_out(self, monkeypatch) -> None:
+        links_html = "".join(f'<a href="/p{i}.html">p{i}</a>' for i in range(5))
+        response = self._response(f"<html><body>{links_html}</body></html>")
+        produced: list[Link] = []
+        lx = self._counting_extractor(
+            monkeypatch, produced, allow=("no-such-thing",), max_candidates=3
+        )
+
+        assert lx.extract_links(response) == []
+        # Candidates rejected by allow/deny still consume the budget.
+        assert len(produced) == 3
+
+    def test_max_candidates_counts_duplicates(self, monkeypatch) -> None:
+        response = self._response(
+            '<html><body><a href="/dup.html">dup</a>' * 5 + "</body></html>"
+        )
+        produced: list[Link] = []
+        lx = self._counting_extractor(monkeypatch, produced, max_candidates=3)
+
+        links = lx.extract_links(response)
+
+        # Deduplication happens after the budget is spent.
+        assert len(produced) == 3
+        assert links == [Link(url="http://example.com/dup.html", text="dup")]
+
+    def test_max_candidates_across_restrict_regions(self, monkeypatch) -> None:
+        response = self._response(
+            "<html><body>"
+            '<div id="a"><a href="/1.html">1</a><a href="/2.html">2</a></div>'
+            '<div id="b"><a href="/2.html">2 again</a><a href="/3.html">3</a></div>'
+            "</body></html>"
+        )
+        produced: list[Link] = []
+        lx = self._counting_extractor(
+            monkeypatch,
+            produced,
+            restrict_xpaths=("//div[@id='a']",),
+            restrict_css=("#b",),
+            max_candidates=3,
+        )
+
+        links = lx.extract_links(response)
+
+        # Candidates are counted in production order across regions, so the
+        # budget is spent before the 4th candidate (/3.html) is produced.
+        assert len(produced) == 3
+        assert [link.url for link in links] == [
+            "http://example.com/1.html",
+            "http://example.com/2.html",
+        ]
+
+    def test_process_value_with_budgets(self, monkeypatch) -> None:
+        def process_value(value):
+            m = re.search(r"javascript:goToPage\('(.*?)'", value)
+            if m:
+                return m.group(1)
+            if value.endswith("drop-me.html"):
+                return None
+            return value
+
+        response = self._response(
+            "<html><body>"
+            "<a href=\"javascript:goToPage('../other/page.html'); return false\">Link</a>"
+            '<a href="/drop-me.html">dropped</a>'
+            '<a href="/normal.html">normal</a>'
+            '<a href="/never-reached.html">never reached</a>'
+            "</body></html>"
+        )
+        produced: list[Link] = []
+        lx = self._counting_extractor(
+            monkeypatch, produced, process_value=process_value, max_candidates=2
+        )
+
+        links = lx.extract_links(response)
+
+        # process_value runs while a candidate is produced, so a value it
+        # turns into None never becomes a candidate and costs no budget.
+        assert len(produced) == 2
+        assert [link.url for link in links] == [
+            "http://example.com/other/page.html",
+            "http://example.com/normal.html",
+        ]
+
+    def test_base_url_with_budgets(self) -> None:
+        response = self._response(
+            '<html><head><base href="http://example.com/sub/"></head>'
+            '<body><a href="a.html">a</a><a href="b.html">b</a></body></html>'
+        )
+        lx = LxmlLinkExtractor(max_candidates=1)
+        assert lx.extract_links(response) == [
+            Link(url="http://example.com/sub/a.html", text="a")
+        ]
+
+    @pytest.mark.parametrize(("budget", "kept"), [(37, True), (36, False)])
+    def test_max_url_bytes_multibyte(self, budget: int, kept: bool) -> None:
+        # The raw href is 3 characters long, but the final absolute URL
+        # percent-encodes each CJK character to 9 bytes, giving 37 bytes.
+        response = self._response(
+            '<html><body><a href="/日本">multibyte</a></body></html>'
+        )
+        lx = LxmlLinkExtractor(max_url_bytes=budget)
+        links = lx.extract_links(response)
+        expected = "http://example.com/%E6%97%A5%E6%9C%AC"
+        assert len(expected.encode()) == 37
+        assert [link.url for link in links] == ([expected] if kept else [])
+
+    @pytest.mark.parametrize(
+        ("budget", "expected"),
+        [
+            (25, ["http://example.com/abcdef", "http://example.com/x"]),
+            (24, ["http://example.com/x"]),
+        ],
+    )
+    def test_max_url_bytes_boundary_and_continue(
+        self, budget: int, expected: list[str]
+    ) -> None:
+        response = self._response(
+            "<html><body>"
+            '<a href="/abcdef">25 bytes</a>'
+            '<a href="/abcdefghij">29 bytes</a>'
+            '<a href="/x">20 bytes</a>'
+            "</body></html>"
+        )
+        lx = LxmlLinkExtractor(max_url_bytes=budget)
+        # An over-budget link is dropped and scanning continues.
+        assert [link.url for link in lx.extract_links(response)] == expected
+
+    def test_canonicalize_unique_with_budgets(self, monkeypatch) -> None:
+        response = self._response(
+            "<html><body>"
+            '<a href="/page.html?b=2&amp;a=1">1</a>'
+            '<a href="/page.html?a=1&amp;b=2">2</a>'
+            '<a href="/other.html">3</a>'
+            "</body></html>"
+        )
+        produced: list[Link] = []
+        lx = self._counting_extractor(
+            monkeypatch, produced, canonicalize=True, unique=True, max_candidates=2
+        )
+
+        links = lx.extract_links(response)
+
+        # The budget is spent before canonicalization and deduplication.
+        assert len(produced) == 2
+        assert links == [
+            Link(url="http://example.com/page.html?a=1&b=2", text="1"),
+        ]
+
+    def test_budgets_reset_between_calls(self) -> None:
+        links_html = "".join(f'<a href="/p{i}.html">p{i}</a>' for i in range(5))
+        response = self._response(f"<html><body>{links_html}</body></html>")
+        lx = LxmlLinkExtractor(max_candidates=2)
+
+        first = lx.extract_links(response)
+        second = lx.extract_links(response)
+
+        assert len(first) == 2
+        assert first == second
+
+    def test_defaults_unlimited(self) -> None:
+        body = get_testdata("link_extractor", "linkextractor.html")
+        response = HtmlResponse(url="http://example.com/index", body=body)
+        expected = LxmlLinkExtractor().extract_links(response)
+        assert len(expected) == 7
+        lx = LxmlLinkExtractor(max_candidates=None, max_url_bytes=None)
+        assert lx.extract_links(response) == expected

@@ -132,7 +132,18 @@ class LxmlParserLinkExtractor:
         response_encoding: str,
         base_url: str,
     ) -> list[Link]:
-        links: list[Link] = []
+        links = self._iter_extracted_links(
+            selector, response_url, response_encoding, base_url
+        )
+        return self._deduplicate_if_needed(list(links))
+
+    def _iter_extracted_links(
+        self,
+        selector: Selector,
+        response_url: str,
+        response_encoding: str,
+        base_url: str,
+    ) -> Iterable[Link]:
         # hacky way to get the underlying lxml parsed document
         for el, _, attr_val in self._iter_links(selector.root):
             # pseudo lxml.html.HtmlElement.make_links_absolute(base_url)
@@ -154,13 +165,11 @@ class LxmlParserLinkExtractor:
 
             # to fix relative links after process_value
             url = urljoin(response_url, url)
-            link = Link(
+            yield Link(
                 url,
                 _collect_string_content(el) or "",
                 nofollow=rel_has_nofollow(el.get("rel")),
             )
-            links.append(link)
-        return self._deduplicate_if_needed(links)
 
     def extract_links(self, response: TextResponse) -> list[Link]:
         base_url = response.base_url
@@ -183,6 +192,14 @@ class LxmlParserLinkExtractor:
 
 _Regex: TypeAlias = str | re.Pattern[str]
 _RegexOrSeveral: TypeAlias = _Regex | Iterable[_Regex]
+
+
+def _validate_budget(value: Any, name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer or None, got {value!r}")
+    return value
 
 
 class LxmlLinkExtractor:
@@ -318,6 +335,30 @@ class LxmlLinkExtractor:
         URLs from elements or attributes that allow leading or trailing
         whitespaces).
     :type strip: bool
+
+    :param max_candidates: the maximum number of candidate links taken from
+        the underlying parser during a single :meth:`extract_links` call.
+        Each candidate consumes from this budget as soon as the parser
+        produces it, before ``allow``, ``deny`` and the other filtering
+        parameters are applied, and before deduplication and
+        canonicalization, so links that are later filtered out still count.
+        Once the budget is spent, extraction stops and the links gathered so
+        far are returned in their original order. If not given, the number of
+        candidates is unlimited.
+
+        .. versionadded:: VERSION
+    :type max_candidates: int or None
+
+    :param max_url_bytes: the maximum length, in UTF-8 bytes, of the final
+        absolute URL of an extracted link. Links whose URL exceeds this
+        length are discarded, while extraction of the remaining links
+        continues. The URL is measured after it has been made absolute and
+        percent-encoded, so a non-ASCII character counts as its
+        percent-encoded bytes, not as a single character. If not given, URL
+        length is not limited.
+
+        .. versionadded:: VERSION
+    :type max_url_bytes: int or None
     """
 
     _csstranslator = HTMLTranslator()
@@ -341,6 +382,8 @@ class LxmlLinkExtractor:
         deny_tags: str | Iterable[str] = (),
         deny_attrs: str | Iterable[str] = (),
         schemes: str | Iterable[str] | None = None,
+        max_candidates: int | None = None,
+        max_url_bytes: int | None = None,
     ):
         tags, attrs = set(arg_to_iter(tags)), set(arg_to_iter(attrs))
         deny_tags, deny_attrs = (
@@ -374,6 +417,12 @@ class LxmlLinkExtractor:
             None if schemes is None else set(arg_to_iter(schemes))
         )
         self.restrict_text: list[re.Pattern[str]] = self._compile_regexes(restrict_text)
+        self.max_candidates: int | None = _validate_budget(
+            max_candidates, "max_candidates"
+        )
+        self.max_url_bytes: int | None = _validate_budget(
+            max_url_bytes, "max_url_bytes"
+        )
 
     @staticmethod
     def _compile_regexes(value: _RegexOrSeveral | None) -> list[re.Pattern[str]]:
@@ -450,9 +499,31 @@ class LxmlLinkExtractor:
             else self.schemes
         )
         all_links = []
-        for doc in docs:
-            links = self._extract_links(doc, response.url, response.encoding, base_url)
-            all_links.extend(self._process_links(links, schemes))
+        if self.max_candidates is None and self.max_url_bytes is None:
+            for doc in docs:
+                links = self._extract_links(
+                    doc, response.url, response.encoding, base_url
+                )
+                all_links.extend(self._process_links(links, schemes))
+        else:
+            remaining = self.max_candidates
+            for doc in docs:
+                if remaining == 0:
+                    break
+                links = []
+                for link in self.link_extractor._iter_extracted_links(
+                    doc, response.url, response.encoding, base_url
+                ):
+                    if remaining is not None:
+                        remaining -= 1
+                    if self.max_url_bytes is None or (
+                        len(link.url.encode("utf-8")) <= self.max_url_bytes
+                    ):
+                        links.append(link)
+                    if remaining == 0:
+                        break
+                links = self.link_extractor._deduplicate_if_needed(links)
+                all_links.extend(self._process_links(links, schemes))
         if self.link_extractor.unique and len(docs) > 1:
             return unique_list(all_links, key=self.link_extractor.link_key)
         return all_links
