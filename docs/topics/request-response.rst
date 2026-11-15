@@ -155,11 +155,113 @@ Request objects
 
     .. automethod:: replace
 
+    .. automethod:: copy_for_origin
+
     .. automethod:: from_curl
 
     .. automethod:: to_curl
 
     .. automethod:: to_dict
+
+
+.. _request-copy-for-origin:
+
+Copying a request to another site
+---------------------------------
+
+When a :ref:`component <topics-components>` forwards a request to another
+site, e.g. to a mirror or an API host of the same service, copying it with
+:meth:`Request.replace` carries over everything the request holds, including
+credentials and other data that the site it came from put in
+:attr:`~scrapy.Request.meta` or :attr:`~scrapy.Request.cb_kwargs`. Use
+:meth:`Request.copy_for_origin` instead: it takes the target URL and the names
+of the fields that belong to the source site, and keeps them only when the
+target has exactly the same origin.
+
+An origin is the lower-cased scheme, the `IDNA`_-encoded host and the
+effective port. The effective port is the explicit port of the URL, or the
+default port of the scheme (80 for ``http``, 443 for ``https``) when the URL
+omits one. User information, path, query and fragment are not part of it, so
+``https://example.com:443/a`` and ``https://user:secret@EXAMPLE.com./b`` share
+an origin, while a different scheme, host or non-default port does not. A
+relative target URL is resolved against the URL of the request before it is
+compared. IPv6 addresses are normalized, so every spelling of the same
+address shares an origin. A URL whose scheme has no defined default port,
+such as ``s3``, has no origin, and neither the source nor the target is then
+treated as matching.
+
+.. code-block:: python
+
+    class MirrorMiddleware:
+        def process_request(self, request, spider):
+            if request.url.startswith("https://www.example.com/"):
+                url = request.url.replace(
+                    "www.example.com", "mirror.example.net"
+                )
+                return request.copy_for_origin(
+                    url,
+                    private_meta=["session_token", "api_key"],
+                    private_cb_kwargs=["account"],
+                )
+            return None
+
+For a cross-origin copy, the declared :attr:`~scrapy.Request.meta` and
+:attr:`~scrapy.Request.cb_kwargs` keys are left out entirely. So are the
+``Authorization``, ``Cookie`` and ``Proxy-Authorization`` headers and the
+:attr:`~scrapy.Request.cookies` attribute, which hold credentials that Scrapy
+and its components set automatically. Pass ``keep_credentials=True`` to keep
+them, e.g. when the other site uses the same credentials on purpose. This
+option takes only a :class:`bool`, so a string such as ``"false"`` cannot
+enable it by accident. Credentials stored in request metadata, such as
+:reqmeta:`http_user`, :reqmeta:`http_pass`, :reqmeta:`proxy` or
+:reqmeta:`ftp_user`, are left to the caller to declare through *private_meta*.
+
+The rule applies to values you pass as arguments too: a declared
+*private_meta* key or a credential header in an explicit *meta*, *headers* or
+*cookies* argument is still dropped on another origin, so the target site
+never receives it by accident.
+
+:meth:`~scrapy.Request.replace` keeps its behavior of copying every attribute
+as is; use :meth:`~scrapy.Request.copy_for_origin` only where crossing origins
+must not carry credentials over.
+
+.. _request-copy-for-origin-nested-copy:
+
+Copy policy for nested containers
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:meth:`~scrapy.Request.copy_for_origin` gives the copy its own
+:attr:`~scrapy.Request.meta`, :attr:`~scrapy.Request.cb_kwargs`, headers and
+cookies, and copies the exact built-in :class:`dict`, :class:`list`,
+:class:`tuple`, :class:`set` and :class:`frozenset` values nested in them,
+recursively, so that mutating a copied container does not change the original
+request. Dict keys and the items of a set or frozenset are hashable, so they
+are shared as they are. Any other value, including a subclass of those
+containers, is shared by reference: the copy never calls ``__copy__``,
+``__deepcopy__`` or a constructor you define, so it cannot run arbitrary code
+stored in request metadata. A container reachable from itself is rejected
+with :exc:`TypeError`, and so is any other failure, before a copy is built; in
+that case the original request is unchanged.
+
+.. _request-copy-for-origin-redirects:
+
+Redirect chains
+~~~~~~~~~~~~~~~
+
+:class:`~scrapy.downloadermiddlewares.redirect.RedirectMiddleware` builds each
+redirect by copying the request it is redirecting, and it removes
+``Authorization``, ``Cookie`` and ``Proxy-Authorization`` itself when the
+redirect target has a different origin.
+
+A custom redirect :ref:`middleware <topics-downloader-middleware>` that
+forwards requests to another site rather than following a ``Location`` header
+should call :meth:`Request.copy_for_origin` with the target URL and the
+site-private field names. Each hop is then checked on its own: a hop from
+origin A to origin B drops the data that belongs to A, and a later hop from B
+to A does not bring it back, because the request being copied no longer holds
+it. The original request, which the chain started from, is never modified.
+
+.. _IDNA: https://en.wikipedia.org/wiki/Internationalized_domain_name
 
 
 .. _form:
