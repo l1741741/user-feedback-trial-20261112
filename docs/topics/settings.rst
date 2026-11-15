@@ -318,8 +318,10 @@ These settings are:
 -   :setting:`ADDONS`
 -   :setting:`COMMANDS_MODULE`
 -   :setting:`SPIDER_LOADER_CLASS` and settings used by the corresponding
-    spider loader class, e.g. :setting:`SPIDER_MODULES` and
-    :setting:`SPIDER_LOADER_WARN_ONLY` for the default spider loader class.
+    spider loader class, e.g. :setting:`SPIDER_MODULES`,
+    :setting:`SPIDER_LOADER_WARN_ONLY` and
+    :setting:`SPIDER_LOADER_DISCOVERY_REPORT` for the default spider loader
+    class.
 -   :setting:`TWISTED_REACTOR_ENABLED`
 
 :setting:`ADDONS` is a special case: it can be set from a spider, but the
@@ -2321,6 +2323,31 @@ The class that will be used for loading spiders, which must implement the
 
 .. note:: This is a :ref:`pre-crawler setting <pre-crawler-settings>`.
 
+.. setting:: SPIDER_LOADER_DISCOVERY_REPORT
+
+SPIDER_LOADER_DISCOVERY_REPORT
+------------------------------
+
+Default: ``False``
+
+.. versionadded:: VERSION
+
+When enabled, :class:`~scrapy.spiderloader.SpiderLoader` collects every
+discovery attempt in private tables before replacing its published spiders,
+and exposes the result through its
+:attr:`~scrapy.spiderloader.SpiderLoader.discovery_report` attribute. The
+report lists the imported modules, the found spider classes and the import
+failures, all sorted, and tells whether the attempt was published.
+
+With :setting:`SPIDER_LOADER_WARN_ONLY` disabled, any module that cannot be
+imported or any spider name defined by more than one class makes discovery
+fail with :exc:`~scrapy.spiderloader.SpiderDiscoveryError`; the previously
+published spiders are kept. With :setting:`SPIDER_LOADER_WARN_ONLY` enabled,
+modules that cannot be imported are skipped, and no class of an ambiguous
+spider name is published.
+
+.. note:: This is a :ref:`pre-crawler setting <pre-crawler-settings>`.
+
 .. setting:: SPIDER_LOADER_WARN_ONLY
 
 SPIDER_LOADER_WARN_ONLY
@@ -2332,6 +2359,10 @@ By default, when Scrapy tries to import spider classes from :setting:`SPIDER_MOD
 it will fail loudly if there is any ``ImportError`` or ``SyntaxError`` exception.
 But you can choose to silence this exception and turn it into a simple
 warning by setting ``SPIDER_LOADER_WARN_ONLY = True``.
+
+When :setting:`SPIDER_LOADER_DISCOVERY_REPORT` is enabled, this setting also
+selects the discovery policy: strict (``False``) or lenient (``True``). See
+:ref:`the SpiderLoader documentation <spider-loader-discovery-report>`.
 
 .. note:: This is a :ref:`pre-crawler setting <pre-crawler-settings>`.
 

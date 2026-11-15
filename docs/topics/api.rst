@@ -185,6 +185,20 @@ Custom spider loaders can be employed by specifying their path in the
 
 .. autoclass:: DummySpiderLoader
 
+.. autoclass:: SpiderDiscoveryError
+
+.. autoclass:: SpiderDiscoveryReport
+    :members:
+
+.. autoclass:: SpiderClassReport
+    :members:
+
+.. autoclass:: SpiderImportFailure
+    :members:
+
+.. autoclass:: SpiderNameConflict
+    :members:
+
 .. _topics-api-signals:
 
 Signals API
