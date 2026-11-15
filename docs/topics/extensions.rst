@@ -202,7 +202,8 @@ attribute of your :class:`~scrapy.Spider` instance:
 
 -   When your spider closes (:signal:`spider_closed`), the contents of its
     :attr:`~scrapy.Spider.state` attribute are serialized into a file named
-    ``spider.state`` in the :setting:`JOBDIR` folder.
+    ``spider.state`` in the :setting:`JOBDIR` folder, replacing any previous
+    file atomically (see :ref:`job-dir-state-writes`).
 -   When your spider opens (:signal:`spider_opened`), if a previously-generated
     ``spider.state`` file exists in the :setting:`JOBDIR` folder, it is loaded
     into the :attr:`~scrapy.Spider.state` attribute.

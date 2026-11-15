@@ -106,6 +106,62 @@ stopping it cleanly. Forced, sudden or otherwise unclean shutdown can lead to
 data corruption in the job directory, which may prevent the spider from
 resuming correctly.
 
+.. _job-dir-state-writes:
+
+Spider state writes
+-------------------
+
+The :ref:`spider state extension <topics-extensions-ref-spiderstate>` writes
+the new state to a temporary file in the job directory, flushes it to disk,
+and then atomically replaces the ``spider.state`` file with it.
+
+This gives the state file the following guarantees:
+
+-   If serialization, the write, the flush, or the replacement fails, the
+    ``spider.state`` file is never left truncated or partially written: it
+    keeps either its previous contents or, if the replacement had already
+    completed, the new contents. The extension cleans up its temporary file
+    and re-raises the original exception.
+-   The temporary file name is unique to the instance that creates it, so
+    several crawls that share a job directory use different temporary files.
+-   If a temporary file cannot be removed after a failure, a warning names it
+    so that it can be deleted by hand. It is never loaded.
+-   The new file gets the permissions that the current process's umask gives
+    to any other new file, and its contents come only from the serialized
+    ``spider.state`` value.
+
+That guarantee ends at the replacement. After the replacement completes, the
+job directory holds only the new state: the extension keeps no copy of the
+previous state in memory, in a backup file, or anywhere else.
+
+The extension also syncs the job directory after the replacement, so that the
+replacement survives a power loss. Some platforms do not allow syncing a
+directory. There, the replacement is still atomic for any process that keeps
+running, and a power loss right after it may leave either version of the file.
+
+The serialization format is unchanged: the file holds a ``pickle`` stream with
+protocol 4, and an existing ``spider.state`` file is loaded the same way as
+before.
+
+Diagnosing disk failures
+------------------------
+
+Failures are reported in two ways:
+
+-   Failures before the replacement raise an exception. The crawl logs it when
+    it closes the spider, and the state file keeps its previous contents.
+-   Failures after the replacement, or while removing a temporary file, cannot
+    undo the replacement. They are logged at ``WARNING`` level by the
+    ``scrapy.extensions.spiderstate`` logger and do not stop the crawl.
+
+An unsupported directory sync is expected on some platforms, so it is logged
+at ``DEBUG`` level. Enable ``DEBUG`` logging for that logger to see it.
+
+To find out what state a job will resume from, inspect the ``spider.state``
+file: it holds the state of the last crawl that saved successfully. Leftover
+``.spider.state.*.tmp`` files only mean that the extension could not remove
+one of its temporary files; they are safe to delete.
+
 Scrapy version changes
 ----------------------
 
@@ -203,4 +259,5 @@ Where:
     file.
 
 -   :class:`~scrapy.extensions.spiderstate.SpiderState` creates the
-    ``spider.state`` file.
+    ``spider.state`` file, and may leave a ``.spider.state.{random}.tmp`` file
+    behind if it cannot remove it (see :ref:`job-dir-state-writes`).
