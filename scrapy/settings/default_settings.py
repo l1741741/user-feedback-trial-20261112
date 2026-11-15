@@ -97,6 +97,7 @@ __all__ = [
     "FEED_EXPORT_ENCODING",
     "FEED_EXPORT_FIELDS",
     "FEED_EXPORT_INDENT",
+    "FEED_FILTER_ERROR_POLICY",
     "FEED_FORMAT",
     "FEED_MODE",
     "FEED_STORAGES",
@@ -416,6 +417,7 @@ FEED_EXPORTERS_BASE = {
     "marshal": "scrapy.exporters.MarshalItemExporter",
     "pickle": "scrapy.exporters.PickleItemExporter",
 }
+FEED_FILTER_ERROR_POLICY = "raise"
 FEED_FORMAT = "jsonlines"
 FEED_MODE = None
 FEED_STORE_EMPTY = True

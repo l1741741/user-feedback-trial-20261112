@@ -89,6 +89,8 @@ _ItemProcessor: TypeAlias = Callable[[Any], Iterable[Any]]
 
 _FEED_MODES: frozenset[str] = frozenset({"append", "create", "overwrite"})
 
+_FILTER_ERROR_POLICIES: frozenset[str] = frozenset({"raise", "skip"})
+
 
 def _get_mode(storage: Any, feed_options: dict[str, Any] | None, legacy: str) -> str:
     """Return the mode of *storage*, based on the *mode* feed option, or on the
@@ -144,6 +146,9 @@ class ItemFilter:
     def accepts(self, item: Any) -> bool:
         """
         Return ``True`` if `item` should be exported or ``False`` otherwise.
+
+        Returning any other value is treated as a filter error, see
+        :ref:`item-filter`.
 
         :param item: scraped item which user wants to check if is acceptable
         :type item: :ref:`Scrapy items <topics-items>`
@@ -601,6 +606,7 @@ class FeedSlot:
         exporters: dict[str, type[BaseItemExporter]],
         settings: BaseSettings,
         crawler: Crawler,
+        feed_id: int,
     ):
         self.file: IO[bytes] | None = None
         self.exporter: BaseItemExporter | None = None
@@ -612,6 +618,9 @@ class FeedSlot:
         self.uri_template: str = uri_template
         self.uri: str = uri
         self.filter: ItemFilter = filter
+        # 0-based position of the feed in the FEEDS setting, used as a stable
+        # label for the per-feed filter stats
+        self.feed_id: int = feed_id
         # exporter params
         self.feed_options: dict[str, Any] = feed_options
         self.spider: Spider = spider
@@ -728,6 +737,19 @@ class FeedExporter:
             self.filters[uri] = self._load_filter(feed_options)
             self.processors[uri] = self._load_processor(feed_options)
 
+        # Map each feed to its 0-based position in the configuration, a
+        # stable label for the per-feed filter stats, and validate the filter
+        # error policies before any storage or file is created.
+        self._feed_ids: dict[str, int] = {}
+        for uri, feed_options in self.feeds.items():
+            policy = feed_options["filter_error_policy"]
+            if policy not in _FILTER_ERROR_POLICIES:
+                raise ValueError(
+                    f"Invalid filter_error_policy for feed {uri!r}: {policy!r}. "
+                    f"Supported values: {', '.join(sorted(_FILTER_ERROR_POLICIES))}."
+                )
+            self._feed_ids[uri] = len(self._feed_ids)
+
         self.storages: dict[str, type[FeedStorageProtocol]] = self._load_components(
             "FEED_STORAGES"
         )
@@ -757,6 +779,9 @@ class FeedExporter:
 
     def open_spider(self, spider: Spider) -> None:
         self._slots_initialized = False
+        for feed_id in self._feed_ids.values():
+            for result in ("accepted", "rejected", "errors"):
+                self.crawler.stats.set_value(f"feedexport/filter/{result}/{feed_id}", 0)
         for uri, feed_options in self.feeds.items():
             uri_params = self._get_uri_params(spider, feed_options["uri_params"])
             try:
@@ -959,6 +984,7 @@ class FeedExporter:
             exporters=self.exporters,
             settings=self.settings,
             crawler=self.crawler,
+            feed_id=self._feed_ids[uri_template],
         )
 
     async def item_scraped(self, item: Any, spider: Spider) -> None:
@@ -975,7 +1001,7 @@ class FeedExporter:
     async def _export_item(self, item: Any, spider: Spider) -> None:
         slots = []
         for slot in self.slots:
-            if not slot.filter.accepts(item):
+            if not self._filter_accepts(slot, item):
                 slots.append(
                     slot
                 )  # if slot doesn't accept item, continue with next slot
@@ -1018,6 +1044,46 @@ class FeedExporter:
                     )
             slots.append(slot)
         self.slots = slots
+
+    def _filter_accepts(self, slot: FeedSlot, item: Any) -> bool:
+        """Return whether *item* must be exported to the feed of *slot*,
+        updating the filter stats of that feed.
+
+        The filter is called exactly once per item and feed, so that filters
+        may keep state. A filter failure (an exception, or a return value
+        that is not a bool) is handled according to the filter_error_policy
+        feed option: ``raise`` propagates it, ``skip`` drops the item for the
+        feed of *slot* only.
+        """
+        try:
+            accepted = slot.filter.accepts(item)
+        except Exception:
+            self.crawler.stats.inc_value(f"feedexport/filter/errors/{slot.feed_id}")
+            if slot.feed_options["filter_error_policy"] == "raise":
+                raise
+            logger.exception(
+                f"Item filter {type(slot.filter).__name__} failed for feed "
+                f"#{slot.feed_id}; the item is skipped for that feed.",
+                extra={"spider": slot.spider},
+            )
+            return False
+        if not isinstance(accepted, bool):
+            self.crawler.stats.inc_value(f"feedexport/filter/errors/{slot.feed_id}")
+            error = TypeError(
+                f"{type(slot.filter).__name__}.accepts() must return a bool, "
+                f"not {type(accepted).__name__}."
+            )
+            if slot.feed_options["filter_error_policy"] == "raise":
+                raise error
+            logger.error(
+                f"{error} The item is skipped for feed #{slot.feed_id}.",
+                extra={"spider": slot.spider},
+            )
+            return False
+        self.crawler.stats.inc_value(
+            f"feedexport/filter/{'accepted' if accepted else 'rejected'}/{slot.feed_id}"
+        )
+        return accepted
 
     def _load_components(self, setting_prefix: str) -> dict[str, Any]:
         conf = without_none_values(

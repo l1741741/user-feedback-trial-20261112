@@ -415,6 +415,27 @@ For instance:
 You can assign your custom filtering class to the ``item_filter`` :ref:`option of a feed <feed-options>`.
 See :setting:`FEEDS` for examples.
 
+.. versionchanged:: VERSION
+   ``accepts()`` must return a :class:`bool`; any other return value is now
+   treated as a filter error instead of being interpreted by its
+   truthiness.
+
+For every feed, Scrapy counts how its filter fares through the following
+:ref:`stats <topics-stats>`, where ``<n>`` is the 0-based position of the
+feed in the :setting:`FEEDS` setting:
+
+-   ``feedexport/filter/accepted/<n>``: items the filter accepted.
+
+-   ``feedexport/filter/rejected/<n>``: items the filter rejected by
+    returning ``False``.
+
+-   ``feedexport/filter/errors/<n>``: items for which the filter raised an
+    exception or returned a non-boolean value.
+
+What happens on a filter error depends on the ``filter_error_policy``
+:ref:`feed option <feed-options>`, which falls back to
+:setting:`FEED_FILTER_ERROR_POLICY`.
+
 ItemFilter
 ----------
 
@@ -528,6 +549,7 @@ These are the settings used for configuring the feed exports:
 -   :setting:`FEED_STORAGE_S3_ACL`
 -   :setting:`FEED_EXPORTERS`
 -   :setting:`FEED_EXPORT_BATCH_ITEM_COUNT`
+-   :setting:`FEED_FILTER_ERROR_POLICY`
 -   :setting:`UPLOAD_TIMEOUT`
 
 .. setting:: FEEDS
@@ -596,6 +618,11 @@ as a fallback value if that key is not provided for a specific feed definition:
 -   ``encoding``: falls back to :setting:`FEED_EXPORT_ENCODING`.
 
 -   ``fields``: falls back to :setting:`FEED_EXPORT_FIELDS`.
+
+-   ``filter_error_policy``: falls back to
+    :setting:`FEED_FILTER_ERROR_POLICY`.
+
+    .. versionadded:: VERSION
 
 -   ``item_classes``: list of :ref:`item classes <topics-items>` to export.
 
@@ -668,6 +695,30 @@ will put each item on a new line. ``None`` selects the most compact representati
 Currently implemented only by :class:`~scrapy.exporters.JsonItemExporter`
 and :class:`~scrapy.exporters.XmlItemExporter`, i.e. when you are exporting
 to ``.json`` or ``.xml``.
+
+.. setting:: FEED_FILTER_ERROR_POLICY
+
+FEED_FILTER_ERROR_POLICY
+------------------------
+
+.. versionadded:: VERSION
+
+Default: ``"raise"``
+
+What to do when the :ref:`item filter <item-filter>` of a feed fails, i.e.
+raises an exception or returns a non-boolean value:
+
+-   ``"raise"``: propagate the exception, preserving the behavior of
+    previous Scrapy versions.
+
+-   ``"skip"``: log the error and skip the item for that feed only; other
+    feeds still receive the item.
+
+Can be overridden with the ``filter_error_policy`` :ref:`feed option
+<feed-options>`.
+
+Either way, the ``feedexport/filter/errors/<n>`` stat of the feed is
+increased (see :ref:`item-filter`).
 
 .. _feed-mode:
 .. setting:: FEED_MODE
