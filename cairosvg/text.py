@@ -182,42 +182,51 @@ def text(surface, node, draw_as_text=False):
                     continue
                 if not 0 <= middle <= length:
                     continue
-                surface.context.save()
-                surface.context.translate(*start_point)
-                surface.context.rotate(point_angle(*(start_point + end_point)))
-                surface.context.translate(0, surface.cursor_d_position[1])
-                surface.context.move_to(0, 0)
-                bounding_box = extend_bounding_box(
-                    bounding_box, ((end_point[0], text_extents[3]),))
             else:
-                surface.context.save()
-                x = surface.cursor_position[0] if x is None else x
-                y = surface.cursor_position[1] if y is None else y
-                if i:
-                    x += letter_spacing
-                surface.context.move_to(x, y)
-                cursor_position = x + extents, y
-                surface.context.rel_move_to(*surface.cursor_d_position)
-                surface.context.rel_move_to(x_align, y_align)
-                surface.context.rotate(last_r if r is None else r)
-                points = (
-                    (cursor_position[0] + x_align +
-                     surface.cursor_d_position[0],
-                     cursor_position[1] + y_align +
-                     surface.cursor_d_position[1]),
-                    (cursor_position[0] + x_align + text_extents[4] +
-                     surface.cursor_d_position[0],
-                     cursor_position[1] + y_align + text_extents[3] +
-                     surface.cursor_d_position[1]))
-                bounding_box = extend_bounding_box(bounding_box, points)
+                start_point = end_point = None
 
-            # Only draw characters with 'content' (workaround for bug in cairo)
-            if not letter.isspace():
-                if draw_as_text:
-                    surface.context.show_text(letter)
+            surface.context.save()
+            try:
+                if text_path:
+                    surface.context.translate(*start_point)
+                    surface.context.rotate(
+                        point_angle(*(start_point + end_point)))
+                    surface.context.translate(
+                        0, surface.cursor_d_position[1])
+                    surface.context.move_to(0, 0)
+                    bounding_box = extend_bounding_box(
+                        bounding_box,
+                        ((end_point[0], text_extents[3]),))
                 else:
-                    surface.context.text_path(letter)
-            surface.context.restore()
+                    x = surface.cursor_position[0] if x is None else x
+                    y = surface.cursor_position[1] if y is None else y
+                    if i:
+                        x += letter_spacing
+                    surface.context.move_to(x, y)
+                    cursor_position = x + extents, y
+                    surface.context.rel_move_to(*surface.cursor_d_position)
+                    surface.context.rel_move_to(x_align, y_align)
+                    surface.context.rotate(last_r if r is None else r)
+                    points = (
+                        (cursor_position[0] + x_align +
+                         surface.cursor_d_position[0],
+                         cursor_position[1] + y_align +
+                         surface.cursor_d_position[1]),
+                        (cursor_position[0] + x_align + text_extents[4] +
+                         surface.cursor_d_position[0],
+                         cursor_position[1] + y_align + text_extents[3] +
+                         surface.cursor_d_position[1]))
+                    bounding_box = extend_bounding_box(
+                        bounding_box, points)
+
+                # Only draw characters with 'content' (cairo workaround)
+                if not letter.isspace():
+                    if draw_as_text:
+                        surface.context.show_text(letter)
+                    else:
+                        surface.context.text_path(letter)
+            finally:
+                surface.context.restore()
             if not text_path:
                 surface.cursor_position = cursor_position
     else:

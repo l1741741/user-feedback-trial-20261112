@@ -119,9 +119,19 @@ def clip_path(surface, node):
 def paint_mask(surface, node, name, opacity):
     """Paint the mask of the current surface."""
     mask_node = surface.masks[name]
+    old_tag = mask_node.tag
     mask_node.tag = 'g'
     mask_node['opacity'] = opacity
+    try:
+        _paint_mask(surface, node, name, opacity, mask_node)
+    finally:
+        # The mask definition is shared with later nodes and later calls;
+        # its tag must be restored even when the nested surface construction
+        # or painting raised.
+        mask_node.tag = old_tag
 
+
+def _paint_mask(surface, node, name, opacity, mask_node):
     if mask_node.get('maskUnits') == 'userSpaceOnUse':
         width_ref, height_ref = 'x', 'y'
     else:
@@ -146,13 +156,21 @@ def paint_mask(surface, node, name, opacity):
 
     from .surface import SVGSurface  # circular import
     mask_surface = SVGSurface(mask_node, None, surface.dpi, surface)
-    surface.context.save()
-    surface.context.translate(x, y)
-    surface.context.scale(
-        mask_node['width'] / mask_surface.width,
-        mask_node['height'] / mask_surface.height)
-    surface.context.mask_surface(mask_surface.cairo)
-    surface.context.restore()
+    try:
+        surface.context.save()
+        try:
+            surface.context.translate(x, y)
+            surface.context.scale(
+                mask_node['width'] / mask_surface.width,
+                mask_node['height'] / mask_surface.height)
+            # mask_surface reads the Cairo surface synchronously, so it can be
+            # released as soon as this call returns.
+            surface.context.mask_surface(mask_surface.cairo)
+        finally:
+            surface.context.restore()
+    finally:
+        # Release the temporary surface even when painting raised.
+        mask_surface.finish()
 
 
 def draw_gradient(surface, node, name, opacity):
@@ -219,8 +237,17 @@ def draw_gradient(surface, node, name, opacity):
 def draw_pattern(surface, node, name, opacity):
     """Draw a pattern image."""
     pattern_node = surface.patterns[name]
+    old_tag = pattern_node.tag
     pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
     pattern_node.tag = 'g'
+    try:
+        return _draw_pattern(surface, node, name, opacity, pattern_node)
+    finally:
+        # The pattern definition is shared with later nodes and calls.
+        pattern_node.tag = old_tag
+
+
+def _draw_pattern(surface, node, name, opacity, pattern_node):
     transform(surface, pattern_node.get('patternTransform'))
 
     if pattern_node.get('viewBox'):
@@ -263,6 +290,11 @@ def draw_pattern(surface, node, name, opacity):
         pattern_surface.width / pattern_width, 0, 0,
         pattern_surface.height / pattern_height, -x, -y))
     surface.context.set_source(pattern_pattern)
+    # The temporary surface must stay alive until the caller actually paints
+    # the pattern: finishing (or dropping the only reference to) an image
+    # surface erases the pixels a SurfacePattern reads from. It is queued on
+    # the rendering surface instead, whose ``finish`` releases every temp.
+    surface._temp_surfaces.append(pattern_surface)
     return True
 
 
@@ -312,24 +344,27 @@ def apply_filter_after_painting(surface, node, name):
             # Flood
             if child.tag == 'feFlood':
                 surface.context.save()
-                surface.context.new_path()
-                if filter_node.get('primitiveUnits') == 'objectBoundingBox':
-                    x = size(surface, node.get('x'), 'x')
-                    y = size(surface, node.get('y'), 'y')
-                    width = size(surface, node.get('width'), 'x')
-                    height = size(surface, node.get('height'), 'y')
-                else:
-                    x, y, width, height = 0, 0, 1, 1
-                x += size(surface, child.get('x', 0), 1)
-                y += size(surface, child.get('y', 0), 1)
-                width *= size(surface, child.get('width', 0), 1)
-                height *= size(surface, child.get('height', 0), 1)
-                rect(surface, dict(x=x, y=y, width=width, height=height))
-                surface.context.set_source_rgba(*surface.map_color(
-                    paint(child.get('flood-color'))[1],
-                    float(child.get('flood-opacity', 1))))
-                surface.context.fill()
-                surface.context.restore()
+                try:
+                    surface.context.new_path()
+                    if filter_node.get(
+                            'primitiveUnits') == 'objectBoundingBox':
+                        x = size(surface, node.get('x'), 'x')
+                        y = size(surface, node.get('y'), 'y')
+                        width = size(surface, node.get('width'), 'x')
+                        height = size(surface, node.get('height'), 'y')
+                    else:
+                        x, y, width, height = 0, 0, 1, 1
+                    x += size(surface, child.get('x', 0), 1)
+                    y += size(surface, child.get('y', 0), 1)
+                    width *= size(surface, child.get('width', 0), 1)
+                    height *= size(surface, child.get('height', 0), 1)
+                    rect(surface, dict(x=x, y=y, width=width, height=height))
+                    surface.context.set_source_rgba(*surface.map_color(
+                        paint(child.get('flood-color'))[1],
+                        float(child.get('flood-opacity', 1))))
+                    surface.context.fill()
+                finally:
+                    surface.context.restore()
 
 
 def use(surface, node):
@@ -339,37 +374,44 @@ def use(surface, node):
         raise ValueError(
             'Abort rendering: more than 100 000 referenced elements')
     surface.context.save()
-    surface.context.translate(
-        size(surface, node.get('x'), 'x'), size(surface, node.get('y'), 'y'))
-    if 'x' in node:
-        del node['x']
-    if 'y' in node:
-        del node['y']
-    if 'viewBox' in node:
-        del node['viewBox']
-    if 'mask' in node:
-        del node['mask']
-    href = parse_url(node.get_href()).geturl()
     try:
-        tree = Tree(
-            url=href, url_fetcher=node.url_fetcher, parent=node,
-            tree_cache=surface.tree_cache, unsafe=node.unsafe)
-    except TypeError:
+        surface.context.translate(
+            size(surface, node.get('x'), 'x'),
+            size(surface, node.get('y'), 'y'))
+        if 'x' in node:
+            del node['x']
+        if 'y' in node:
+            del node['y']
+        if 'viewBox' in node:
+            del node['viewBox']
+        if 'mask' in node:
+            del node['mask']
+        href = parse_url(node.get_href()).geturl()
+        try:
+            tree = Tree(
+                url=href, url_fetcher=node.url_fetcher, parent=node,
+                tree_cache=surface.tree_cache, unsafe=node.unsafe)
+        except TypeError:
+            return
+
+        if not match_features(tree.xml_tree):
+            return
+
+        if tree.tag in ('svg', 'symbol'):
+            # Explicitely specified
+            # http://www.w3.org/TR/SVG11/struct.html#UseElement
+            tree.tag = 'svg'
+            if 'width' in node and 'height' in node:
+                tree['width'], tree['height'] = (
+                    node['width'], node['height'])
+
+        surface.draw(tree)
+        node.get('fill', None)
+        node.get('stroke', None)
+    except BaseException:
+        # An aborted branch gives its reference slot back so that later calls
+        # cannot be pushed closer to the recursion guard by a dead branch.
+        surface.reference_count -= 1
+        raise
+    finally:
         surface.context.restore()
-        return
-
-    if not match_features(tree.xml_tree):
-        surface.context.restore()
-        return
-
-    if tree.tag in ('svg', 'symbol'):
-        # Explicitely specified
-        # http://www.w3.org/TR/SVG11/struct.html#UseElement
-        tree.tag = 'svg'
-        if 'width' in node and 'height' in node:
-            tree['width'], tree['height'] = node['width'], node['height']
-
-    surface.draw(tree)
-    node.get('fill', None)
-    node.get('stroke', None)
-    surface.context.restore()

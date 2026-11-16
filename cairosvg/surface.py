@@ -158,6 +158,10 @@ class Surface(object):
 
         """
         self.cairo = None
+        # Temporary surfaces (pattern tiles, …) whose pixels are still read
+        # lazily by Cairo after they are created. They are released together
+        # with the surface that owns them, in ``finish`` / ``_close_cairo``.
+        self._temp_surfaces = []
         self.context_width, self.context_height = parent_width, parent_height
         self.cursor_position = [0, 0]
         self.cursor_d_position = [0, 0]
@@ -227,7 +231,33 @@ class Surface(object):
 
         self.map_rgba = map_rgba
         self.map_image = map_image
-        self.draw(tree)
+        try:
+            self.draw(tree)
+        except BaseException:
+            # A failed rendering must not leave a live Cairo surface (and its
+            # temporary group/clip surfaces) behind, nor an output in a
+            # half-written state. The original exception is still propagated.
+            self._close_cairo()
+            raise
+
+    def _close_cairo(self):
+        """Release the Cairo surface and its temporary surfaces."""
+        temp_surfaces = self._temp_surfaces
+        self._temp_surfaces = []
+        for temp_surface in temp_surfaces:
+            try:
+                temp_surface.finish()
+            except cairo.Error:
+                pass
+        if self.cairo is None:
+            return
+        cairo_surface = self.cairo
+        self.cairo = None
+        self.context = None
+        try:
+            cairo_surface.finish()
+        except cairo.Error:
+            pass
 
     @property
     def points_per_pixel(self):
@@ -276,7 +306,15 @@ class Surface(object):
 
     def finish(self):
         """Read the surface content."""
+        if self.cairo is None:
+            return
+        # Temporary pattern/mask surfaces have been fully painted by now;
+        # release them before closing the main surface.
+        for temp_surface in self._temp_surfaces:
+            temp_surface.finish()
+        self._temp_surfaces = []
         self.cairo.finish()
+        self.cairo = None
 
     def map_color(self, string, opacity=1):
         """Parse a color ``string`` and apply ``map_rgba`` function to it."""
@@ -314,6 +352,35 @@ class Surface(object):
         self.font_size = size(self, node.get('font-size', '12pt'))
         self.context.save()
 
+        # ``_group_pushed`` tracks the optional transparency group inside the
+        # frame below. It lives on the instance because each nested ``draw``
+        # call saves and restores it like the rest of the frame state: Cairo
+        # refuses to restore across an open group and poisons the whole
+        # context (CAIRO_STATUS_INVALID_RESTORE), so the group must always be
+        # left before the matching ``restore()``, including on exceptions.
+        old_group_pushed = getattr(self, '_group_pushed', False)
+        self._group_pushed = False
+        try:
+            self._draw_node(
+                node, old_parent_node, old_font_size, old_context_size,
+                old_group_pushed)
+        except BaseException:
+            # Balance the node's Cairo state so that transform, clip, operator,
+            # source and open groups cannot leak into sibling nodes or parent
+            # calls, then re-raise: real errors keep following the existing
+            # API instead of being swallowed here.
+            if self._group_pushed:
+                self.context.pop_group()
+            self.context.restore()
+            self.parent_node = old_parent_node
+            self.font_size = old_font_size
+            self.context_width, self.context_height = old_context_size
+            self._group_pushed = old_group_pushed
+            raise
+
+    def _draw_node(self, node, old_parent_node, old_font_size,
+                   old_context_size, old_group_pushed):
+        """Draw one node; called by :meth:`draw` inside its save/restore."""
         # Apply transformations
         transform(
             self, node.get('transform'),
@@ -329,6 +396,7 @@ class Surface(object):
 
         if filter_ or mask or (opacity < 1 and node.children):
             self.context.push_group()
+            self._group_pushed = True
 
         # Move to (node.x, node.y)
         self.context.move_to(
@@ -370,29 +438,39 @@ class Surface(object):
             width = size(self, node.get('width'), 'x')
             height = size(self, node.get('height'), 'y')
             self.context.save()
-            self.context.translate(x, y)
-            self.context.rectangle(
-                left, top, width - left - right, height - top - bottom)
-            self.context.restore()
+            try:
+                self.context.translate(x, y)
+                self.context.rectangle(
+                    left, top, width - left - right, height - top - bottom)
+            finally:
+                self.context.restore()
             self.context.clip()
         clip_path = parse_url(node.get('clip-path')).fragment
         if clip_path:
             path = self.paths.get(clip_path)
             if path:
                 self.context.save()
-                if path.get('clipPathUnits') == 'objectBoundingBox':
-                    x = size(self, node.get('x'), 'x')
-                    y = size(self, node.get('y'), 'y')
-                    width = size(self, node.get('width'), 'x')
-                    height = size(self, node.get('height'), 'y')
-                    self.context.translate(x, y)
-                    self.context.scale(width, height)
-                path.tag = 'g'
-                self.stroke_and_fill = False
-                self.draw(path)
-                self.stroke_and_fill = True
-                path.tag = 'clipPath'
-                self.context.restore()
+                try:
+                    if path.get('clipPathUnits') == 'objectBoundingBox':
+                        x = size(self, node.get('x'), 'x')
+                        y = size(self, node.get('y'), 'y')
+                        width = size(self, node.get('width'), 'x')
+                        height = size(self, node.get('height'), 'y')
+                        self.context.translate(x, y)
+                        self.context.scale(width, height)
+                    path.tag = 'g'
+                    self.stroke_and_fill = False
+                    self.draw(path)
+                    self.stroke_and_fill = True
+                    path.tag = 'clipPath'
+                except BaseException:
+                    # Keep the shared definition usable for later nodes and
+                    # calls even when its recursive drawing fails.
+                    self.stroke_and_fill = True
+                    path.tag = 'clipPath'
+                    raise
+                finally:
+                    self.context.restore()
                 # TODO: fill rules are not handled by cairo for clips
                 # if node.get('clip-rule') == 'evenodd':
                 #     self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
@@ -439,32 +517,37 @@ class Surface(object):
         if self.stroke_and_fill and visible and node.tag in TAGS:
             # Fill
             self.context.save()
-            paint_source, paint_color = paint(node.get('fill', 'black'))
-            if node.get('fill-rule') == 'evenodd':
-                self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
-            if not gradient_or_pattern(self, node, paint_source, fill_opacity):
-                self.context.set_source_rgba(
-                    *self.map_color(paint_color, fill_opacity))
-            if TAGS[node.tag] == text:
-                self.cursor_position = save_cursor[0]
-                self.cursor_d_position = save_cursor[1]
-                self.text_path_width = save_cursor[2]
-                text(self, node, draw_as_text=True)
-            else:
-                self.context.fill_preserve()
-            self.context.restore()
+            try:
+                paint_source, paint_color = paint(node.get('fill', 'black'))
+                if node.get('fill-rule') == 'evenodd':
+                    self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+                if not gradient_or_pattern(
+                        self, node, paint_source, fill_opacity):
+                    self.context.set_source_rgba(
+                        *self.map_color(paint_color, fill_opacity))
+                if TAGS[node.tag] == text:
+                    self.cursor_position = save_cursor[0]
+                    self.cursor_d_position = save_cursor[1]
+                    self.text_path_width = save_cursor[2]
+                    text(self, node, draw_as_text=True)
+                else:
+                    self.context.fill_preserve()
+            finally:
+                self.context.restore()
 
             # Stroke
             self.context.save()
-            self.context.set_line_width(
-                size(self, node.get('stroke-width', '1')))
-            paint_source, paint_color = paint(node.get('stroke'))
-            if not gradient_or_pattern(
-                    self, node, paint_source, stroke_opacity):
-                self.context.set_source_rgba(
-                    *self.map_color(paint_color, stroke_opacity))
-            self.context.stroke()
-            self.context.restore()
+            try:
+                self.context.set_line_width(
+                    size(self, node.get('stroke-width', '1')))
+                paint_source, paint_color = paint(node.get('stroke'))
+                if not gradient_or_pattern(
+                        self, node, paint_source, stroke_opacity):
+                    self.context.set_source_rgba(
+                        *self.map_color(paint_color, stroke_opacity))
+                self.context.stroke()
+            finally:
+                self.context.restore()
         elif not visible:
             self.context.new_path()
 
@@ -479,6 +562,9 @@ class Surface(object):
         # Apply filter, mask and opacity
         if filter_ or mask or (opacity < 1 and node.children):
             self.context.pop_group_to_source()
+            # The group is now closed; the failure handler must not try to
+            # leave it again.
+            self._group_pushed = False
             if filter_:
                 apply_filter_before_painting(self, node, filter_)
             if mask in self.masks:
@@ -498,6 +584,7 @@ class Surface(object):
         self.parent_node = old_parent_node
         self.font_size = old_font_size
         self.context_width, self.context_height = old_context_size
+        self._group_pushed = old_group_pushed
 
 
 class PDFSurface(Surface):
@@ -533,9 +620,10 @@ class PNGSurface(Surface):
 
     def finish(self):
         """Read the PNG surface content."""
-        if self.output is not None:
-            self.cairo.write_to_png(self.output)
-        return super().finish()
+        if self.cairo is not None:
+            if self.output is not None:
+                self.cairo.write_to_png(self.output)
+            return super().finish()
 
 
 class SVGSurface(Surface):

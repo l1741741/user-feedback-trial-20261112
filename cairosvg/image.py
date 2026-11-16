@@ -68,12 +68,15 @@ def image(surface, node):
 
         # Draw image
         surface.context.save()
-        surface.context.translate(x, y)
-        surface.context.translate(*surface.context.get_current_point())
-        surface.context.scale(scale_x * tree_scale_x, scale_y * tree_scale_y)
-        surface.context.translate(translate_x, translate_y)
-        surface.draw(tree)
-        surface.context.restore()
+        try:
+            surface.context.translate(x, y)
+            surface.context.translate(*surface.context.get_current_point())
+            surface.context.scale(
+                scale_x * tree_scale_x, scale_y * tree_scale_y)
+            surface.context.translate(translate_x, translate_y)
+            surface.draw(tree)
+        finally:
+            surface.context.restore()
         return
     else:
         png_file = BytesIO()
@@ -109,12 +112,14 @@ def image(surface, node):
     # Paint raster image
     opacity = float(node.get('opacity', 1))
     surface.context.save()
-    surface.context.translate(x, y)
-    surface.context.scale(scale_x, scale_y)
-    surface.context.translate(translate_x, translate_y)
-    surface.context.set_source(image_surface.pattern)
-    surface.context.paint_with_alpha(opacity)
-    surface.context.restore()
+    try:
+        surface.context.translate(x, y)
+        surface.context.scale(scale_x, scale_y)
+        surface.context.translate(translate_x, translate_y)
+        surface.context.set_source(image_surface.pattern)
+        surface.context.paint_with_alpha(opacity)
+    finally:
+        surface.context.restore()
 
 
 def invert_image(img):
