@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="640" height="420" viewBox="0 0 640 420"
+     font-family="Arial, Helvetica, sans-serif">
+  <rect width="640" height="420" fill="white"/>
+  <text x="20" y="30" font-size="17" font-weight="bold" fill="#222">
+    Edge cases: empty path, short path, transforms, repeated reference
+  </text>
+
+  <!-- Zero-length path: no glyphs, no error -->
+  <path id="empty" d="M40 80 L40 80" stroke="#c00" stroke-width="2"/>
+  <text font-size="13" fill="#06c">
+    <textPath xlink:href="#empty" href="#empty">NOT RENDERED</textPath>
+  </text>
+  <text x="40" y="84" font-size="12" fill="#888">
+    ^ zero-length path: glyphs skipped deterministically
+  </text>
+
+  <!-- Short path: only the first glyph fits; sibling text is unaffected -->
+  <path id="short" d="M40 130 L46 130" stroke="#888" stroke-width="1.5"/>
+  <text font-size="14" fill="#c33">
+    <textPath xlink:href="#short" href="#short">TOOLONG</textPath>
+  </text>
+  <text x="40" y="158" font-size="14" fill="#222">
+    sibling normal text starts clean at its own position
+  </text>
+
+  <!-- Transformed path: glyphs inherit the rotation/translation -->
+  <g transform="translate(60 300) rotate(-90)">
+    <path id="rotated" d="M0 0 L150 0" stroke="#888" stroke-width="1.2"/>
+    <text font-size="14" fill="#0b5">
+      <textPath xlink:href="#rotated" href="#rotated">
+        ROTATED BY A PATH TRANSFORM
+      </textPath>
+    </text>
+  </g>
+  <text x="30" y="310" font-size="12" fill="#888">transformed path ^</text>
+
+  <!-- Same path referenced twice: identical geometry both times -->
+  <g transform="translate(150 0)">
+    <path id="curve" d="M120 250 Q300 180 480 250"
+          fill="none" stroke="#888" stroke-width="1.2"/>
+    <text font-size="14" fill="#72a">
+      <textPath xlink:href="#curve" href="#curve" startOffset="0">
+        FIRST REFERENCE
+      </textPath>
+    </text>
+    <text font-size="14" fill="#e80">
+      <textPath xlink:href="#curve" href="#curve" startOffset="150">
+        SECOND REFERENCE, SAME GEOMETRY
+      </textPath>
+    </text>
+  </g>
+
+  <!-- Closed curve: glyphs wrap around continuously -->
+  <path id="ring" d="M540 330 a34 34 0 1 1 -0.01 0"
+        fill="none" stroke="#888" stroke-width="1.2"/>
+  <text font-size="11" fill="#06c">
+    <textPath xlink:href="#ring" href="#ring">CLOSED LOOP TEXT</textPath>
+  </text>
+</svg>

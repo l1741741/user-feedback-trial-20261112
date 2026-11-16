@@ -3,50 +3,86 @@ Text drawers.
 
 """
 
-from math import cos, radians, sin
+from math import cos, hypot, radians, sin
 
 from .bounding_box import (
     EMPTY_BOUNDING_BOX, extend_bounding_box, is_valid_bounding_box)
-from .helpers import distance, normalize, point_angle, size, zip_letters
+from .helpers import normalize, point_angle, size, zip_letters
 from .surface import cairo
 from .url import parse_url
 
 
-def path_length(path):
-    """Get the length of ``path``."""
-    total_length = 0
+def path_segments(path):
+    """Split a flat cairo path into non-degenerate line segments.
+
+    Curves are already flattened by cairo (``copy_path_flat``), so every
+    drawing operation is a ``LINE_TO``. Closed subpaths (``CLOSE_PATH``) are
+    completed with an explicit segment back to the subpath start point.
+    Zero-length segments are ignored: they carry no direction and must not
+    split a run of text.
+
+    Return an iterable of ``(x1, y1, x2, y2)`` tuples.
+
+    """
+    subpath_start = None
+    current_point = None
     for item in path:
         if item[0] == cairo.PATH_MOVE_TO:
-            old_point = item[1]
+            subpath_start = item[1]
+            current_point = item[1]
         elif item[0] == cairo.PATH_LINE_TO:
             new_point = item[1]
-            length = distance(
-                old_point[0], old_point[1], new_point[0], new_point[1])
-            total_length += length
-            old_point = new_point
-    return total_length
+            if current_point != new_point:
+                yield (*current_point, *new_point)
+            current_point = new_point
+        elif item[0] == cairo.PATH_CLOSE_PATH:
+            if (current_point is not None and subpath_start is not None
+                    and current_point != subpath_start):
+                yield (*current_point, *subpath_start)
+            current_point = subpath_start
+
+
+def path_length(path):
+    """Get the geometric length of ``path``."""
+    return sum(hypot(x2 - x1, y2 - y1)
+               for x1, y1, x2, y2 in path_segments(path))
 
 
 def point_following_path(path, width):
-    """Get the point at ``width`` distance on ``path``."""
+    """Get the point and tangent angle at ``width`` distance on ``path``.
+
+    Distances before the start or past the end of the path are clamped to
+    the first and last points, so callers always get a defined position.
+    Return ``(x, y, angle)`` or ``None`` when the path has no drawable
+    segment (i.e. its length is zero).
+
+    """
     total_length = 0
-    for item in path:
-        if item[0] == cairo.PATH_MOVE_TO:
-            old_point = item[1]
-        elif item[0] == cairo.PATH_LINE_TO:
-            new_point = item[1]
-            length = distance(
-                old_point[0], old_point[1], new_point[0], new_point[1])
-            total_length += length
-            if total_length < width:
-                old_point = new_point
-            else:
-                length -= total_length - width
-                angle = point_angle(
-                    old_point[0], old_point[1], new_point[0], new_point[1])
-                x = cos(angle) * length + old_point[0]
-                y = sin(angle) * length + old_point[1]
-                return x, y
+    first_segment = None
+    last_segment = None
+    for x1, y1, x2, y2 in path_segments(path):
+        if first_segment is None:
+            first_segment = (x1, y1, x2, y2)
+        last_segment = (x1, y1, x2, y2)
+        segment_length = hypot(x2 - x1, y2 - y1)
+        if total_length + segment_length >= width:
+            remaining = width - total_length
+            angle = point_angle(x1, y1, x2, y2)
+            return (
+                cos(angle) * remaining + x1,
+                sin(angle) * remaining + y1,
+                angle)
+        total_length += segment_length
+    if first_segment is None:
+        # Zero-length path: there is nowhere to put glyphs.
+        return None
+    if width <= 0:
+        x1, y1, x2, y2 = first_segment
+        return x1, y1, point_angle(x1, y1, x2, y2)
+    # ``width`` is beyond the end of the path: stay on the last point,
+    # keeping the last known direction.
+    x1, y1, x2, y2 = last_segment
+    return x2, y2, point_angle(x1, y1, x2, y2)
 
 
 def text(surface, node, draw_as_text=False):
@@ -144,6 +180,11 @@ def text(surface, node, draw_as_text=False):
             y_align = -descent
 
     bounding_box = EMPTY_BOUNDING_BOX
+    cairo_path = None
+    path_total_length = 0
+    # Layout along a path is local to the textPath: a text that does not
+    # fit must not leave a cumulative offset for sibling text nodes.
+    text_path_width = surface.text_path_width
     if text_path:
         surface.context.new_path()
         surface.stroke_and_fill = False
@@ -151,12 +192,20 @@ def text(surface, node, draw_as_text=False):
         surface.stroke_and_fill = True
         cairo_path = surface.context.copy_path_flat()
         surface.context.new_path()
-        length = path_length(cairo_path) + x_bearing
-        start_offset = size(surface, node.get('startOffset', 0), length)
+        path_total_length = path_length(cairo_path)
+        # Percentages in startOffset are relative to the path length, as
+        # required by the SVG 1.1 textPath specification.
+        start_offset = size(
+            surface, node.get('startOffset', 0), path_total_length)
+        if start_offset < 0:
+            start_offset = 0
+        elif start_offset > path_total_length:
+            start_offset = path_total_length
         if node.tag == 'textPath':
-            surface.text_path_width += start_offset
-        surface.text_path_width += x_align
-        bounding_box = extend_bounding_box(bounding_box, ((start_offset, 0),))
+            text_path_width += start_offset
+        text_path_width += x_align
+        bounding_box = extend_bounding_box(
+            bounding_box, ((start_offset, 0),))
 
     if node.text:
         for i, ((x, y, dx, dy, r), letter) in enumerate(letters_positions):
@@ -168,27 +217,38 @@ def text(surface, node, draw_as_text=False):
             surface.cursor_d_position[1] += dy or 0
             text_extents = surface.context.text_extents(letter)
             extents = text_extents[4]
-            if text_path:
-                start = surface.text_path_width + surface.cursor_d_position[0]
-                start_point = point_following_path(cairo_path, start)
+            if cairo_path is not None and path_total_length > 0:
+                start = text_path_width + surface.cursor_d_position[0]
                 middle = start + extents / 2
-                middle_point = point_following_path(cairo_path, middle)
                 end = start + extents
-                end_point = point_following_path(cairo_path, end)
                 if i:
                     extents += letter_spacing
-                surface.text_path_width += extents
-                if not all((start_point, middle_point, end_point)):
+                text_path_width += extents
+                # Glyphs whose middle is outside the path are not drawn.
+                if not 0 <= middle <= path_total_length:
                     continue
-                if not 0 <= middle <= length:
+                start_location = point_following_path(cairo_path, start)
+                middle_location = point_following_path(cairo_path, middle)
+                end_location = point_following_path(cairo_path, end)
+                if (start_location is None or middle_location is None
+                        or end_location is None):
                     continue
+                start_point = start_location[:2]
+                # Use the tangent at the glyph middle: short segments and
+                # clamped end points would otherwise give a flat angle.
+                angle = middle_location[2]
                 surface.context.save()
                 surface.context.translate(*start_point)
-                surface.context.rotate(point_angle(*(start_point + end_point)))
+                surface.context.rotate(angle)
                 surface.context.translate(0, surface.cursor_d_position[1])
                 surface.context.move_to(0, 0)
                 bounding_box = extend_bounding_box(
-                    bounding_box, ((end_point[0], text_extents[3]),))
+                    bounding_box,
+                    ((end_location[0], text_extents[3]),))
+            elif cairo_path is not None:
+                # A zero-length referenced path: no glyph can be laid out,
+                # and this state must not leak to the following text.
+                continue
             else:
                 surface.context.save()
                 x = surface.cursor_position[0] if x is None else x
@@ -218,7 +278,7 @@ def text(surface, node, draw_as_text=False):
                 else:
                     surface.context.text_path(letter)
             surface.context.restore()
-            if not text_path:
+            if cairo_path is None:
                 surface.cursor_position = cursor_position
     else:
         x = x[0] if x else surface.cursor_position[0]
@@ -226,6 +286,12 @@ def text(surface, node, draw_as_text=False):
         dx = dx[0] if dx else 0
         dy = dy[0] if dy else 0
         surface.cursor_position = (x + dx, y + dy)
+
+    if text_path:
+        # Publish the local advance so that nested tspans of the same
+        # textPath continue where this node stopped. Sibling ``text``
+        # nodes are reset in surface.draw, so the state cannot leak out.
+        surface.text_path_width = text_path_width
 
     # If a valid bounding box is calculated store it in the node
     if is_valid_bounding_box(bounding_box):

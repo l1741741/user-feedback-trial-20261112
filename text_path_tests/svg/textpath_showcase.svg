@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="640" height="480" viewBox="0 0 640 480"
+     font-family="Arial, Helvetica, sans-serif">
+  <rect width="640" height="480" fill="white"/>
+  <text x="20" y="32" font-size="18" font-weight="bold" fill="#222">
+    CairoSVG textPath layout: offsets, direction, subpaths and state
+  </text>
+
+  <!-- 1. Ticked circular arc, percentage startOffset -->
+  <g id="arc-case">
+    <path id="arc" fill="none" stroke="#888" stroke-width="1.2"
+          d="M120 220 A100 100 0 0 1 320 220"/>
+    <!-- tick marks every 25% of the arc -->
+    <g stroke="#888" stroke-width="1">
+      <path d="M120 220 l-8 0"/>
+      <path d="M170 148.8 l-5.7 -5.7"/>
+      <path d="M220 120 l0 -8"/>
+      <path d="M270 148.8 l5.7 -5.7"/>
+      <path d="M320 220 l8 0"/>
+    </g>
+    <text font-size="14" fill="#0b5">
+      <textPath xlink:href="#arc" href="#arc" startOffset="0%">
+        START-0%
+      </textPath>
+    </text>
+    <text font-size="14" fill="#06c">
+      <textPath xlink:href="#arc" href="#arc" startOffset="50%"
+                text-anchor="middle">
+        MIDDLE-50%
+      </textPath>
+    </text>
+  </g>
+
+  <!-- 2. Ticked polyline, absolute startOffset and local tangents -->
+  <g id="polyline-case">
+    <path id="poly" fill="none" stroke="#888" stroke-width="1.2"
+          d="M60 340 L180 300 L300 360 L430 290 L580 330"/>
+    <g stroke="#888" stroke-width="1">
+      <path d="M60 340 l-3 8"/>
+      <path d="M180 300 l-3 8"/>
+      <path d="M300 360 l-3 8"/>
+      <path d="M430 290 l-3 8"/>
+      <path d="M580 330 l-3 8"/>
+    </g>
+    <text font-size="15" fill="#c33">
+      <textPath xlink:href="#poly" href="#poly" startOffset="10">
+        POLYLINE TEXT FOLLOWS EVERY LEG
+      </textPath>
+    </text>
+  </g>
+
+  <!-- 3. Reversed straight path: direction-aware end anchor -->
+  <g id="reverse-case">
+    <path id="reverse" fill="none" stroke="#888" stroke-width="1.2"
+          d="M580 410 L60 410"/>
+    <g stroke="#888" stroke-width="1">
+      <path d="M580 410 l0 8"/>
+      <path d="M60 410 l0 8"/>
+    </g>
+    <text font-size="14" text-anchor="end" fill="#72a">
+      <textPath xlink:href="#reverse" href="#reverse" startOffset="100%">
+        REVERSED DIRECTION, END ANCHOR
+      </textPath>
+    </text>
+  </g>
+
+  <!-- 4. Two subpaths: text crosses the gap and continues -->
+  <g id="subpath-case">
+    <path id="two-parts" fill="none" stroke="#888" stroke-width="1.2"
+          d="M60 90 L170 90 M250 90 L580 90"/>
+    <g stroke="#888" stroke-width="1">
+      <path d="M60 90 l0 -7"/>
+      <path d="M170 90 l0 -7"/>
+      <path d="M250 90 l0 -7"/>
+      <path d="M580 90 l0 -7"/>
+    </g>
+    <text font-size="14" fill="#e80">
+      <textPath xlink:href="#two-parts" href="#two-parts">
+        FIRST SUBPATH ABCDEFG -&gt; SECOND SUBPATH CONTINUES HERE
+      </textPath>
+    </text>
+  </g>
+</svg>
