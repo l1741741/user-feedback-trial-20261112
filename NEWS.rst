@@ -3,6 +3,38 @@
 ======
 
 
+Unreleased
+==========
+
+* Fix percentage lengths and viewport state in nested ``svg`` elements and in
+  ``symbol`` elements referenced by ``use``:
+
+  - percentages are now resolved against the active viewport of the element
+    they belong to, expressed in that element's user coordinate system: the
+    ``viewBox`` size when there is one, the viewport size otherwise. Nested
+    content used to be sized against the outer canvas, which distorted the
+    proportions of exported PNG images;
+  - letterboxing, cropping and non-uniform scaling done by
+    ``preserveAspectRatio`` no longer change this reference, and a non-zero
+    ``viewBox`` origin only translates the content;
+  - leaving a nested ``svg`` restores the parent viewport: following siblings
+    resolve their percentages against the outer canvas again, and a nested
+    ``svg`` without ``width``/``height`` spans the parent viewport (``100%``)
+    instead of taking the viewBox size as its own size;
+  - a ``viewBox`` with a zero width or height defines an empty viewport: the
+    element and its children render nothing instead of being drawn with an
+    arbitrary scale;
+  - a malformed ``viewBox`` (wrong number of values, negative size) is ignored
+    instead of raising ``IndexError`` or producing a degenerate viewport, and
+    an empty ``viewBox`` or ``width``/``height`` attribute is treated as
+    absent;
+  - ``preserveAspectRatio`` is no longer inherited from a parent group or
+    ``svg``;
+  - ``width`` and ``height`` of ``use`` override the referenced element's
+    dimensions independently, so specifying only one of them now works; a
+    ``symbol`` keeps its own ``width``/``height`` when the ``use`` has none.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

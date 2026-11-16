@@ -53,23 +53,79 @@ def paint(value):
     return (source, color)
 
 
-def node_format(surface, node, reference=True):
+def parse_viewbox(node):
+    """Parse the ``viewBox`` attribute of ``node``.
+
+    Return a ``(min_x, min_y, width, height)`` tuple, or ``None`` when the
+    attribute is missing or malformed. A negative width or height is an error
+    and is ignored, as browsers do. A zero width or height is kept: it makes
+    the element's viewport empty, which disables its rendering (see
+    ``is_disabled_viewbox``).
+
+    """
+    string = node.get('viewBox')
+    if not string:
+        return None
+    try:
+        viewbox = tuple(
+            float(position)
+            for position in re.sub('[ \n\r\t,]+', ' ', string).split())
+    except ValueError:
+        return None
+    if len(viewbox) != 4 or viewbox[2] < 0 or viewbox[3] < 0:
+        return None
+    return viewbox
+
+
+def is_disabled_viewbox(node):
+    """Know whether ``node`` has a viewBox that disables its rendering.
+
+    A viewBox with a zero width or height establishes an empty viewport, for
+    which the whole element (and its children) is not rendered.
+
+    """
+    viewbox = parse_viewbox(node)
+    return viewbox is not None and 0 in viewbox[2:]
+
+
+def node_format(surface, node, reference=True, root=False):
     """Return ``(width, height, viewbox)`` of ``node``.
 
-    If ``reference`` is ``True``, we can rely on surface size to resolve
-    percentages.
+    If ``reference`` is ``True``, percentages are resolved against the
+    viewport of the parent element (the active viewport of ``surface``).
+
+    Missing or empty ``width`` and ``height`` attributes default to ``100%`` of
+    the parent viewport, they are *not* replaced by the viewBox size: an
+    element without size does not inherit the size of another element. The
+    viewBox size is only used as a fallback when there is no viewport to refer
+    to, i.e. for the root element of a document (``root=True``) and for
+    standalone image documents (``reference=False``).
 
     """
     reference_size = 'xy' if reference else (0, 0)
-    width = size(surface, node.get('width', '100%'), reference_size[0])
-    height = size(surface, node.get('height', '100%'), reference_size[1])
-    viewbox = node.get('viewBox')
-    if viewbox:
-        viewbox = re.sub('[ \n\r\t,]+', ' ', viewbox)
-        viewbox = tuple(float(position) for position in viewbox.split())
+    width = size(surface, node.get('width') or '100%', reference_size[0])
+    height = size(surface, node.get('height') or '100%', reference_size[1])
+    viewbox = parse_viewbox(node)
+    if viewbox and (root or not reference):
         width = width or viewbox[2]
         height = height or viewbox[3]
     return width, height, viewbox
+
+
+def viewport_basis(width, height, viewbox):
+    """Return the size used as reference for percentages in a viewport.
+
+    Percentages on an element are relative to the active viewport, expressed
+    in the element's own user coordinate system. With a ``viewBox``, user
+    units are the viewBox units, so the reference is the viewBox size, whatever
+    the viewport size and the ``preserveAspectRatio`` mapping (letterboxing or
+    cropping does not change the length of a user unit). Without a ``viewBox``,
+    user units are CSS pixels and the reference is the viewport size.
+
+    """
+    if viewbox:
+        return viewbox[2], viewbox[3]
+    return width, height
 
 
 def normalize(string):
@@ -97,17 +153,17 @@ def point_angle(cx, cy, px, py):
     return atan2(py - cy, px - cx)
 
 
-def preserve_ratio(surface, node, width=None, height=None):
+def preserve_ratio(surface, node, width=None, height=None, root=False):
     """Manage the ratio preservation."""
     if node.tag == 'marker':
         width = width or size(surface, node.get('markerWidth', '3'), 'x')
         height = height or size(surface, node.get('markerHeight', '3'), 'y')
-        _, _, viewbox = node_format(surface, node)
+        viewbox = parse_viewbox(node)
         viewbox_width, viewbox_height = viewbox[2:]
     elif node.tag in ('svg', 'image', 'g'):
-        node_width, node_height, _ = node_format(surface, node)
-        width = width or node_width
-        height = height or node_height
+        node_width, node_height, _ = node_format(surface, node, root=root)
+        width = node_width if width is None else width
+        height = node_height if height is None else height
         viewbox_width, viewbox_height = node.image_width, node.image_height
     else:
         raise TypeError(

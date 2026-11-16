@@ -14,8 +14,8 @@ from .defs import (
     filter_, gradient_or_pattern, linear_gradient, marker, mask, paint_mask,
     parse_all_defs, pattern, prepare_filter, radial_gradient, use)
 from .helpers import (
-    UNITS, PointError, clip_rect, node_format, normalize, paint,
-    preserve_ratio, size, transform)
+    UNITS, PointError, clip_rect, is_disabled_viewbox, node_format, normalize,
+    paint, preserve_ratio, size, transform, viewport_basis)
 from .image import image, invert_image
 from .parser import Tree
 from .path import draw_markers, path
@@ -185,7 +185,7 @@ class Surface(object):
         self.dpi = dpi
         self.font_size = size(self, '12pt')
         self.stroke_and_fill = True
-        width, height, viewbox = node_format(self, tree)
+        width, height, viewbox = node_format(self, tree, root=True)
         if viewbox is None:
             viewbox = (0, 0, width, height)
 
@@ -218,7 +218,7 @@ class Surface(object):
         self.context.scale(
             self.device_units_per_user_units, self.device_units_per_user_units)
         # Initial, non-rounded dimensions
-        self.set_context_size(width, height, viewbox, tree)
+        self.set_context_size(width, height, viewbox, tree, root=True)
         self.context.move_to(0, 0)
 
         if background_color:
@@ -249,30 +249,56 @@ class Surface(object):
         cairo_surface = self.surface_class(self.output, width, height)
         return cairo_surface, width, height
 
-    def set_context_size(self, width, height, viewbox, tree):
-        """Set the Cairo context size, set the SVG viewport size."""
+    def set_context_size(self, width, height, viewbox, tree, root=False):
+        """Set the Cairo context size and the active SVG viewport.
+
+        ``width`` and ``height`` are the viewport size, expressed in the user
+        coordinate system of the parent element. ``viewbox`` may be ``None``,
+        in which case the new viewport establishes a coordinate system with
+        the same size.
+
+        The active viewport state (``context_width`` and ``context_height``) is
+        set to the size used as reference for percentages: the viewBox size
+        when there is one, the viewport size otherwise. Letterboxing and
+        cropping done by ``preserveAspectRatio`` never change the length of a
+        user unit, so they do not change that reference. The caller is
+        responsible for saving and restoring this state, so that a nested
+        viewport never leaks into following siblings.
+
+        """
         if viewbox:
             rect_x, rect_y = viewbox[0:2]
-            tree.image_width = viewbox[2]
-            tree.image_height = viewbox[3]
         else:
             rect_x, rect_y = 0, 0
-            tree.image_width = width
-            tree.image_height = height
+        reference_width, reference_height = viewport_basis(
+            width, height, viewbox)
+        tree.image_width = reference_width
+        tree.image_height = reference_height
 
-        scale_x, scale_y, translate_x, translate_y = preserve_ratio(
-            self, tree, width, height)
+        # A viewBox with a zero width or height defines an empty viewport,
+        # nothing can be painted in it (this also disables the rendering of the
+        # element and of its children).
+        empty = is_disabled_viewbox(tree)
+        if empty:
+            scale_x = scale_y = 1
+            translate_x = translate_y = 0
+        else:
+            scale_x, scale_y, translate_x, translate_y = preserve_ratio(
+                self, tree, width, height, root=root)
         rect_x, rect_y = rect_x * scale_x, rect_y * scale_y
         rect_width, rect_height = width, height
         self.context.translate(*self.context.get_current_point())
         self.context.translate(-rect_x, -rect_y)
-        if tree.get('overflow', 'hidden') != 'visible':
+        if empty:
+            self.context.rectangle(0, 0, 0, 0)
+            self.context.clip()
+        elif tree.get('overflow', 'hidden') != 'visible':
             self.context.rectangle(rect_x, rect_y, rect_width, rect_height)
             self.context.clip()
         self.context.scale(scale_x, scale_y)
         self.context.translate(translate_x, translate_y)
-        self.context_width = rect_width / scale_x
-        self.context_height = rect_height / scale_y
+        self.context_width = reference_width
+        self.context_height = reference_height
 
     def finish(self):
         """Read the surface content."""
@@ -294,9 +320,12 @@ class Surface(object):
         if node.tag == 'defs':
             return
 
-        # Do not draw elements with width or height of 0
-        if (('width' in node and size(self, node['width']) == 0) or
-                ('height' in node and size(self, node['height']) == 0)):
+        # Do not draw elements with width or height of 0. An empty attribute is
+        # invalid and is ignored, it does not make the element degenerate.
+        if (('width' in node and node['width'] and
+                size(self, node['width']) == 0) or
+                ('height' in node and node['height'] and
+                 size(self, node['height']) == 0)):
             return
 
         # Save context and related attributes

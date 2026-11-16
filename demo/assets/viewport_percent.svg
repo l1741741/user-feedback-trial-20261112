@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="700" viewBox="0 0 720 700">
+  <rect width="100%" height="100%" fill="white"/>
+
+  <!-- Shared content: a 50% rectangle and a 5 user-unit rectangle are drawn
+       on top of each other. Correct percentage resolution makes them
+       coincide exactly, so only the blue square is visible. A wrong
+       reference (for instance the outer canvas instead of the nested
+       viewBox) makes the red rectangle stick out on the right and bottom. -->
+  <defs>
+    <symbol id="box" viewBox="0 0 10 10">
+      <rect width="50%" height="50%" fill="#e53935"/>
+      <rect width="5" height="5" fill="#1e88e5"/>
+    </symbol>
+
+    <!-- Box, crosshair, ticks and circle, all sized and positioned with
+         percentages of their own 100x100 viewBox. -->
+    <symbol id="rings" viewBox="0 0 100 100">
+      <rect width="100%" height="100%" fill="none" stroke="#90a4ae" stroke-width="1.5"/>
+      <line x1="0%" y1="50%" x2="100%" y2="50%" stroke="#b0bec5" stroke-width="1"/>
+      <line x1="50%" y1="0%" x2="50%" y2="100%" stroke="#b0bec5" stroke-width="1"/>
+      <line x1="10%" y1="0%" x2="10%" y2="12%" stroke="#78909c" stroke-width="1"/>
+      <line x1="90%" y1="0%" x2="90%" y2="12%" stroke="#78909c" stroke-width="1"/>
+      <line x1="0%" y1="10%" x2="12%" y2="10%" stroke="#78909c" stroke-width="1"/>
+      <line x1="0%" y1="90%" x2="12%" y2="90%" stroke="#78909c" stroke-width="1"/>
+      <circle cx="50%" cy="50%" r="40%" fill="none" stroke="#fb8c00" stroke-width="3"/>
+      <circle cx="50%" cy="50%" r="2%" fill="#fb8c00"/>
+    </symbol>
+  </defs>
+
+  <g font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#263238">
+    <g font-size="11" fill="#607d8b">
+      <text x="20" y="22">1 nested svg, meet</text>
+      <text x="200" y="22">2 symbol via use</text>
+      <text x="380" y="22">3 nested svg, none</text>
+      <text x="560" y="22">4 sibling after svg</text>
+    </g>
+
+    <!-- Row 1: the same viewport written three ways. -->
+    <svg x="20" y="32" width="140" height="70" viewBox="0 0 10 10">
+      <use href="#box"/>
+    </svg>
+    <use href="#box" x="200" y="32" width="140" height="70"/>
+    <svg x="380" y="32" width="140" height="70" viewBox="0 0 10 10"
+         preserveAspectRatio="none">
+      <use href="#box"/>
+    </svg>
+
+    <!-- 1-3: viewport 140x70, viewBox 10x10. -->
+    <g font-size="11" fill="#607d8b">
+      <text x="20" y="122">140x70, 10x10 viewBox</text>
+      <text x="200" y="122">same numbers, by use</text>
+      <text x="380" y="122">units stretched, 50% still 5u</text>
+    </g>
+
+    <!-- 4: a nested viewport followed by a percentage-sized sibling. -->
+    <svg x="560" y="32" width="140" height="70" viewBox="0 0 10 10">
+      <rect width="100%" height="100%" fill="#e8f5e9"/>
+    </svg>
+    <rect x="560" y="110" width="20%" height="10%" fill="#43a047"/>
+    <text x="560" y="200" font-size="11" fill="#2e7d32">20% x 10% of 720x700</text>
+    <text x="560" y="215" font-size="11" fill="#2e7d32">= 144 x 70, not of 140x70</text>
+
+    <!-- Row 2: three nested viewports, each with its own viewBox. -->
+    <text x="20" y="250" font-size="11" fill="#607d8b">5 three levels: 300x190, 40x40, 20x20</text>
+    <svg x="20" y="260" width="300" height="190" viewBox="0 0 300 190">
+      <rect width="100%" height="100%" fill="#fafafa" stroke="#cfd8dc"/>
+      <svg x="10%" y="10%" width="80%" height="80%" viewBox="0 0 40 40">
+        <rect width="100%" height="100%" fill="#fff8e1" stroke="#ffe082"/>
+        <use href="#rings" x="0" y="0" width="40" height="40"/>
+        <svg x="25%" y="25%" width="50%" height="50%" viewBox="0 0 20 20">
+          <rect width="100%" height="100%" fill="#e3f2fd" stroke="#90caf9"/>
+          <use href="#box" x="0" y="0" width="20" height="20"/>
+        </svg>
+      </svg>
+    </svg>
+
+    <!-- Row 2, right: one symbol reused at two sizes. -->
+    <text x="360" y="250" font-size="11" fill="#607d8b">6 one symbol, two sizes</text>
+    <use href="#box" x="360" y="260" width="160" height="80"/>
+    <use href="#box" x="360" y="360" width="80" height="90"/>
+    <text x="460" y="305" font-size="11" fill="#607d8b">160x80</text>
+    <text x="460" y="390" font-size="11" fill="#607d8b">80x90</text>
+
+    <!-- Row 3: percentage ruler, ticks every 10% of its own viewBox. -->
+    <text x="20" y="500" font-size="11" fill="#607d8b">7 percentage ruler: ticks every 10%</text>
+    <svg x="20" y="510" width="300" height="150" viewBox="0 0 300 150">
+      <rect width="100%" height="100%" fill="#fafafa" stroke="#cfd8dc"/>
+      <g stroke="#546e7a" stroke-width="1">
+        <line x1="10%" y1="0%" x2="10%" y2="20%"/>
+        <line x1="20%" y1="0%" x2="20%" y2="20%"/>
+        <line x1="30%" y1="0%" x2="30%" y2="20%"/>
+        <line x1="40%" y1="0%" x2="40%" y2="20%"/>
+        <line x1="50%" y1="0%" x2="50%" y2="35%"/>
+        <line x1="60%" y1="0%" x2="60%" y2="20%"/>
+        <line x1="70%" y1="0%" x2="70%" y2="20%"/>
+        <line x1="80%" y1="0%" x2="80%" y2="20%"/>
+        <line x1="90%" y1="0%" x2="90%" y2="20%"/>
+      </g>
+      <line x1="0%" y1="50%" x2="100%" y2="50%" stroke="#ef5350" stroke-width="1"/>
+      <circle cx="50%" cy="50%" r="30%" fill="none" stroke="#ef5350" stroke-width="1"/>
+      <circle cx="50%" cy="50%" r="1.5%" fill="#ef5350"/>
+    </svg>
+
+    <!-- Row 3, right: non-zero viewBox origin. -->
+    <text x="360" y="500" font-size="11" fill="#607d8b">8 viewBox origin 20 30</text>
+    <svg x="360" y="510" width="300" height="150" viewBox="20 30 10 10">
+      <rect x="20" y="30" width="50%" height="50%" fill="#ffe0b2"/>
+      <line x1="20" y1="30" x2="30" y2="40" stroke="#f4511e" stroke-width="0.06"/>
+      <circle cx="20.7" cy="30.7" r="0.6" fill="#f4511e"/>
+      <circle cx="25" cy="35" r="0.6" fill="#f4511e"/>
+      <circle cx="29.3" cy="39.3" r="0.6" fill="#f4511e"/>
+      <line x1="21" y1="30" x2="29" y2="30" stroke="#f4511e" stroke-width="0.05"/>
+      <line x1="20" y1="31" x2="20" y2="39" stroke="#f4511e" stroke-width="0.05"/>
+    </svg>
+    <text x="360" y="680" font-size="11" fill="#607d8b">50% is 5 units from (20,30), not from (0,0)</text>
+  </g>
+</svg>

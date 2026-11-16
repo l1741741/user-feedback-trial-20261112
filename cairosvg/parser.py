@@ -29,6 +29,7 @@ NOT_INHERITED_ATTRIBUTES = frozenset((
     'mask',
     'opacity',
     'overflow',
+    'preserveAspectRatio',
     'rotate',
     'stop-color',
     'stop-opacity',
