@@ -1,15 +1,55 @@
 """
 Externally defined elements managers.
 
-This module handles clips, gradients, masks, patterns and external nodes.
+This module handles clips, gradients, masks, patterns, filters and external
+nodes.
+
+Filters
+-------
+
+The SVG filter pipeline is implemented with Cairo groups, in the user space
+of the element the filter is applied to. This keeps three coordinate systems
+independent from each other:
+
+* the *host* coordinate system (the element's ``transform`` and all ancestor
+  transforms), which Cairo applies exactly once when the result is painted;
+* the *filter region* coordinate system, defined by ``filterUnits`` and the
+  filter's ``x``, ``y``, ``width`` and ``height`` attributes;
+* the *primitive* coordinate system, defined by ``primitiveUnits`` and used
+  for every length inside a filter primitive.
+
+Supported primitives are ``feOffset``, ``feFlood``, ``feBlend``,
+``feComposite`` (``over``, ``in``, ``out``, ``atop``, ``xor`` and
+``lighter``) and ``feMerge``/``feMergeNode``.  They are evaluated in document
+order as a graph: a primitive takes its ``in`` (and ``in2`` for ``feBlend``
+and ``feComposite``) from ``SourceGraphic``, ``SourceAlpha``, a previous
+``result`` attribute, or the previous primitive's output when the attribute
+is absent (references to missing or forward results behave as if the attribute
+were absent). ``feMerge`` paints its input list in order, bottom to top.
+
+Every primitive paints into a group clipped to the intersection of the filter
+region and the primitive subregion, so pixels outside the declared region are
+never painted and the group is left transparent (Cairo never leaks the
+scratch path into later drawing operations).
+
+Fallbacks follow the documented CairoSVG contract:
+
+* an empty filter makes the element disappear (the specification describes
+  the result as transparent black);
+* a filter region with a zero or negative width or height disables the
+  element it is applied to;
+* primitives CairoSVG cannot render (``feGaussianBlur`` and friends) are
+  skipped; an unsupported standard input (``BackgroundImage``,
+  ``BackgroundAlpha``, ``FillPaint``, ``StrokePaint``) makes the whole filter
+  ignored, and the unfiltered source graphic is drawn unchanged.
 
 """
 
-from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
+from .bounding_box import (
+    calculate_bounding_box, is_non_empty_bounding_box, is_valid_bounding_box)
 from .features import match_features
-from .helpers import paint, size, transform
+from .helpers import paint as paint_color, size, transform
 from .parser import Tree
-from .shapes import rect
 from .surface import cairo
 from .url import parse_url
 
@@ -20,6 +60,32 @@ BLEND_OPERATORS = {
     'normal': cairo.OPERATOR_OVER,
     'screen': cairo.OPERATOR_SCREEN,
 }
+
+COMPOSITE_OPERATORS = {
+    'atop': cairo.OPERATOR_ATOP,
+    'in': cairo.OPERATOR_IN,
+    'lighter': cairo.OPERATOR_ADD,
+    'out': cairo.OPERATOR_OUT,
+    'over': cairo.OPERATOR_OVER,
+    'xor': cairo.OPERATOR_XOR,
+}
+
+SUPPORTED_FILTER_TAGS = frozenset((
+    'feBlend', 'feComposite', 'feFlood', 'feMerge', 'feMergeNode', 'feOffset'))
+
+# All filter primitive elements, including the ones CairoSVG does not render.
+ALL_FILTER_PRIMITIVES = frozenset((
+    'feBlend', 'feColorMatrix', 'feComponentTransfer', 'feComposite',
+    'feConvolveMatrix', 'feDiffuseLighting', 'feDisplacementMap', 'feFlood',
+    'feGaussianBlur', 'feImage', 'feMerge', 'feMorphology', 'feOffset',
+    'feSpecularLighting', 'feTile', 'feTurbulence'))
+
+# Pseudo inputs that would need pictures we cannot capture.
+UNSUPPORTED_FILTER_INPUTS = frozenset((
+    'BackgroundAlpha', 'BackgroundImage', 'FillPaint', 'StrokePaint'))
+
+# Return value of ``apply_filter`` when the element must not be rendered.
+EMPTY_FILTER = object()
 
 EXTEND_OPERATORS = {
     'none': cairo.EXTEND_NONE,
@@ -266,70 +332,450 @@ def draw_pattern(surface, node, name, opacity):
     return True
 
 
-def prepare_filter(surface, node, name):
-    """Apply a filter transforming the context."""
+def _resolve_filter(surface, name):
+    """Return ``(attributes, children)`` for the filter called ``name``.
+
+    ``xlink:href``/``href`` references between filters are followed: the
+    referencing filter inherits the attributes it does not define, and the
+    primitives of the referenced filter when it defines none itself, as the
+    SVG specification requires. Reference cycles stop at the first repeat.
+    ``None`` is returned when the filter does not exist.
+
+    """
+    if name not in surface.filters:
+        return None
+
+    chain = []
+    seen = set()
+    current = name
+    while (
+            current is not None and current in surface.filters and
+            current not in seen):
+        seen.add(current)
+        filter_node = surface.filters[current]
+        chain.append(filter_node)
+        current = parse_url(filter_node.get_href()).fragment or None
+
+    attributes = {}
+    for filter_node in reversed(chain):
+        attributes.update(filter_node)
+
+    children = []
+    for filter_node in chain:
+        primitives = [
+            child for child in filter_node.children
+            if child.tag in ALL_FILTER_PRIMITIVES]
+        if primitives:
+            children = primitives
+            break
+    return attributes, children
+
+
+def _object_length(value, default, reference):
+    """Resolve a length in object bounding box units.
+
+    Numbers and percentages are both fractions (or hundredths) of
+    ``reference``, the bounding box width or height.
+
+    """
+    if value is None:
+        value = default
+    value = str(value).strip()
+    if value.endswith('%'):
+        return float(value[:-1]) * reference / 100
+    try:
+        return float(value) * reference
+    except ValueError:
+        return 0
+
+
+def _user_length(surface, value, default, reference):
+    """Resolve a user space filter length.
+
+    Percentages are relative to ``reference``. Plain numbers and lengths with
+    units are user units, resolved with the surface DPI.
+
+    """
+    if value is None:
+        value = default
+    value = str(value).strip()
+    if value.endswith('%'):
+        return float(value[:-1]) * reference / 100
+    return size(surface, value)
+
+
+def _filter_region(surface, attributes, box):
+    """Return ``(x, y, width, height)`` of the filter region, in user space.
+
+    ``filterUnits`` selects the coordinate system of the region, independently
+    from the primitive coordinate system. ``None`` means that the region uses
+    object bounding box units while the element has no usable bounding box:
+    the effect is then ignored, as required for object bounding box units.
+
+    """
+    if attributes.get('filterUnits') == 'userSpaceOnUse':
+        width = _user_length(
+            surface, attributes.get('width'), '120%', surface.context_width)
+        height = _user_length(
+            surface, attributes.get('height'), '120%', surface.context_height)
+        x = _user_length(
+            surface, attributes.get('x'), '-10%', surface.context_width)
+        y = _user_length(
+            surface, attributes.get('y'), '-10%', surface.context_height)
+        return x, y, width, height
+
+    if box is None:
+        return None
+    box_x, box_y, box_width, box_height = box
+    x = _object_length(attributes.get('x'), '-10%', box_width)
+    y = _object_length(attributes.get('y'), '-10%', box_height)
+    width = _object_length(attributes.get('width'), '120%', box_width)
+    height = _object_length(attributes.get('height'), '120%', box_height)
+    return box_x + x, box_y + y, width, height
+
+
+def _subregion_length(surface, value, default, origin, reference):
+    """Resolve one coordinate of a filter primitive subregion.
+
+    With user space units, absolute lengths are user space coordinates and
+    percentages are relative to the filter region (``origin`` is the region
+    position and ``reference`` its size). The default subregion is
+    ``0%, 0%, 100%, 100%`` of the region.
+
+    """
+    if value is None:
+        value = default
+    value = str(value).strip()
+    if value.endswith('%'):
+        return origin + float(value[:-1]) * reference / 100
+    return size(surface, value)
+
+
+def _primitive_subregion(surface, attributes, child, region, box):
+    """Return the clipping rectangle of a filter primitive, in user space.
+
+    The default subregion is the filter region, as stated by the
+    specification. Explicit values use the primitive coordinate system:
+    with ``primitiveUnits="objectBoundingBox"`` numbers and percentages are
+    fractions of the element bounding box, otherwise they are user space
+    lengths and percentages are relative to the filter region. ``None``
+    means that the primitive is disabled: a subregion with a zero or
+    negative width or height yields transparent black.
+
+    """
+    if all(
+            child.get(name) is None
+            for name in ('x', 'y', 'width', 'height')):
+        return region
+
+    if attributes.get('primitiveUnits') == 'objectBoundingBox':
+        if box is None:
+            return None
+        origin_x, origin_y = box[0], box[1]
+        reference_x, reference_y = box[2], box[3]
+        return (
+            origin_x + _object_length(child.get('x'), '0%', reference_x),
+            origin_y + _object_length(child.get('y'), '0%', reference_y),
+            _object_length(child.get('width'), '100%', reference_x),
+            _object_length(child.get('height'), '100%', reference_y))
+
+    region_x, region_y, region_width, region_height = region
+    return (
+        _subregion_length(
+            surface, child.get('x'), '0%', region_x, region_width),
+        _subregion_length(
+            surface, child.get('y'), '0%', region_y, region_height),
+        _subregion_length(
+            surface, child.get('width'), '100%', 0, region_width),
+        _subregion_length(
+            surface, child.get('height'), '100%', 0, region_height))
+
+
+def _offset_lengths(surface, attributes, child, box):
+    """Return the ``(dx, dy)`` offset of an ``feOffset`` primitive.
+
+    ``dx`` and ``dy`` live in the primitive coordinate system. With
+    ``objectBoundingBox`` units, horizontal and vertical offsets are
+    fractions of the bounding box width and height respectively: the two axes
+    are kept separate, so a non-square object is not squashed onto one scale,
+    and the sign of the offset is preserved.
+
+    """
+    if attributes.get('primitiveUnits') == 'objectBoundingBox':
+        width, height = (box[2], box[3]) if box else (0, 0)
+        return (
+            _object_length(child.get('dx'), '0', width),
+            _object_length(child.get('dy'), '0', height))
+    return (
+        _user_length(surface, child.get('dx'), '0', surface.context_width),
+        _user_length(surface, child.get('dy'), '0', surface.context_height))
+
+
+def _intersect(first, second):
+    """Intersect two ``(x, y, width, height)`` rectangles."""
+    if first is None:
+        return second
+    if second is None:
+        return first
+    x = max(first[0], second[0])
+    y = max(first[1], second[1])
+    right = min(first[0] + first[2], second[0] + second[2])
+    bottom = min(first[1] + first[3], second[1] + second[3])
+    return x, y, max(0, right - x), max(0, bottom - y)
+
+
+def _transparent_picture(surface):
+    """Return a pattern painting transparent black everywhere."""
+    target = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+    pattern = cairo.SurfacePattern(target)
+    pattern.set_extend(cairo.EXTEND_REPEAT)
+    # Keep the target alive as long as the pattern is used.
+    pattern._target = target
+    return pattern
+
+
+def _group(surface, clip, paint):
+    """Run ``paint`` in a Cairo group clipped to ``clip``.
+
+    The context is restored to its previous state and left without a current
+    path, so no scratch path can leak into later drawing operations. The
+    returned pattern may be painted several times. An empty clip yields a
+    fully transparent picture, as filter primitives outside their subregion
+    produce transparent black.
+
+    """
+    if clip is not None and (clip[2] <= 0 or clip[3] <= 0):
+        return _transparent_picture(surface)
+    context = surface.context
+    context.save()
+    if clip is not None:
+        context.rectangle(*clip)
+        context.clip()
+    context.push_group()
+    paint()
+    pattern = context.pop_group()
+    context.restore()
+    return pattern
+
+
+def _paint_pattern(surface, pattern, clip, translate=None):
+    """Paint ``pattern`` into a new group clipped to ``clip``."""
+    def paint():
+        if translate:
+            surface.context.translate(*translate)
+        surface.context.set_source(pattern)
+        surface.context.paint()
+
+    return _group(surface, clip, paint)
+
+
+def _paint_alpha(surface, source):
+    """Paint black with the alpha channel of ``source``."""
+    surface.context.set_source(source)
+    surface.context.paint()
+    surface.context.set_operator(cairo.OPERATOR_IN)
+    surface.context.set_source_rgba(0, 0, 0, 1)
+    surface.context.paint()
+
+
+def _resolve_input(surface, child, attribute, pictures, previous, source):
+    """Resolve an ``in``/``in2`` attribute of a filter primitive.
+
+    A missing attribute, or a reference to a result that does not appear
+    before the primitive, means the previous primitive's output, or
+    ``SourceGraphic`` for the first primitive. ``SourceAlpha`` is computed
+    lazily and cached.
+
+    """
+    name = child.get(attribute)
+    if name is None:
+        return previous if previous is not None else source
+    if name == 'SourceGraphic':
+        return source
+    if name == 'SourceAlpha':
+        if '__source_alpha__' not in pictures:
+            region = pictures.get('__region__')
+            pictures['__source_alpha__'] = _group(
+                surface, region, lambda: _paint_alpha(surface, source))
+        return pictures['__source_alpha__']
+    if name in pictures:
+        return pictures[name]
+    # Forward and non-existent references: as if the attribute was not set.
+    return previous if previous is not None else source
+
+
+def _apply_primitive(
+        surface, attributes, child, clip, pictures, previous, source, box):
+    """Evaluate one filter primitive, in document order, and return it."""
+    def input_(name='in'):
+        return _resolve_input(
+            surface, child, name, pictures, previous, source)
+
+    if child.tag == 'feOffset':
+        dx, dy = _offset_lengths(surface, attributes, child, box)
+        return _paint_pattern(surface, input_(), clip, translate=(dx, dy))
+
+    if child.tag == 'feFlood':
+        color = surface.map_color(
+            paint_color(child.get('flood-color'))[1] or 'black',
+            float(child.get('flood-opacity', 1)))
+
+        def paint():
+            surface.context.set_source_rgba(*color)
+            surface.context.paint()
+
+        return _group(surface, clip, paint)
+
+    if child.tag == 'feMerge':
+        merge_inputs = [
+            _resolve_input(
+                surface, merge_node, 'in', pictures, previous, source)
+            for merge_node in child.children
+            if merge_node.tag == 'feMergeNode']
+
+        def paint():
+            for picture in merge_inputs:
+                surface.context.set_operator(cairo.OPERATOR_OVER)
+                surface.context.set_source(picture)
+                surface.context.paint()
+
+        return _group(surface, clip, paint)
+
+    if child.tag == 'feBlend':
+        source_picture = input_()
+        backdrop = input_('in2')
+        operator = BLEND_OPERATORS.get(
+            child.get('mode', 'normal'), BLEND_OPERATORS['normal'])
+
+        def paint():
+            surface.context.set_source(backdrop)
+            surface.context.paint()
+            surface.context.set_operator(operator)
+            surface.context.set_source(source_picture)
+            surface.context.paint()
+
+        return _group(surface, clip, paint)
+
+    if child.tag == 'feComposite':
+        source_picture = input_()
+        backdrop = input_('in2')
+        operator = COMPOSITE_OPERATORS.get(
+            child.get('operator', 'over'), COMPOSITE_OPERATORS['over'])
+
+        def paint():
+            surface.context.set_source(backdrop)
+            surface.context.paint()
+            surface.context.set_operator(operator)
+            surface.context.set_source(source_picture)
+            surface.context.paint()
+
+        return _group(surface, clip, paint)
+
+    return _transparent_picture(surface)
+
+
+def _has_unsupported_input(children):
+    """Tell whether a filter needs a standard input we cannot capture.
+
+    ``BackgroundImage``, ``BackgroundAlpha``, ``FillPaint`` and
+    ``StrokePaint`` need pictures CairoSVG does not keep; a filter using one
+    of them is ignored as a whole.
+
+    """
+    for child in children:
+        for attribute in ('in', 'in2'):
+            if child.get(attribute) in UNSUPPORTED_FILTER_INPUTS:
+                return True
+        for merge_node in child.children:
+            if merge_node.get('in') in UNSUPPORTED_FILTER_INPUTS:
+                return True
+    return False
+
+
+def _supported_primitives(children):
+    """Return the primitives CairoSVG can evaluate, in document order.
+
+    Unsupported primitives (``feGaussianBlur`` and friends) are left out:
+    CairoSVG documents that only ``feOffset``, ``feBlend`` and ``feFlood``
+    are supported. A ``result`` produced by an unsupported primitive does not
+    exist, so later references to it behave as if the attribute was absent,
+    and the previous rendered result is used, as the specification requires
+    for unknown results.
+
+    """
+    return [
+        child for child in children if child.tag in SUPPORTED_FILTER_TAGS]
+
+
+def apply_filter(surface, node, name, source):
+    """Apply the filter ``name`` to ``source``, the ``node``'s own picture.
+
+    ``source`` is a Cairo pattern painted in the user space of ``node``. That
+    user space already contains the element's own ``transform`` and all the
+    ancestor transforms, so filter lengths are resolved in the same space as
+    the element and the host transform is applied exactly once, when the
+    result is painted.
+
+    Primitives are evaluated in document order, each one painting into a
+    group clipped to its subregion, so nothing is painted outside the
+    declared filter region.
+
+    Return values:
+
+    * a Cairo pattern, to paint instead of the source;
+    * ``EMPTY_FILTER`` when the element must not be rendered at all: a filter
+      with no primitive produces transparent black, and a filter region with
+      a zero width or height disables the element (SVG 1.1, Filter Effects 1);
+    * ``None`` when the filter must be ignored: a non-existent filter, an
+      unsupported primitive or standard input, or object bounding box units
+      without a bounding box. The caller then paints the unfiltered source, so
+      the graphic is never lost and later layers never move.
+
+    """
     if 'id' in node and node['id'] in surface.masks:
-        return
+        # Masks are rendered into their own surface; never filter them here.
+        return None
 
-    if name in surface.filters:
-        filter_node = surface.filters[name]
-        for child in filter_node.children:
-            # Offset
-            if child.tag == 'feOffset':
-                if filter_node.get('primitiveUnits') == 'objectBoundingBox':
-                    width = size(surface, node.get('width'), 'x')
-                    height = size(surface, node.get('height'), 'y')
-                    dx = size(surface, child.get('dx', 0), 1) * width
-                    dy = size(surface, child.get('dy', 0), 1) * height
-                else:
-                    dx = size(surface, child.get('dx', 0), 1)
-                    dy = size(surface, child.get('dy', 0), 1)
-                surface.context.translate(dx, dy)
+    resolved = _resolve_filter(surface, name)
+    if resolved is None:
+        # Filter Effects 1: a reference to a non-existent object makes the
+        # whole filter chain ignored, so the graphic is kept unfiltered.
+        return None
+    attributes, children = resolved
+    if not children:
+        # SVG 1.1 and Filter Effects 1: an empty filter produces transparent
+        # black, so the element is not rendered.
+        return EMPTY_FILTER
+    if _has_unsupported_input(children):
+        return None
+    children = _supported_primitives(children)
+    if not children:
+        # Nothing can be evaluated: keep the original graphic untouched.
+        return None
 
+    box = calculate_bounding_box(surface, node)
+    if not is_valid_bounding_box(box) or 0 in box[2:]:
+        box = None
 
-def apply_filter_before_painting(surface, node, name):
-    """Apply a filter transforming the painting operations."""
-    if 'id' in node and node['id'] in surface.masks:
-        return
+    region = _filter_region(surface, attributes, box)
+    if region is None:
+        return None
+    if region[2] <= 0 or region[3] <= 0:
+        return EMPTY_FILTER
 
-    if name in surface.filters:
-        filter_node = surface.filters[name]
-        for child in filter_node.children:
-            # Blend
-            if child.tag == 'feBlend':
-                surface.context.set_operator(BLEND_OPERATORS.get(
-                    child.get('mode', 'normal'), BLEND_OPERATORS['normal']))
+    pictures = {'__region__': region}
+    previous = None
+    for child in children:
+        subregion = _primitive_subregion(
+            surface, attributes, child, region, box)
+        clip = _intersect(region, subregion)
+        picture = _apply_primitive(
+            surface, attributes, child, clip, pictures, previous, source, box)
+        if child.get('result') is not None:
+            pictures[child.get('result')] = picture
+        previous = picture
 
-
-def apply_filter_after_painting(surface, node, name):
-    """Apply a filter using the painted surface to transform the image."""
-    if 'id' in node and node['id'] in surface.masks:
-        return
-
-    if name in surface.filters:
-        filter_node = surface.filters[name]
-        for child in filter_node.children:
-            # Flood
-            if child.tag == 'feFlood':
-                surface.context.save()
-                surface.context.new_path()
-                if filter_node.get('primitiveUnits') == 'objectBoundingBox':
-                    x = size(surface, node.get('x'), 'x')
-                    y = size(surface, node.get('y'), 'y')
-                    width = size(surface, node.get('width'), 'x')
-                    height = size(surface, node.get('height'), 'y')
-                else:
-                    x, y, width, height = 0, 0, 1, 1
-                x += size(surface, child.get('x', 0), 1)
-                y += size(surface, child.get('y', 0), 1)
-                width *= size(surface, child.get('width', 0), 1)
-                height *= size(surface, child.get('height', 0), 1)
-                rect(surface, dict(x=x, y=y, width=width, height=height))
-                surface.context.set_source_rgba(*surface.map_color(
-                    paint(child.get('flood-color'))[1],
-                    float(child.get('flood-opacity', 1))))
-                surface.context.fill()
-                surface.context.restore()
+    return _paint_pattern(surface, previous, region)
 
 
 def use(surface, node):

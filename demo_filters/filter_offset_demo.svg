@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="180"
+     viewBox="0 0 240 180">
+  <desc>Filter offset demo: border, source graphic, offset layer,
+        transparent areas, a clipped filter region and a plain sibling.</desc>
+
+  <!-- Frame, drawn by an unfiltered sibling: must never move. -->
+  <rect x="4" y="4" width="232" height="172" fill="none"
+        stroke="black" stroke-width="2"/>
+
+  <!-- Classic semi-transparent drop shadow: SourceAlpha offset by (24, 12),
+       flooded with black at 50%, merged below the source graphic. -->
+  <defs>
+    <filter id="drop-shadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feOffset in="SourceAlpha" dx="24" dy="12" result="offset-alpha"/>
+      <feFlood flood-color="black" flood-opacity="0.5" result="shadow-color"/>
+      <feComposite in="shadow-color" in2="offset-alpha" operator="in"
+                   result="shadow"/>
+      <feMerge>
+        <feMergeNode in="shadow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Filter region reduced to the source box: the offset is clipped on
+         the right and bottom edges. -->
+    <filter id="clipped-offset" x="0%" y="0%" width="100%" height="100%">
+      <feOffset dx="16" dy="8"/>
+    </filter>
+  </defs>
+
+  <!-- Source graphic with the semi-transparent shadow. -->
+  <rect x="40" y="30" width="60" height="30" fill="red"
+        filter="url(#drop-shadow)"/>
+
+  <!-- Offset layer alone: a plain green rectangle shifted by (16, 8). -->
+  <rect x="40" y="100" width="40" height="20" fill="green"
+        filter="url(#clipped-offset)"/>
+
+  <!-- Unfiltered sibling: must keep its exact position and color. -->
+  <rect x="190" y="130" width="20" height="20" fill="lime"/>
+</svg>

@@ -3,6 +3,22 @@
 ======
 
 
+Unreleased
+==========
+
+* Fix filter offsets: they are no longer multiplied by the element's host
+  transform, and no longer move unfiltered siblings or later layers
+* Handle filter regions and primitive subregions: pixels outside the declared
+  region are clipped, and a zero-sized region disables the element
+* Keep filter units independent: ``filterUnits`` and ``primitiveUnits`` use
+  their own coordinate systems, and ``objectBoundingBox`` offsets use the
+  bounding box width for x and height for y
+* Support ``feMerge``/``feMergeNode`` and ``feComposite`` in filter chains,
+  and filter ``href`` inheritance
+* Keep the source graphic when a filter cannot be rendered instead of losing
+  it, and do not apply ``opacity`` twice to filtered elements
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 
