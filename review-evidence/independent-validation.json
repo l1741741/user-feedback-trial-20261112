@@ -1,0 +1,24 @@
+{
+  "task_id": "render-20261117-9339-mask-luminance",
+  "final_sha": "21f335b30fc7af11cd819cd4a5ec8719d1ce7bc9",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/render-20261117-9339-mask-luminance/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-9339-mask-luminance/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_mask.py"
+  ],
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-9339-mask-luminance/local-frozen-source",
+  "log": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-9339-mask-luminance/independent-validation.log",
+  "exit_code": 0,
+  "tests": 21,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0
+}

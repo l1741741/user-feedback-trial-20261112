@@ -1,0 +1,128 @@
+<!doctype html><meta charset="utf-8"><title>对象边界遮罩</title><style>body{font:20px system-ui;padding:20px}img{width:600px;border:1px solid #888;background:white;image-rendering:pixelated}</style><h1>等价的半宽遮罩</h1><p>两种写法均应只保留红色对象左半，蓝色兄弟应完整。</p><h2>fraction</h2><p>SVG输入</p><img src="fraction.svg"><p>当次PNG输出</p><img src="fraction.png"><h2>percentage</h2><p>SVG输入</p><img src="percentage.svg"><p>当次PNG输出</p><img src="percentage.png"><pre>{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-9339-mask-luminance/local-frozen-source/cairosvg/__init__.py",
+  "tests": 6,
+  "passed": 5,
+  "failed": 1,
+  "checks": [
+    {
+      "name": "fraction-left",
+      "point": [
+        30,
+        50
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "fraction-right",
+      "point": [
+        80,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "fraction-sibling",
+      "point": [
+        150,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "percentage-left",
+      "point": [
+        30,
+        50
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "percentage-right",
+      "point": [
+        80,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": false
+    },
+    {
+      "name": "percentage-sibling",
+      "point": [
+        150,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}</pre>
