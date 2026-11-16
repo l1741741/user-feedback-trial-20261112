@@ -1,0 +1,52 @@
+<!doctype html><meta charset="utf-8"><title>路径偏移边界核验</title><style>body{font:20px system-ui;margin:24px}img{width:600px;border:1px solid #888;background:white;image-rendering:pixelated}</style><h1>路径外字符应省略，蓝色兄弟应保留</h1><h2>negative</h2><p>SVG输入</p><img src="negative.svg"><p>本次PNG</p><img src="negative.png"><h2>past-end</h2><p>SVG输入</p><img src="past-end.svg"><p>本次PNG</p><img src="past-end.png"><pre>{
+  "source": "/Users/lichao/.local/share/user-feedback/graphics/20261117/seed/cairosvg/__init__.py",
+  "tests": 4,
+  "passed": 4,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "negative-glyphs-outside-path-omitted",
+      "expected_red_pixels": 0,
+      "actual_red_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "negative-sibling-blue",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "past-end-glyphs-outside-path-omitted",
+      "expected_red_pixels": 0,
+      "actual_red_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "past-end-sibling-blue",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}</pre>

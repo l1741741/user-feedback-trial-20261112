@@ -1,0 +1,52 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12588-text-path-layout/local-frozen-source/cairosvg/__init__.py",
+  "tests": 4,
+  "passed": 2,
+  "failed": 2,
+  "checks": [
+    {
+      "name": "negative-glyphs-outside-path-omitted",
+      "expected_red_pixels": 0,
+      "actual_red_pixels": 668,
+      "passed": false
+    },
+    {
+      "name": "negative-sibling-blue",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "past-end-glyphs-outside-path-omitted",
+      "expected_red_pixels": 0,
+      "actual_red_pixels": 668,
+      "passed": false
+    },
+    {
+      "name": "past-end-sibling-blue",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}

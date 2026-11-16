@@ -1,0 +1,54 @@
+/Users/lichao/Desktop/xpert/user-feedback/state/graphics-production-20261117-002615/acceptance/textpath_offsets.py:9: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+  (OUT/(name+'.svg')).write_text(svg);data=cairosvg.svg2png(bytestring=svg.encode());(OUT/(name+'.png')).write_bytes(data);im=Image.open(BytesIO(data)).convert('RGBA');red_pixels=sum(a>0 and r>200 and g<30 and b<30 for r,g,b,a in im.getdata());checks.append({'name':name+'-glyphs-outside-path-omitted','expected_red_pixels':0,'actual_red_pixels':red_pixels,'passed':red_pixels==0});checks.append({'name':name+'-sibling-blue','actual':list(im.getpixel((220,50))),'expected':[0,0,255,255],'passed':im.getpixel((220,50))==(0,0,255,255)})
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12588-text-path-layout/local-frozen-source/cairosvg/__init__.py",
+  "tests": 4,
+  "passed": 2,
+  "failed": 2,
+  "checks": [
+    {
+      "name": "negative-glyphs-outside-path-omitted",
+      "expected_red_pixels": 0,
+      "actual_red_pixels": 668,
+      "passed": false
+    },
+    {
+      "name": "negative-sibling-blue",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "past-end-glyphs-outside-path-omitted",
+      "expected_red_pixels": 0,
+      "actual_red_pixels": 668,
+      "passed": false
+    },
+    {
+      "name": "past-end-sibling-blue",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}

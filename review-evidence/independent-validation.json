@@ -1,0 +1,24 @@
+{
+  "task_id": "render-20261117-12588-text-path-layout",
+  "final_sha": "5795a044f1d702a49d971109ba5d70c4be698e5b",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/render-20261117-12588-text-path-layout/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12588-text-path-layout/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_text_path.py"
+  ],
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12588-text-path-layout/local-frozen-source",
+  "log": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12588-text-path-layout/independent-validation.log",
+  "exit_code": 0,
+  "tests": 22,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0
+}

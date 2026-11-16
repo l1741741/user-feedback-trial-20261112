@@ -1,0 +1,52 @@
+{
+  "source": "/Users/lichao/.local/share/user-feedback/graphics/20261117/seed/cairosvg/__init__.py",
+  "tests": 4,
+  "passed": 4,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "negative-glyphs-outside-path-omitted",
+      "expected_red_pixels": 0,
+      "actual_red_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "negative-sibling-blue",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "past-end-glyphs-outside-path-omitted",
+      "expected_red_pixels": 0,
+      "actual_red_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "past-end-sibling-blue",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}
