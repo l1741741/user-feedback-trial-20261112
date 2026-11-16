@@ -771,6 +771,60 @@ also :ref:`faq-bfo-dfo`.
     other priority settings :setting:`REDIRECT_PRIORITY_ADJUST`
     and :setting:`RETRY_PRIORITY_ADJUST`.
 
+.. setting:: DEPTH_SEED_POLICY
+
+DEPTH_SEED_POLICY
+-----------------
+
+.. versionadded:: VERSION
+
+Default: ``"legacy"``
+
+Scope: ``scrapy.spidermiddlewares.depth.DepthMiddleware``
+
+How the depth of :ref:`start requests <start-requests>` is determined. Start
+requests have no source response, so their depth cannot be derived from one.
+
+The supported values are:
+
+``"legacy"``
+    The behavior of Scrapy versions without this setting. A start request
+    keeps whatever :reqmeta:`depth` its meta contains and gets no depth
+    otherwise, and the middleware never adjusts its
+    :attr:`~scrapy.Request.priority`. A child request gets the depth of its
+    source response plus 1.
+
+``"zero"``
+    Every start request is treated as depth 0, whatever its meta contains,
+    and is adjusted as any other request at depth 0. The request object owned
+    by the spider is copied instead of modified, so its meta is unchanged.
+
+``"preserve"``
+    A start request keeps the :reqmeta:`depth` value of its meta, or gets
+    depth 0 if the key is missing. The value must be a non-negative integer:
+    a value of any other type raises :exc:`TypeError`, and a negative value
+    raises :exc:`ValueError`.
+
+With ``"zero"`` and ``"preserve"``, child requests get the depth of their
+source response plus 1, and the depth and the priority adjustment are applied
+to a copy of the request, so a callback that yields the request it received,
+or that shares the nested values of its meta, does not affect the request of
+the response. :reqmeta:`depth_reset` still gives a child request depth 0.
+
+.. note::
+
+    With ``"zero"`` and ``"preserve"``, the depth of a response is only
+    counted in the stats, never written into the meta of the request of that
+    response. A request that goes through the middleware more than once, e.g.
+    because the start output also reaches the spider output chain, is only
+    deepened, counted, and priority-adjusted once.
+
+The default, ``"legacy"``, keeps the behavior of previous Scrapy versions,
+where a start request keeps the depth of its meta and is not adjusted. Switch
+to ``"zero"`` or ``"preserve"`` to make the depth of every request come from
+this middleware, which changes the depth that responses report through
+:reqmeta:`depth` and the priority adjustments that requests get.
+
 .. setting:: DEPTH_STATS_VERBOSE
 
 DEPTH_STATS_VERBOSE
