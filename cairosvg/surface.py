@@ -319,15 +319,32 @@ class Surface(object):
             self, node.get('transform'),
             transform_origin=node.get('transform-origin'))
 
-        # Find and prepare opacity, masks and filters
+        # Find and prepare opacity, masks and filters.
+        #
+        # ``opacity`` applies to the whole element, i.e. to the element's
+        # rendered result, not to each of its descendants.  It is therefore
+        # implemented as an isolated group (``push_group``) painted back with
+        # ``paint_with_alpha``.  Elements without children (whose painting is
+        # a single fill/stroke pass) take the shortcut below and fold the
+        # opacity into fill-opacity and stroke-opacity instead, which is
+        # equivalent as long as the fill and stroke do not overlap in a way
+        # that has to be flattened first.
         mask = parse_url(node.get('mask')).fragment
         filter_ = parse_url(node.get('filter')).fragment
         opacity = float(node.get('opacity', 1))
+        has_mask = mask in self.masks
+        # ``use`` paints the referenced subtree even though it has no direct
+        # XML children; it must therefore be isolated like a group.
+        has_children = bool(node.children) or node.tag == 'use'
+        # Only a non-1 opacity needs the extra group when the element paints
+        # a subtree; for leaves it is folded into the paint.
+        group_opacity = opacity < 1 and has_children
+        isolated = bool(filter_ or has_mask or group_opacity)
 
         if filter_:
             prepare_filter(self, node, filter_)
 
-        if filter_ or mask or (opacity < 1 and node.children):
+        if isolated:
             self.context.push_group()
 
         # Move to (node.x, node.y)
@@ -411,10 +428,15 @@ class Surface(object):
                 # Error in point parsing, do nothing
                 pass
 
-        # Get stroke and fill opacity
+        # Get stroke and fill opacity.
+        #
+        # Leaf elements fold their own ``opacity`` into the paint alpha.  This
+        # is only valid when no group is painted around the element: with a
+        # mask or filter (or children), the opacity belongs to the isolated
+        # result and is applied once when the group is composited.
         stroke_opacity = float(node.get('stroke-opacity', 1))
         fill_opacity = float(node.get('fill-opacity', 1))
-        if opacity < 1 and not node.children:
+        if opacity < 1 and not has_children and not isolated:
             stroke_opacity *= opacity
             fill_opacity *= opacity
 
@@ -476,15 +498,31 @@ class Surface(object):
             for child in node.children:
                 self.draw(child)
 
-        # Apply filter, mask and opacity
-        if filter_ or mask or (opacity < 1 and node.children):
+        # Apply filter, mask and opacity.
+        #
+        # Each of these is applied exactly once, in order, to the element's
+        # isolated result:
+        #   1. ``pop_group_to_source`` makes the flattened subtree the source.
+        #   2. the mask is painted through ``mask_surface`` into a fresh
+        #      isolated layer, so the mask only ever sees the element's own
+        #      drawing (never the background) and never carries the element's
+        #      opacity itself.
+        #   3. the result is composited once with the element's opacity.
+        #   4. ``apply_filter_after_painting`` (e.g. ``feFlood``) paints last.
+        # Folding the opacity into the mask instead would multiply it twice
+        # for leaves whose paint alpha already includes it.
+        if isolated:
             self.context.pop_group_to_source()
             if filter_:
                 apply_filter_before_painting(self, node, filter_)
-            if mask in self.masks:
-                paint_mask(self, node, mask, opacity)
-            else:
+            if has_mask:
+                self.context.push_group()
+                paint_mask(self, node, mask)
+                self.context.pop_group_to_source()
+            if opacity < 1:
                 self.context.paint_with_alpha(opacity)
+            else:
+                self.context.paint()
             if filter_:
                 apply_filter_after_painting(self, node, filter_)
 

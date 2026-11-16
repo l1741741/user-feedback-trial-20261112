@@ -106,14 +106,26 @@ def image(surface, node):
         surface.context.rectangle(x, y, width, height)
         surface.context.clip()
 
-    # Paint raster image
+    # Paint raster image.
+    #
+    # ``opacity`` is applied here only when the element is painted directly.
+    # When it is isolated (mask, filter or children), ``Surface.draw``
+    # composites the element's result with that opacity, so applying it here
+    # too would square it.
     opacity = float(node.get('opacity', 1))
+    isolated = bool(
+        node.get('filter') or
+        parse_url(node.get('mask')).fragment in surface.masks or
+        node.children)
     surface.context.save()
     surface.context.translate(x, y)
     surface.context.scale(scale_x, scale_y)
     surface.context.translate(translate_x, translate_y)
     surface.context.set_source(image_surface.pattern)
-    surface.context.paint_with_alpha(opacity)
+    if isolated:
+        surface.context.paint()
+    else:
+        surface.context.paint_with_alpha(opacity)
     surface.context.restore()
 
 

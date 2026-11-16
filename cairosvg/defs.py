@@ -5,6 +5,8 @@ This module handles clips, gradients, masks, patterns and external nodes.
 
 """
 
+import copy
+
 from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
 from .features import match_features
 from .helpers import paint, size, transform
@@ -116,11 +118,21 @@ def clip_path(surface, node):
         surface.paths[node['id']] = node
 
 
-def paint_mask(surface, node, name, opacity):
-    """Paint the mask of the current surface."""
-    mask_node = surface.masks[name]
+def paint_mask(surface, node, name):
+    """Paint the mask of the current surface.
+
+    The mask is applied to the isolated group already painted by the caller.
+    The element's ``opacity`` is *not* part of the mask: it is applied once,
+    afterwards, when the group is composited over its parent.  Folding it
+    into the mask as well would square it.
+
+    The mask definition node is copied before its geometry is resolved, so
+    that a mask reused at different sizes (or by different renderings of the
+    same parsed tree) is not progressively rewritten.
+
+    """
+    mask_node = copy.copy(surface.masks[name])
     mask_node.tag = 'g'
-    mask_node['opacity'] = opacity
 
     if mask_node.get('maskUnits') == 'userSpaceOnUse':
         width_ref, height_ref = 'x', 'y'
@@ -218,7 +230,11 @@ def draw_gradient(surface, node, name, opacity):
 
 def draw_pattern(surface, node, name, opacity):
     """Draw a pattern image."""
-    pattern_node = surface.patterns[name]
+    # The pattern definition is shared by every element using it (and by
+    # every export of a cached tree).  Resolving its size/transform below
+    # rewrites attributes, so work on a copy: otherwise the first use would
+    # poison all later ones and repeated exports would differ.
+    pattern_node = copy.copy(surface.patterns[name])
     pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
     pattern_node.tag = 'g'
     transform(surface, pattern_node.get('patternTransform'))
@@ -341,19 +357,18 @@ def use(surface, node):
     surface.context.save()
     surface.context.translate(
         size(surface, node.get('x'), 'x'), size(surface, node.get('y'), 'y'))
-    if 'x' in node:
-        del node['x']
-    if 'y' in node:
-        del node['y']
-    if 'viewBox' in node:
-        del node['viewBox']
-    if 'mask' in node:
-        del node['mask']
-    href = parse_url(node.get_href()).geturl()
+    # ``x``, ``y``, ``viewBox`` and ``mask`` are consumed here: they must not
+    # also apply to the referenced node.  They are not inherited, so dropping
+    # them from a copy of the ``use`` node is enough.  ``node`` itself is
+    # cached, so it must not be edited in place.
+    use_node = copy.copy(node)
+    for attribute in ('x', 'y', 'viewBox', 'mask'):
+        use_node.pop(attribute, None)
+    href = parse_url(use_node.get_href()).geturl()
     try:
         tree = Tree(
-            url=href, url_fetcher=node.url_fetcher, parent=node,
-            tree_cache=surface.tree_cache, unsafe=node.unsafe)
+            url=href, url_fetcher=use_node.url_fetcher, parent=use_node,
+            tree_cache=surface.tree_cache, unsafe=use_node.unsafe)
     except TypeError:
         surface.context.restore()
         return
@@ -362,14 +377,17 @@ def use(surface, node):
         surface.context.restore()
         return
 
+    # ``Tree`` is cached and may be shared by several references or several
+    # exports of the same parsed tree: never edit it in place.
+    tree = copy.copy(tree)
+
     if tree.tag in ('svg', 'symbol'):
         # Explicitely specified
         # http://www.w3.org/TR/SVG11/struct.html#UseElement
         tree.tag = 'svg'
-        if 'width' in node and 'height' in node:
-            tree['width'], tree['height'] = node['width'], node['height']
+        if 'width' in use_node and 'height' in use_node:
+            tree['width'] = use_node['width']
+            tree['height'] = use_node['height']
 
     surface.draw(tree)
-    node.get('fill', None)
-    node.get('stroke', None)
     surface.context.restore()

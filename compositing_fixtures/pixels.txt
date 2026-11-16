@@ -1,0 +1,45 @@
+group opacity 0.5
+  red-only    rgb(255, 127, 127) alpha=255
+  overlap     rgb(127, 127, 255) alpha=255
+  blue-only   rgb(127, 127, 255) alpha=255
+  background  rgb(255, 255, 255) alpha=255
+per-child opacity 0.5
+  red-only    rgb(255, 127, 127) alpha=255
+  overlap     rgb(127, 63, 191) alpha=255
+  blue-only   rgb(127, 127, 255) alpha=255
+  background  rgb(255, 255, 255) alpha=255
+nested group 0.5*0.5
+  red-only    rgb(255, 191, 191) alpha=255
+  overlap     rgb(191, 191, 255) alpha=255
+  blue-only   rgb(191, 191, 255) alpha=255
+  background  rgb(255, 255, 255) alpha=255
+group 0.5 + clip
+  red-only    rgb(255, 127, 127) alpha=255
+  overlap     rgb(127, 127, 255) alpha=255
+  blue-only   rgb(255, 255, 255) alpha=255
+  background  rgb(255, 255, 255) alpha=255
+group 0.5 + full mask
+  red-only    rgb(255, 127, 127) alpha=255
+  overlap     rgb(127, 127, 255) alpha=255
+  blue-only   rgb(127, 127, 255) alpha=255
+  background  rgb(255, 255, 255) alpha=255
+group 0.5 + half mask
+  red-only    rgb(255, 191, 191) alpha=255
+  overlap     rgb(191, 191, 255) alpha=255
+  blue-only   rgb(191, 191, 255) alpha=255
+  background  rgb(255, 255, 255) alpha=255
+use opacity 0.5
+  red-only    rgb(255, 127, 127) alpha=255
+  overlap     rgb(127, 127, 255) alpha=255
+  blue-only   rgb(127, 127, 255) alpha=255
+  background  rgb(255, 255, 255) alpha=255
+empty group, then sibling
+  red-only    rgb(255, 255, 255) alpha=255
+  overlap     rgb(255, 255, 255) alpha=255
+  blue-only   rgb(0, 170, 0) alpha=255
+  background  rgb(255, 255, 255) alpha=255
+zero-opacity group, then sibling
+  red-only    rgb(255, 255, 255) alpha=255
+  overlap     rgb(255, 255, 255) alpha=255
+  blue-only   rgb(0, 170, 0) alpha=255
+  background  rgb(255, 255, 255) alpha=255
