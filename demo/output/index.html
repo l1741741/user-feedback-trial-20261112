@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CairoSVG mask demo</title>
+<style>
+  body { font-family: sans-serif; margin: 2em; }
+  .row { display: flex; gap: 2em; align-items: flex-start; }
+  .cell { flex: 1; }
+  img.demo { border: 1px solid #999; image-rendering: pixelated; }
+  pre { background: #f4f4f4; padding: 1em; overflow: auto; }
+</style>
+</head>
+<body>
+  <h1>CairoSVG mask demo</h1>
+  <p>Each row shows an input SVG (rendered by your browser) and the PNG
+  rendered by CairoSVG in the run that generated this page.</p>
+  
+    <h2>gradient-edge</h2>
+    <div class="row">
+      <div class="cell">
+        <h3>Input (rendered by your browser)</h3>
+        <img class="demo" src="../svg/gradient-edge.svg" alt="gradient-edge input">
+        <details><summary>SVG source</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;220&quot; height=&quot;120&quot;&gt;
+  &lt;!-- Black-to-white gradient mask: the masked element fades smoothly. --&gt;
+  &lt;defs&gt;
+    &lt;linearGradient id=&quot;fade&quot; x1=&quot;0&quot; y1=&quot;0&quot; x2=&quot;1&quot; y2=&quot;0&quot;&gt;
+      &lt;stop offset=&quot;0&quot; stop-color=&quot;black&quot;/&gt;
+      &lt;stop offset=&quot;1&quot; stop-color=&quot;white&quot;/&gt;
+    &lt;/linearGradient&gt;
+    &lt;mask id=&quot;m&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;220&quot; height=&quot;120&quot;&gt;
+      &lt;rect x=&quot;10&quot; y=&quot;10&quot; width=&quot;200&quot; height=&quot;100&quot; fill=&quot;url(#fade)&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect width=&quot;220&quot; height=&quot;120&quot; fill=&quot;rgb(230,230,230)&quot;/&gt;
+  &lt;rect x=&quot;10&quot; y=&quot;10&quot; width=&quot;200&quot; height=&quot;100&quot; fill=&quot;rgb(30,60,200)&quot; mask=&quot;url(#m)&quot;/&gt;
+&lt;/svg&gt;
+</pre></details>
+      </div>
+      <div class="cell">
+        <h3>CairoSVG output (rendered in this run)</h3>
+        <img class="demo" src="gradient-edge.png" alt="gradient-edge output">
+      </div>
+    </div>
+    <h2>luminance-levels</h2>
+    <div class="row">
+      <div class="cell">
+        <h3>Input (rendered by your browser)</h3>
+        <img class="demo" src="../svg/luminance-levels.svg" alt="luminance-levels input">
+        <details><summary>SVG source</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;220&quot; height=&quot;120&quot;&gt;
+  &lt;!-- Luminance mask (default): black hides, gray halves, white shows,
+       semi-transparent white halves. --&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;m&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;220&quot; height=&quot;120&quot;&gt;
+      &lt;rect x=&quot;10&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;black&quot;/&gt;
+      &lt;rect x=&quot;60&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;rgb(128,128,128)&quot;/&gt;
+      &lt;rect x=&quot;110&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;white&quot;/&gt;
+      &lt;rect x=&quot;160&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;white&quot; fill-opacity=&quot;0.5&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect width=&quot;220&quot; height=&quot;120&quot; fill=&quot;rgb(230,230,230)&quot;/&gt;
+  &lt;rect x=&quot;10&quot; y=&quot;10&quot; width=&quot;200&quot; height=&quot;100&quot; fill=&quot;rgb(200,30,30)&quot; mask=&quot;url(#m)&quot;/&gt;
+&lt;/svg&gt;
+</pre></details>
+      </div>
+      <div class="cell">
+        <h3>CairoSVG output (rendered in this run)</h3>
+        <img class="demo" src="luminance-levels.png" alt="luminance-levels output">
+      </div>
+    </div>
+    <h2>mask-type-alpha</h2>
+    <div class="row">
+      <div class="cell">
+        <h3>Input (rendered by your browser)</h3>
+        <img class="demo" src="../svg/mask-type-alpha.svg" alt="mask-type-alpha input">
+        <details><summary>SVG source</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;220&quot; height=&quot;120&quot;&gt;
+  &lt;!-- Same mask content as luminance-levels.svg, but mask-type: alpha.
+       Only alpha matters: black and gray are fully opaque masks. --&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;m&quot; mask-type=&quot;alpha&quot; maskUnits=&quot;userSpaceOnUse&quot;
+          x=&quot;0&quot; y=&quot;0&quot; width=&quot;220&quot; height=&quot;120&quot;&gt;
+      &lt;rect x=&quot;10&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;black&quot;/&gt;
+      &lt;rect x=&quot;60&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;rgb(128,128,128)&quot;/&gt;
+      &lt;rect x=&quot;110&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;white&quot;/&gt;
+      &lt;rect x=&quot;160&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;white&quot; fill-opacity=&quot;0.5&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect width=&quot;220&quot; height=&quot;120&quot; fill=&quot;rgb(230,230,230)&quot;/&gt;
+  &lt;rect x=&quot;10&quot; y=&quot;10&quot; width=&quot;200&quot; height=&quot;100&quot; fill=&quot;rgb(200,30,30)&quot; mask=&quot;url(#m)&quot;/&gt;
+&lt;/svg&gt;
+</pre></details>
+      </div>
+      <div class="cell">
+        <h3>CairoSVG output (rendered in this run)</h3>
+        <img class="demo" src="mask-type-alpha.png" alt="mask-type-alpha output">
+      </div>
+    </div>
+    <h2>nested-opacity</h2>
+    <div class="row">
+      <div class="cell">
+        <h3>Input (rendered by your browser)</h3>
+        <img class="demo" src="../svg/nested-opacity.svg" alt="nested-opacity input">
+        <details><summary>SVG source</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;220&quot; height=&quot;120&quot;&gt;
+  &lt;!-- Nested groups with opacity inside the mask, and element opacity
+       combined with mask opacity (each applied once).
+       Stripe 1: nested group opacity 0.5 in mask -&gt; 50% visible.
+       Stripe 2: white mask + element opacity 0.5 -&gt; 50% visible.
+       Stripe 3: 50% gray mask + element opacity 0.5 -&gt; 25% visible.
+       Stripe 4: no mask, element opacity 0.5 -&gt; 50% visible reference. --&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;nested&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;220&quot; height=&quot;120&quot;&gt;
+      &lt;g opacity=&quot;0.5&quot;&gt;
+        &lt;g&gt;&lt;rect x=&quot;10&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;white&quot;/&gt;&lt;/g&gt;
+      &lt;/g&gt;
+      &lt;rect x=&quot;60&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;white&quot;/&gt;
+      &lt;rect x=&quot;110&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;rgb(128,128,128)&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect width=&quot;220&quot; height=&quot;120&quot; fill=&quot;rgb(230,230,230)&quot;/&gt;
+  &lt;g mask=&quot;url(#nested)&quot;&gt;
+    &lt;rect x=&quot;10&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;rgb(200,30,30)&quot;/&gt;
+    &lt;rect x=&quot;60&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;rgb(200,30,30)&quot; opacity=&quot;0.5&quot;/&gt;
+    &lt;rect x=&quot;110&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;rgb(200,30,30)&quot; opacity=&quot;0.5&quot;/&gt;
+  &lt;/g&gt;
+  &lt;rect x=&quot;160&quot; y=&quot;10&quot; width=&quot;50&quot; height=&quot;100&quot; fill=&quot;rgb(200,30,30)&quot; opacity=&quot;0.5&quot;/&gt;
+&lt;/svg&gt;
+</pre></details>
+      </div>
+      <div class="cell">
+        <h3>CairoSVG output (rendered in this run)</h3>
+        <img class="demo" src="nested-opacity.png" alt="nested-opacity output">
+      </div>
+    </div>
+    <h2>reuse</h2>
+    <div class="row">
+      <div class="cell">
+        <h3>Input (rendered by your browser)</h3>
+        <img class="demo" src="../svg/reuse.svg" alt="reuse input">
+        <details><summary>SVG source</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;
+  &lt;!-- One mask (left half visible, right half hidden, in bounding-box
+       fractions) reused by objects of different sizes and positions.
+       Each object must be masked relative to its own bounding box. --&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;half&quot; maskContentUnits=&quot;objectBoundingBox&quot;&gt;
+      &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;0.5&quot; height=&quot;1&quot; fill=&quot;white&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;rgb(230,230,230)&quot;/&gt;
+  &lt;rect x=&quot;10&quot; y=&quot;10&quot; width=&quot;60&quot; height=&quot;40&quot; fill=&quot;rgb(30,140,60)&quot; mask=&quot;url(#half)&quot;/&gt;
+  &lt;rect x=&quot;90&quot; y=&quot;20&quot; width=&quot;140&quot; height=&quot;30&quot; fill=&quot;rgb(30,140,60)&quot; mask=&quot;url(#half)&quot;/&gt;
+  &lt;ellipse cx=&quot;70&quot; cy=&quot;120&quot; rx=&quot;50&quot; ry=&quot;35&quot; fill=&quot;rgb(30,140,60)&quot; mask=&quot;url(#half)&quot;/&gt;
+  &lt;rect x=&quot;150&quot; y=&quot;90&quot; width=&quot;70&quot; height=&quot;70&quot; fill=&quot;rgb(30,140,60)&quot; mask=&quot;url(#half)&quot;/&gt;
+&lt;/svg&gt;
+</pre></details>
+      </div>
+      <div class="cell">
+        <h3>CairoSVG output (rendered in this run)</h3>
+        <img class="demo" src="reuse.png" alt="reuse output">
+      </div>
+    </div>
+    <h2>transform</h2>
+    <div class="row">
+      <div class="cell">
+        <h3>Input (rendered by your browser)</h3>
+        <img class="demo" src="../svg/transform.svg" alt="transform input">
+        <details><summary>SVG source</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;220&quot; height=&quot;160&quot;&gt;
+  &lt;!-- userSpaceOnUse mask + transformed masked elements: the mask lives
+       in each element&#x27;s user space and follows its transforms. --&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;m&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;-150&quot; y=&quot;-150&quot; width=&quot;300&quot; height=&quot;300&quot;&gt;
+      &lt;rect x=&quot;0&quot; y=&quot;-150&quot; width=&quot;150&quot; height=&quot;300&quot; fill=&quot;white&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect width=&quot;220&quot; height=&quot;160&quot; fill=&quot;rgb(230,230,230)&quot;/&gt;
+  &lt;g transform=&quot;translate(60, 50)&quot;&gt;
+    &lt;rect x=&quot;-40&quot; y=&quot;-25&quot; width=&quot;80&quot; height=&quot;50&quot; fill=&quot;rgb(200,30,30)&quot; mask=&quot;url(#m)&quot;/&gt;
+  &lt;/g&gt;
+  &lt;g transform=&quot;translate(150, 100) rotate(30)&quot;&gt;
+    &lt;rect x=&quot;-40&quot; y=&quot;-25&quot; width=&quot;80&quot; height=&quot;50&quot; fill=&quot;rgb(200,30,30)&quot; mask=&quot;url(#m)&quot;/&gt;
+  &lt;/g&gt;
+&lt;/svg&gt;
+</pre></details>
+      </div>
+      <div class="cell">
+        <h3>CairoSVG output (rendered in this run)</h3>
+        <img class="demo" src="transform.png" alt="transform output">
+      </div>
+    </div>
+</body>
+</html>

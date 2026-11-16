@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="120">
+  <!-- Same mask content as luminance-levels.svg, but mask-type: alpha.
+       Only alpha matters: black and gray are fully opaque masks. -->
+  <defs>
+    <mask id="m" mask-type="alpha" maskUnits="userSpaceOnUse"
+          x="0" y="0" width="220" height="120">
+      <rect x="10" y="10" width="50" height="100" fill="black"/>
+      <rect x="60" y="10" width="50" height="100" fill="rgb(128,128,128)"/>
+      <rect x="110" y="10" width="50" height="100" fill="white"/>
+      <rect x="160" y="10" width="50" height="100" fill="white" fill-opacity="0.5"/>
+    </mask>
+  </defs>
+  <rect width="220" height="120" fill="rgb(230,230,230)"/>
+  <rect x="10" y="10" width="200" height="100" fill="rgb(200,30,30)" mask="url(#m)"/>
+</svg>

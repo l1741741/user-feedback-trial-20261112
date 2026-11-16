@@ -5,6 +5,9 @@ This module handles clips, gradients, masks, patterns and external nodes.
 
 """
 
+import sys
+from math import ceil, floor
+
 from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
 from .features import match_features
 from .helpers import paint, size, transform
@@ -117,42 +120,139 @@ def clip_path(surface, node):
 
 
 def paint_mask(surface, node, name, opacity):
-    """Paint the mask of the current surface."""
+    """Paint the mask of the current surface.
+
+    The mask content is rendered into an offscreen raster image, converted
+    to masking values (luminance or alpha, depending on ``mask-type``), and
+    applied to the already-painted element through a pattern. ``opacity``
+    is the opacity of the masked element: it is multiplied into the masking
+    values once, here, and must not be applied again elsewhere.
+
+    """
     mask_node = surface.masks[name]
-    mask_node.tag = 'g'
-    mask_node['opacity'] = opacity
 
+    # Bounding box of the element referencing the mask, in current user
+    # units. Used to resolve objectBoundingBox-valued mask attributes.
+    bounding_box = calculate_bounding_box(surface, node)
+    has_bounding_box = is_non_empty_bounding_box(bounding_box)
+    box_x, box_y, box_width, box_height = (
+        bounding_box if has_bounding_box else (0, 0, 0, 0))
+
+    # Mask region: the area covered by the mask. Everything outside this
+    # region is fully masked out.
     if mask_node.get('maskUnits') == 'userSpaceOnUse':
-        width_ref, height_ref = 'x', 'y'
+        x = size(surface, mask_node.get('x', '-10%'), 'x')
+        y = size(surface, mask_node.get('y', '-10%'), 'y')
+        width = size(surface, mask_node.get('width', '120%'), 'x')
+        height = size(surface, mask_node.get('height', '120%'), 'y')
     else:
-        x = size(surface, node.get('x'), 'x')
-        y = size(surface, node.get('y'), 'y')
-        width = size(surface, node.get('width'), 'x')
-        height = size(surface, node.get('height'), 'y')
-        width_ref = width or surface.width
-        height_ref = height or surface.height
+        # objectBoundingBox (default): x, y, width and height are fractions
+        # of the bounding box of the element referencing the mask.
+        if not has_bounding_box:
+            # An element without a bounding box is fully masked out.
+            return
+        x = box_x + size(surface, mask_node.get('x', '-10%'), 1) * box_width
+        y = box_y + size(surface, mask_node.get('y', '-10%'), 1) * box_height
+        width = size(surface, mask_node.get('width', '120%'), 1) * box_width
+        height = (
+            size(surface, mask_node.get('height', '120%'), 1) * box_height)
 
-    mask_node['x'] = size(surface, mask_node.get('x', '-10%'), width_ref)
-    mask_node['y'] = size(surface, mask_node.get('y', '-10%'), height_ref)
-    mask_node['height'] = size(
-        surface, mask_node.get('height', '120%'), height_ref)
-    mask_node['width'] = size(
-        surface, mask_node.get('width', '120%'), width_ref)
+    if width <= 0 or height <= 0:
+        return
 
-    if mask_node.get('maskUnits') == 'userSpaceOnUse':
-        x = mask_node['x']
-        y = mask_node['y']
-        mask_node['viewBox'] = '{x} {y} {width} {height}'.format(**mask_node)
+    content_object_bounding_box = (
+        mask_node.get('maskContentUnits') == 'objectBoundingBox')
+    if content_object_bounding_box and not has_bounding_box:
+        return
 
-    from .surface import SVGSurface  # circular import
-    mask_surface = SVGSurface(mask_node, None, surface.dpi, surface)
-    surface.context.save()
-    surface.context.translate(x, y)
-    surface.context.scale(
-        mask_node['width'] / mask_surface.width,
-        mask_node['height'] / mask_surface.height)
-    surface.context.mask_surface(mask_surface.cairo)
-    surface.context.restore()
+    # Device-space rectangle covered by the mask region, clipped to the
+    # extents of the target surface.
+    ctm = surface.context.get_matrix()
+    device_points = [
+        ctm.transform_point(point_x, point_y) for point_x, point_y in (
+            (x, y), (x + width, y), (x, y + height), (x + width, y + height))]
+    device_x = max(0, floor(min(point[0] for point in device_points)))
+    device_y = max(0, floor(min(point[1] for point in device_points)))
+    device_width = min(
+        ceil(surface.width),
+        ceil(max(point[0] for point in device_points))) - device_x
+    device_height = min(
+        ceil(surface.height),
+        ceil(max(point[1] for point in device_points))) - device_y
+    if device_width <= 0 or device_height <= 0:
+        return
+
+    # Render the mask content into an offscreen image. The image uses the
+    # same user space as the masked element, translated so that the mask
+    # region's device-space origin is at pixel (0, 0).
+    mask_image = cairo.ImageSurface(
+        cairo.FORMAT_ARGB32, device_width, device_height)
+    user_to_mask = ctm.multiply(
+        cairo.Matrix(1, 0, 0, 1, -device_x, -device_y))
+    mask_context = cairo.Context(mask_image)
+    mask_context.set_matrix(user_to_mask)
+    mask_context.rectangle(x, y, width, height)
+    mask_context.clip()
+    if content_object_bounding_box:
+        mask_context.translate(box_x, box_y)
+        mask_context.scale(box_width, box_height)
+    original_context = surface.context
+    surface.context = mask_context
+    try:
+        for child in mask_node.children:
+            surface.draw(child)
+    finally:
+        surface.context = original_context
+
+    # Convert the rendered mask to masking values and apply it. The pattern
+    # has the default EXTEND_NONE extend, so everything outside the mask
+    # region is masked out.
+    apply_mask_values(
+        mask_image, mask_node.get('mask-type', 'luminance'), opacity)
+    mask_pattern = cairo.SurfacePattern(mask_image)
+    mask_pattern.set_matrix(user_to_mask)
+    surface.context.mask(mask_pattern)
+
+
+def apply_mask_values(mask_image, mask_type, opacity=1):
+    """Turn a rendered mask image into masking values, in place.
+
+    With the default ``mask-type: luminance``, the masking value is the
+    luminance of the mask color multiplied by its alpha, as defined by the
+    SVG and CSS Masking specifications. With ``mask-type: alpha``, only the
+    alpha channel is used. The result is stored as a premultiplied white
+    pixel whose alpha is the masking value, so that the image can be used
+    directly as a Cairo mask. ``opacity`` (the opacity of the masked
+    element) is multiplied into the masking value.
+
+    """
+    width, height = mask_image.get_width(), mask_image.get_height()
+    stride = mask_image.get_stride()
+    data = mask_image.get_data()
+    pixels = bytearray(data)
+    if sys.byteorder == 'little':
+        blue, green, red, alpha = 0, 1, 2, 3
+    else:
+        alpha, red, green, blue = 0, 1, 2, 3
+    use_luminance = mask_type != 'alpha'
+    for y in range(height):
+        offset = y * stride
+        for _ in range(width):
+            if use_luminance:
+                # Luminance of the unpremultiplied color multiplied by its
+                # alpha. With premultiplied channels the alpha cancels out,
+                # leaving a plain weighted sum of the stored channels.
+                value = (
+                    2126 * pixels[offset + red] +
+                    7152 * pixels[offset + green] +
+                    722 * pixels[offset + blue] + 5000) // 10000
+            else:
+                value = pixels[offset + alpha]
+            if opacity < 1:
+                value = int(value * opacity)
+            pixels[offset:offset + 4] = (value, value, value, value)
+            offset += 4
+    data[:] = pixels
 
 
 def draw_gradient(surface, node, name, opacity):

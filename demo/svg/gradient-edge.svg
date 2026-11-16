@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="120">
+  <!-- Black-to-white gradient mask: the masked element fades smoothly. -->
+  <defs>
+    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="black"/>
+      <stop offset="1" stop-color="white"/>
+    </linearGradient>
+    <mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="220" height="120">
+      <rect x="10" y="10" width="200" height="100" fill="url(#fade)"/>
+    </mask>
+  </defs>
+  <rect width="220" height="120" fill="rgb(230,230,230)"/>
+  <rect x="10" y="10" width="200" height="100" fill="rgb(30,60,200)" mask="url(#m)"/>
+</svg>

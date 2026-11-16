@@ -414,7 +414,11 @@ class Surface(object):
         # Get stroke and fill opacity
         stroke_opacity = float(node.get('stroke-opacity', 1))
         fill_opacity = float(node.get('fill-opacity', 1))
-        if opacity < 1 and not node.children:
+        if opacity < 1 and not node.children and not (filter_ or mask):
+            # The opacity of leaf elements is applied to their stroke and
+            # fill, except when a group has been pushed for a filter or a
+            # mask: in that case the opacity is applied once, when the
+            # group is painted (see below).
             stroke_opacity *= opacity
             fill_opacity *= opacity
 

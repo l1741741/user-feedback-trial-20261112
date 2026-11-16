@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="120">
+  <!-- Nested groups with opacity inside the mask, and element opacity
+       combined with mask opacity (each applied once).
+       Stripe 1: nested group opacity 0.5 in mask -> 50% visible.
+       Stripe 2: white mask + element opacity 0.5 -> 50% visible.
+       Stripe 3: 50% gray mask + element opacity 0.5 -> 25% visible.
+       Stripe 4: no mask, element opacity 0.5 -> 50% visible reference. -->
+  <defs>
+    <mask id="nested" maskUnits="userSpaceOnUse" x="0" y="0" width="220" height="120">
+      <g opacity="0.5">
+        <g><rect x="10" y="10" width="50" height="100" fill="white"/></g>
+      </g>
+      <rect x="60" y="10" width="50" height="100" fill="white"/>
+      <rect x="110" y="10" width="50" height="100" fill="rgb(128,128,128)"/>
+    </mask>
+  </defs>
+  <rect width="220" height="120" fill="rgb(230,230,230)"/>
+  <g mask="url(#nested)">
+    <rect x="10" y="10" width="50" height="100" fill="rgb(200,30,30)"/>
+    <rect x="60" y="10" width="50" height="100" fill="rgb(200,30,30)" opacity="0.5"/>
+    <rect x="110" y="10" width="50" height="100" fill="rgb(200,30,30)" opacity="0.5"/>
+  </g>
+  <rect x="160" y="10" width="50" height="100" fill="rgb(200,30,30)" opacity="0.5"/>
+</svg>
