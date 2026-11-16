@@ -54,6 +54,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _is_shared_stream(file: Any) -> bool:
+    """Return whether *file* is a standard stream, such as the one used by
+    :class:`~scrapy.extensions.feedexport.StdoutFeedStorage`, which must stay
+    open for the rest of the process."""
+    return any(
+        file is getattr(stream, "buffer", None) for stream in (sys.stdout, sys.stderr)
+    )
+
+
 # Printf-style placeholders (e.g. %(time)s) used to build feed URIs. Any other
 # percent character in a URI (e.g. percent-encoding such as %20 or %23) must be
 # treated as a literal rather than as the start of a placeholder.
@@ -190,6 +199,12 @@ class FeedStorageProtocol(Protocol):
     ) -> Coroutine[Any, Any, None] | Deferred[None] | None:
         """Store *file*, the file-like object returned by :meth:`open`, and
         close it.
+
+        The storage owns the file from :meth:`open` on, and must close it
+        whether it succeeds or fails. When the feed uses
+        :ref:`post-processing <post-processing>`, *file* only holds complete
+        data once the post-processing plugins have been closed, which happens
+        before this method is called.
 
         .. versionchanged:: 2.20.0
            This method may now be a coroutine function (``async def``).
@@ -623,32 +638,53 @@ class FeedSlot:
         self._skipped: bool = False
         self._exporting: bool = False
         self._fileloaded: bool = False
+        # Set when the file, the post-processing chain or the exporter could
+        # not be set up, so that closing the slot reports the failure instead
+        # of trying to export into a file that was never opened.
+        self._file_error: Exception | None = None
 
     async def start_exporting(self) -> None:
+        if self._file_error is not None:
+            # Do not try again: the failure is reported when the slot closes.
+            raise self._file_error
         if not self._fileloaded:
-            self.file = await _maybe_coroutine(self.storage.open, self.spider)
-            if "postprocessing" in self.feed_options:
-                self.file = cast(
-                    "IO[bytes]",
-                    PostProcessingManager(
-                        self.feed_options["postprocessing"],
-                        self.file,
-                        self.feed_options,
-                    ),
+            try:
+                self.file = await _maybe_coroutine(self.storage.open, self.spider)
+                self._fileloaded = True
+                if "postprocessing" in self.feed_options:
+                    # The feed storage reads the file to deliver the feed, and
+                    # closes it afterwards, so the post-processing chain must
+                    # leave it open.
+                    self.file = cast(
+                        "IO[bytes]",
+                        PostProcessingManager(
+                            self.feed_options["postprocessing"],
+                            self.file,
+                            self.feed_options,
+                            _owns_file=False,
+                        ),
+                    )
+                self.exporter = self._get_exporter(
+                    file=self.file,
+                    format_=self.feed_options["format"],
+                    fields_to_export=self.feed_options["fields"],
+                    encoding=self.feed_options["encoding"],
+                    indent=self.feed_options["indent"],
+                    **self.feed_options["item_export_kwargs"],
                 )
-            self.exporter = self._get_exporter(
-                file=self.file,
-                format_=self.feed_options["format"],
-                fields_to_export=self.feed_options["fields"],
-                encoding=self.feed_options["encoding"],
-                indent=self.feed_options["indent"],
-                **self.feed_options["item_export_kwargs"],
-            )
-            self._fileloaded = True
+            except Exception as exc:
+                self._file_error = exc
+                raise
 
         if not self._exporting:
             assert self.exporter
-            await _maybe_coroutine(self.exporter.start_exporting)
+            try:
+                await _maybe_coroutine(self.exporter.start_exporting)
+            except Exception as exc:
+                # The feed cannot be exported, and it is not empty, so the
+                # failure must be reported instead of stored as a success.
+                self._file_error = exc
+                raise
             self._exporting = True
 
     def _get_exporter(
@@ -882,51 +918,143 @@ class FeedExporter:
 
     @staticmethod
     def _get_file(slot_: FeedSlot) -> IO[bytes]:
+        """Finish the post-processing chain of *slot_* and return the file to
+        hand over to the feed storage.
+
+        Raises whatever the chain raises while closing, so that a feed whose
+        compressed data has an incomplete tail is never stored as a success.
+        """
         assert slot_.file
         if isinstance(slot_.file, PostProcessingManager):
             slot_.file.close()
             return slot_.file.file
         return slot_.file
 
+    @staticmethod
+    def _get_raw_file(slot_: FeedSlot) -> IO[bytes] | None:
+        """Return the file that the feed storage created for *slot_*, if any."""
+        if slot_.file is None:
+            return None
+        if isinstance(slot_.file, PostProcessingManager):
+            return slot_.file.file
+        return slot_.file
+
+    @classmethod
+    def _discard_file(cls, slot_: FeedSlot) -> None:
+        """Release what a failed slot left open, so that no file is leaked and
+        no compressed stream is left half-written.
+
+        The feed storage closes the file that it creates. When the slot fails
+        before the file reaches ``store()``, or when ``store()`` raises without
+        closing it, the exporter closes it instead, unless it is a standard
+        stream that other code still writes to.
+        """
+        if slot_.file is None:
+            return
+        if isinstance(slot_.file, PostProcessingManager):
+            with contextlib.suppress(Exception):
+                slot_.file.close()
+        file = cls._get_raw_file(slot_)
+        if (
+            file is not None
+            and not getattr(file, "closed", True)
+            and not _is_shared_stream(file)
+        ):
+            with contextlib.suppress(Exception):
+                file.close()
+
     async def _close_slot(self, slot: FeedSlot, spider: Spider) -> None:
         if slot._skipped:
             return
 
-        if slot.itemcount:
-            # Normal case
-            await slot.finish_exporting()
-        elif slot.store_empty and slot.batch_id == 1:
-            # Need to store the empty file
-            await slot.start_exporting()
-            await slot.finish_exporting()
-        else:
-            # In this case, the file is not stored, so no processing is required.
-            return
-
         logmsg = f"{slot.format} feed ({slot.itemcount} items) in: {slot.uri}"
-        slot_type = type(slot.storage).__name__
-        self.crawler.stats.inc_value(
-            f"feedexport/item_count/{slot_type}", slot.itemcount
-        )
-        try:
-            await ensure_awaitable(slot.storage.store(self._get_file(slot)))
-        except FileExistsError:
-            self._skip(slot)
-            self.crawler.stats.inc_value(f"feedexport/failed_count/{slot_type}")
-        except Exception:
-            logger.exception(
-                "Error storing %s",
-                logmsg,
-                extra={"spider": spider},
-            )
-            self.crawler.stats.inc_value(f"feedexport/failed_count/{slot_type}")
+        if slot._file_error is not None:
+            # The file, the post-processing chain or the exporter could not
+            # be set up, so there is nothing to store. The error is reported
+            # again here because setting up the file happens outside of the
+            # code that exports items.
+            self._fail_slot(slot, "exporting", logmsg, slot._file_error, spider)
+        elif not slot.itemcount and not (slot.store_empty and slot.batch_id == 1):
+            # In this case, the file is not stored, so no processing is
+            # required. A file that an export opened before it failed, and
+            # that the storage never received, is released here.
+            if slot._fileloaded and slot.file is not None:
+                self._discard_file(slot)
+            return
         else:
-            logger.info("Stored %s", logmsg, extra={"spider": spider})
-            self.crawler.stats.inc_value(f"feedexport/success_count/{slot_type}")
+            slot_type = type(slot.storage).__name__
+            self.crawler.stats.inc_value(
+                f"feedexport/item_count/{slot_type}", slot.itemcount
+            )
+            await self._store_slot(slot, spider, logmsg, slot_type)
 
         await self.crawler.signals.send_catch_log_async(
             signals.feed_slot_closed, slot=slot
         )
+
+    async def _store_slot(
+        self, slot: FeedSlot, spider: Spider, logmsg: str, slot_type: str
+    ) -> None:
+        """Write the closing part of the feed of *slot*, and store it unless
+        doing so fails."""
+        try:
+            if slot.itemcount:
+                # Normal case
+                await slot.finish_exporting()
+            else:
+                # Need to store the empty file
+                await slot.start_exporting()
+                await slot.finish_exporting()
+        except Exception as exc:
+            # The feed is incomplete, e.g. because the exporter could not
+            # write the closing bracket of a JSON feed.
+            self._fail_slot(slot, "exporting", logmsg, exc, spider)
+            return
+
+        try:
+            # Closing the post-processing chain writes the last part of the
+            # compressed data. If that fails, the feed must not be stored as
+            # a success.
+            file = self._get_file(slot)
+        except Exception as exc:
+            self._fail_slot(slot, "closing", logmsg, exc, spider)
+            return
+
+        try:
+            await ensure_awaitable(slot.storage.store(file))
+        except FileExistsError:
+            self._skip(slot)
+            self.crawler.stats.inc_value(f"feedexport/failed_count/{slot_type}")
+            self._discard_file(slot)
+        except Exception as exc:
+            self._fail_slot(slot, "storing", logmsg, exc, spider)
+        else:
+            logger.info("Stored %s", logmsg, extra={"spider": spider})
+            self.crawler.stats.inc_value(f"feedexport/success_count/{slot_type}")
+
+    def _fail_slot(
+        self,
+        slot: FeedSlot,
+        stage: str,
+        logmsg: str,
+        exc: BaseException,
+        spider: Spider,
+    ) -> None:
+        """Report that the feed of *slot* will not be stored because of *exc*,
+        and release whatever the failure left open.
+
+        *exc* is logged as the error that caused the failure, even if
+        releasing resources also fails.
+        """
+        logger.error(
+            f"Error {stage} {logmsg}: {exc!r}",
+            exc_info=exc,
+            extra={"spider": spider},
+        )
+        self.crawler.stats.inc_value(
+            f"feedexport/failed_count/{type(slot.storage).__name__}"
+        )
+        self._discard_file(slot)
 
     def _start_new_batch(
         self,
@@ -975,49 +1103,63 @@ class FeedExporter:
     async def _export_item(self, item: Any, spider: Spider) -> None:
         slots = []
         for slot in self.slots:
-            if not slot.filter.accepts(item):
+            # A slot whose file, post-processing chain or exporter could not
+            # be set up keeps being tracked, so that the failure is reported
+            # when it is closed, but nothing is written to it.
+            if slot._file_error is not None or not slot.filter.accepts(item):
                 slots.append(
                     slot
                 )  # if slot doesn't accept item, continue with next slot
                 continue
 
-            processor = self.processors[slot.uri_template]
-            for exported_item in processor(item) if processor else (item,):
-                if not slot._skipped:
-                    try:
-                        await slot.start_exporting()
-                    except FileExistsError:
-                        self._skip(slot)
-                if not slot._skipped:
-                    assert slot.exporter
-                    try:
-                        await _maybe_coroutine(slot.exporter.export_item, exported_item)
-                    except Exception as e:
-                        e.add_note(f"Item: {exported_item!r}")
-                        raise
-                # Skipped items are counted, so that the following files of
-                # this feed still cover the same items as those of any other
-                # feed.
-                slot.itemcount += 1
-                # create new slot for each slot with itemcount == FEED_EXPORT_BATCH_ITEM_COUNT and close the old one
-                if (
-                    self.feeds[slot.uri_template]["batch_item_count"]
-                    and slot.itemcount
-                    >= self.feeds[slot.uri_template]["batch_item_count"]
-                ):
-                    uri_params = self._get_uri_params(
-                        spider, self.feeds[slot.uri_template]["uri_params"], slot
-                    )
-                    self._schedule_slot_close(slot, spider)
-                    slot = self._start_new_batch(  # noqa: PLW2901
-                        batch_id=slot.batch_id + 1,
-                        uri=apply_uri_params(slot.uri_template, uri_params),
-                        feed_options=self.feeds[slot.uri_template],
-                        spider=spider,
-                        uri_template=slot.uri_template,
-                    )
-            slots.append(slot)
+            slots.append(await self._export_to_slot(slot, item, spider))
         self.slots = slots
+
+    async def _export_to_slot(
+        self, slot: FeedSlot, item: Any, spider: Spider
+    ) -> FeedSlot:
+        """Export *item* to *slot*, and return the slot that should receive the
+        next item, which is a new slot if the current batch is full."""
+        processor = self.processors[slot.uri_template]
+        for exported_item in processor(item) if processor else (item,):
+            if not slot._skipped:
+                try:
+                    await slot.start_exporting()
+                except FileExistsError:
+                    self._skip(slot)
+                except Exception:
+                    # This feed cannot be exported, see
+                    # FeedSlot.start_exporting, but the other feeds can, so
+                    # the failure is reported when this slot is closed.
+                    return slot
+            if not slot._skipped:
+                assert slot.exporter
+                try:
+                    await _maybe_coroutine(slot.exporter.export_item, exported_item)
+                except Exception as e:
+                    e.add_note(f"Item: {exported_item!r}")
+                    raise
+            # Skipped items are counted, so that the following files of
+            # this feed still cover the same items as those of any other
+            # feed.
+            slot.itemcount += 1
+            # create new slot for each slot with itemcount == FEED_EXPORT_BATCH_ITEM_COUNT and close the old one
+            if (
+                self.feeds[slot.uri_template]["batch_item_count"]
+                and slot.itemcount >= self.feeds[slot.uri_template]["batch_item_count"]
+            ):
+                uri_params = self._get_uri_params(
+                    spider, self.feeds[slot.uri_template]["uri_params"], slot
+                )
+                self._schedule_slot_close(slot, spider)
+                slot = self._start_new_batch(
+                    batch_id=slot.batch_id + 1,
+                    uri=apply_uri_params(slot.uri_template, uri_params),
+                    feed_options=self.feeds[slot.uri_template],
+                    spider=spider,
+                    uri_template=slot.uri_template,
+                )
+        return slot
 
     def _load_components(self, setting_prefix: str) -> dict[str, Any]:
         conf = without_none_values(

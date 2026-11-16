@@ -259,12 +259,20 @@ one per actual value of the placeholder.
     :ref:`storage backend <topics-feed-storage-backends>`, where ``{storage}``
     is the class name of the storage backend, e.g. ``FileFeedStorage``.
 
+    A feed is counted as failed if it cannot be exported, if its
+    :ref:`post-processing <post-processing>` plugins fail to initialize or
+    close, or if the storage backend raises while storing it.
+
 .. stat:: feedexport/success_count/{storage}
 
 ``feedexport/success_count/{storage}``
     Number of :ref:`feeds <topics-feed-exports>` stored successfully, per
     :ref:`storage backend <topics-feed-storage-backends>`, where ``{storage}``
     is the class name of the storage backend, e.g. ``FileFeedStorage``.
+
+    A feed is only counted as stored once its
+    :ref:`post-processing <post-processing>` plugins have closed successfully
+    and the storage backend has stored it.
 
 .. stat:: file_count
 

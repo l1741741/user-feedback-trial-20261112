@@ -466,6 +466,33 @@ the feed to be processed. These plugins can be declared either as an import stri
 or with the imported class of the plugin. Parameters to plugins can be passed
 through the feed options. See :ref:`feed options <feed-options>` for examples.
 
+The plugins form a chain: the first plugin of the list receives the data first,
+writes its output to the second plugin, and so on, the last plugin writing to
+the feed file. When the feed is closed, Scrapy closes the plugins in the
+reverse order, from the first plugin of the list, so that each plugin writes
+its remaining output, if any, to a plugin that is still open. For example, a
+compression plugin writes the end of the compressed stream in its ``close()``
+method.
+
+Closing is also how Scrapy knows that a feed is complete. A feed is only
+handed over to its :ref:`feed storage <topics-feed-storage-backends>`, and
+only counted in ``feedexport/success_count/<storage class>``, once every
+plugin has closed successfully. If a plugin fails to initialize or to close,
+or if the storage cannot store the feed, the feed is counted in
+``feedexport/failed_count/<storage class>`` instead, its error is logged, and
+the other feeds of the crawl are unaffected. The storage then closes the file,
+as documented in :class:`~scrapy.extensions.feedexport.FeedStorageProtocol`.
+
+When several plugins fail to close, Scrapy keeps trying to close the
+remaining ones, and raises the first error. The errors of the other plugins
+are attached to it as notes, so that the original cause is never hidden.
+
+.. versionchanged:: VERSION
+   Previously, only the first plugin was closed, so a failing plugin could
+   leave the following ones, and the feed file, unclosed. A feed whose plugins
+   or storage failed while closing could also be counted as stored; it is now
+   counted as failed.
+
 .. _builtin-plugins:
 
 Built-in Plugins
@@ -507,6 +534,14 @@ Each plugin is a class that must implement the following methods:
     method.
 
     .. warning:: Do not close the file from the ``__init__`` method.
+
+The file that a plugin receives is not owned by the plugin: a plugin may close
+the file wrappers that it created, but closing the received file does nothing.
+Scrapy closes the target of the last plugin after every plugin has been
+closed, so that the last plugin can still write to it, and then hands the file
+over to the :ref:`feed storage <topics-feed-storage-backends>`, which is
+responsible for it from then on, as described in
+:class:`~scrapy.extensions.feedexport.FeedStorageProtocol`.
 
 To pass a parameter to your plugin, use :ref:`feed options <feed-options>`. You
 can then access those parameters from the ``__init__`` method of your plugin.

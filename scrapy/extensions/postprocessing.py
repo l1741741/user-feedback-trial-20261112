@@ -109,26 +109,117 @@ class LZMAPlugin:
         self.lzmafile.close()
 
 
+class _PluginTarget:
+    """File-like object that plugins receive as their target file.
+
+    Everything is forwarded to the feed file except :meth:`close`, which does
+    nothing: closing the target is up to the manager, once every plugin has
+    been closed. Plugins that close their target, as the documentation used to
+    ask them to, therefore do not close a file that they do not own.
+    """
+
+    def __init__(self, file: IO[bytes]) -> None:
+        self._file = file
+
+    @property
+    def closed(self) -> bool:
+        return self._file.closed
+
+    def write(self, data: bytes) -> int:
+        return self._file.write(data)
+
+    def tell(self) -> int:
+        return self._file.tell()
+
+    def flush(self) -> None:
+        self._file.flush()
+
+    def writable(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        """Do nothing: the feed file is closed by its owner."""
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "_file":
+            raise AttributeError(name)
+        return getattr(self._file, name)
+
+
 # io.IOBase is subclassed here, so that exporters can use the PostProcessingManager
 # instance as a file like writable object. This could be needed by some exporters
 # such as CsvItemExporter which wraps the feed storage with io.TextIOWrapper.
 class PostProcessingManager(IOBase):
-    """
-    This will manage and use declared plugins to process data in a
-    pipeline-ish way.
-    :param plugins: all the declared plugins for the feed
-    :type plugins: list
-    :param file: final target file where the processed data will be written
-    :type file: file like object
+    """Manage the post-processing plugins of a feed.
+
+    Plugins are initialized from the last one in *plugins* to the first one,
+    since each plugin receives the output of the plugin that follows it. The
+    first plugin is therefore the head of the chain, the one that receives
+    writes, and *file* is its tail.
+
+    Plugins never close their target. The manager owns *file* and closes it
+    after all the plugins, as the last step of :meth:`close`, unless it is
+    told otherwise: a manager that does not own *file* leaves it open on every
+    path, including initialization and close failures, so that whoever created
+    it can still read and close it. The feed exporter uses that mode, since
+    the feed storage reads *file* to deliver the feed and closes it
+    afterwards.
+
+    Internally the manager goes through these states:
+
+    -   ``"open"``: it accepts writes.
+    -   ``"closing"``: :meth:`close` is closing the plugins, so writes are
+        rejected. This state is only observable from a plugin ``close()``
+        method.
+    -   ``"closed"``: every plugin, and the file if owned, was closed
+        successfully.
+    -   ``"failed"``: closing raised, or a plugin failed to initialize.
+
+    :attr:`closed` is ``True`` in the ``"closed"`` and ``"failed"`` states, as
+    for any :class:`io.IOBase` subclass.
+
+    :meth:`close` runs once. It closes every plugin that was successfully
+    initialized, from the head of the chain to the tail, and then *file* if
+    the manager owns it. A plugin whose ``close()`` method raises does not
+    stop the remaining plugins from being closed: all of them are attempted,
+    and the first exception is raised, with the following ones attached to it
+    as notes. Later calls to :meth:`close` close nothing and raise nothing.
+
+    If a plugin raises while it is being initialized, the plugins initialized
+    before it are closed with the same rules, and the initialization error is
+    raised with any close error attached to it.
     """
 
+    _OPEN = "open"
+    _CLOSING = "closing"
+    _CLOSED = "closed"
+    _FAILED = "failed"
+
     def __init__(
-        self, plugins: list[Any], file: IO[bytes], feed_options: dict[str, Any]
+        self,
+        plugins: list[Any],
+        file: IO[bytes],
+        feed_options: dict[str, Any],
+        *,
+        _owns_file: bool = True,
     ) -> None:
-        self.plugins = self._load_plugins(plugins)
         self.file = file
         self.feed_options = feed_options
-        self.head_plugin = self._get_head_plugin()
+        self._owns_file = _owns_file
+        self._state = self._OPEN
+        self._target = _PluginTarget(file)
+        self._initialized: list[Any] = []
+        try:
+            self.plugins = self._load_plugins(plugins)
+            self.head_plugin = self._initialize_plugins()
+        except Exception as exc:
+            self._state = self._FAILED
+            self._add_notes(exc, self._close_resources())
+            raise
+
+    @property
+    def closed(self) -> bool:
+        return self._state in {self._CLOSED, self._FAILED}
 
     def write(self, data: bytes) -> int:
         """
@@ -139,6 +230,8 @@ class PostProcessingManager(IOBase):
         :return: returns number of bytes written
         :rtype: int
         """
+        if self._state != self._OPEN:
+            raise ValueError(f"Cannot write to a {self._state} PostProcessingManager")
         return cast("int", self.head_plugin.write(data))
 
     def tell(self) -> int:
@@ -146,18 +239,57 @@ class PostProcessingManager(IOBase):
 
     def close(self) -> None:
         """
-        Close the target file along with all the plugins.
+        Close the initialized plugins, from the head of the chain to the tail,
+        and then the file if this manager owns it.
+
+        If closing raises, the first exception is raised, with the other ones
+        attached to it as notes.
         """
-        self.head_plugin.close()
+        if self._state != self._OPEN:
+            return
+        self._state = self._CLOSING
+        failures = self._close_resources()
+        if failures:
+            self._state = self._FAILED
+            self._add_notes(failures[0][1], failures)
+            raise failures[0][1]
+        self._state = self._CLOSED
 
     def writable(self) -> bool:
-        return True
+        return self._state == self._OPEN
 
     def _load_plugins(self, plugins: list[Any]) -> list[Any]:
         return [load_object(plugin) for plugin in plugins]
 
-    def _get_head_plugin(self) -> Any:
-        prev = self.file
-        for plugin in self.plugins[::-1]:
+    def _initialize_plugins(self) -> Any:
+        prev: Any = self._target
+        for plugin in reversed(self.plugins):
             prev = plugin(prev, self.feed_options)
+            self._initialized.append(prev)
         return prev
+
+    def _close_resources(self) -> list[tuple[str, BaseException]]:
+        """Close the initialized plugins, and the file if it is owned, and
+        return the failures in the order in which they happened."""
+        failures: list[tuple[str, BaseException]] = []
+        for plugin in reversed(self._initialized):
+            try:
+                plugin.close()
+            except Exception as exc:
+                failures.append((f"plugin {type(plugin).__name__}", exc))
+        if self._owns_file:
+            try:
+                self.file.close()
+            except Exception as exc:
+                failures.append(("the feed file", exc))
+        return failures
+
+    @staticmethod
+    def _add_notes(
+        primary: BaseException, failures: list[tuple[str, BaseException]]
+    ) -> None:
+        """Keep *primary* as the error that is raised, and describe the other
+        failures in the order in which they happened."""
+        for name, exc in failures:
+            if exc is not primary:
+                primary.add_note(f"Also failed to close {name}: {exc!r}")
