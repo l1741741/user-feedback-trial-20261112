@@ -79,6 +79,59 @@ INVISIBLE_TAGS = frozenset((
     'radialGradient', 'symbol'))
 
 
+def cairo_fill_rule(node):
+    """Return the Cairo fill rule selected by an SVG node.
+
+    ``fill-rule`` is an inherited presentation property, so the value
+    resolved by the parser (including CSS styles and inheritance) is used
+    rather than the raw XML attribute. Unknown values fall back to the
+    SVG default ``nonzero``.
+
+    """
+    if node.get('fill-rule') == 'evenodd':
+        return cairo.FILL_RULE_EVEN_ODD
+    return cairo.FILL_RULE_WINDING
+
+
+def cairo_clip_rule(surface, node):
+    """Return the Cairo fill rule selected by a clipPath node.
+
+    ``clip-rule`` overrides ``fill-rule`` when explicitly set; both are
+    inherited presentation properties resolved by the parser. The rule may
+    be declared on the ``clipPath`` element, on its children or on the
+    target of a ``use`` child. A single Cairo clip operation only supports
+    one rule, so the descendants' rule is used when they all agree.
+    Unknown values fall back to the SVG default ``nonzero``.
+
+    """
+    clip_rule = node.get('clip-rule')
+    if clip_rule is None:
+        clip_rule = node.get('fill-rule')
+    if clip_rule == 'evenodd':
+        return cairo.FILL_RULE_EVEN_ODD
+    if clip_rule is not None:
+        return cairo.FILL_RULE_WINDING
+
+    child_rules = set()
+    for child in node.children:
+        if child.tag == 'use':
+            # The referenced tree is built lazily at rendering time; its
+            # target carries the presentation properties of the use node.
+            # Definitions such as paths and clipPaths are registered in
+            # the surface dictionaries, other fragments in the tree cache.
+            fragment = parse_url(child.get_href() or '').fragment
+            referenced = (
+                surface.paths.get(fragment)
+                or surface.tree_cache.get((node.url, fragment)))
+            if referenced is not None:
+                child_rules.add(cairo_clip_rule(surface, referenced))
+        else:
+            child_rules.add(cairo_clip_rule(surface, child))
+    if child_rules == {cairo.FILL_RULE_EVEN_ODD}:
+        return cairo.FILL_RULE_EVEN_ODD
+    return cairo.FILL_RULE_WINDING
+
+
 class Surface(object):
     """Abstract base class for CairoSVG surfaces.
 
@@ -393,11 +446,17 @@ class Surface(object):
                 self.stroke_and_fill = True
                 path.tag = 'clipPath'
                 self.context.restore()
-                # TODO: fill rules are not handled by cairo for clips
-                # if node.get('clip-rule') == 'evenodd':
-                #     self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+                # Cairo builds the clip from the current path using the
+                # fill rule of the graphics state. The path drawn above
+                # keeps the presentation properties (clip-rule and the
+                # inherited fill-rule) of the clipPath and its children.
+                # The rule is a graphics property of this clip only: save
+                # and restore the rule of the surrounding context so that
+                # later fills and clips never inherit a stale value.
+                old_fill_rule = self.context.get_fill_rule()
+                self.context.set_fill_rule(cairo_clip_rule(self, path))
                 self.context.clip()
-                self.context.set_fill_rule(cairo.FILL_RULE_WINDING)
+                self.context.set_fill_rule(old_fill_rule)
 
         save_cursor = copy.deepcopy(
             (self.cursor_position, self.cursor_d_position,
@@ -440,8 +499,9 @@ class Surface(object):
             # Fill
             self.context.save()
             paint_source, paint_color = paint(node.get('fill', 'black'))
-            if node.get('fill-rule') == 'evenodd':
-                self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+            # The rule only applies to this fill: it is set inside the
+            # saved state and restored by context.restore() afterwards.
+            self.context.set_fill_rule(cairo_fill_rule(node))
             if not gradient_or_pattern(self, node, paint_source, fill_opacity):
                 self.context.set_source_rgba(
                     *self.map_color(paint_color, fill_opacity))

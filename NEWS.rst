@@ -3,6 +3,15 @@
 ======
 
 
+Next version
+============
+
+* Fix support of ``fill-rule`` and ``clip-rule`` on paths, groups and
+  ``clipPath`` elements: ``evenodd`` clips now punch holes as in browsers,
+  inherited rules and local overrides are honored, and the rule of one
+  operation no longer leaks to the following paths
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

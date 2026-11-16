@@ -1,0 +1,105 @@
+<?xml version="1.0"?>
+<!--
+  Local legend for fill-rule / clip-rule rendering.
+
+  The canvas is a 4x3 grid of 100x100 cells. Every cell is independently
+  meaningful; tests sample pixels relative to a cell's origin:
+    ring center  (cell +50,+50) is the "inside the hole" probe,
+    ring band    (cell +50,+15) is the "outside the hole, inside shape"
+    probe.
+
+  Row 1 (y=0):   fill-rule on ordinary paths
+  Row 2 (y=100): the same contours rendered through clipPaths
+  Row 3 (y=200): inheritance / groups / reused contours
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="400" height="300" viewBox="0 0 400 300">
+  <defs>
+    <!-- Concentric squares, both contours clockwise: winding alone fills
+         the center, only evenodd punches a hole. -->
+    <path id="rings"
+          d="M10 10 H90 V90 H10 Z M30 30 H70 V70 H30 Z"/>
+    <!-- Two overlapping circles; the lens between them is winding 2 when
+         both circles run in the same direction. Geometry spans x 5..95,
+         y 30..80; the lens center is at (50,55). -->
+    <path id="lens-cw"
+          d="M55 55 A25 25 0 1 1 5 55 A25 25 0 1 1 55 55 Z
+             M95 55 A25 25 0 1 1 45 55 A25 25 0 1 1 95 55 Z"/>
+    <!-- Self-intersecting bowtie: one closed contour crossing itself at
+         the cell center. Triangle interiors include (30,35)/(65,60). -->
+    <path id="bowtie"
+          d="M15 20 L85 80 L85 20 L15 80 Z"/>
+
+    <!-- clipPath variants of the ring contour, geometry in user units. -->
+    <clipPath id="clip-rings-evenodd-child">
+      <path d="M10 10 H90 V90 H10 Z M30 30 H70 V70 H30 Z"
+            clip-rule="evenodd"/>
+    </clipPath>
+    <clipPath id="clip-rings-evenodd-parent" clip-rule="evenodd">
+      <path d="M10 10 H90 V90 H10 Z M30 30 H70 V70 H30 Z"/>
+    </clipPath>
+    <clipPath id="clip-rings-winding">
+      <path d="M10 10 H90 V90 H10 Z M30 30 H70 V70 H30 Z"/>
+    </clipPath>
+    <!-- Reused contour: the same node feeds a fill and a clipPath. -->
+    <path id="shared-rings"
+          d="M10 10 H90 V90 H10 Z M30 30 H70 V70 H30 Z"
+          fill-rule="evenodd" clip-rule="evenodd"/>
+    <clipPath id="clip-shared"><use href="#shared-rings"/></clipPath>
+  </defs>
+
+  <!-- Row 1: ordinary path fills -->
+  <!-- (0,0) concentric rings, default nonzero -> solid center -->
+  <use href="#rings" transform="translate(0,0)" fill="red"/>
+  <!-- (100,0) concentric rings, evenodd -> hole -->
+  <use href="#rings" transform="translate(100,0)"
+       fill="red" fill-rule="evenodd"/>
+  <!-- (200,0) overlapping circles evenodd -> hollow lens -->
+  <use href="#lens-cw" transform="translate(200,0)"
+       fill="red" fill-rule="evenodd"/>
+  <!-- (300,0) self-intersecting bowtie evenodd -->
+  <use href="#bowtie" transform="translate(300,0)"
+       fill="red" fill-rule="evenodd"/>
+
+  <!-- Row 2: clipped full-cell color blocks. Each clipped node is wrapped
+       in a translated group so clipPath user-space geometry matches the
+       rect's local coordinates. -->
+  <!-- (0,100) clip-rule evenodd on the clip child -> ring with hole -->
+  <g transform="translate(0,100)" clip-path="url(#clip-rings-evenodd-child)">
+    <rect width="100" height="100" fill="green"/>
+  </g>
+  <!-- (100,100) clip-rule evenodd on the clipPath element -->
+  <g transform="translate(100,100)" clip-path="url(#clip-rings-evenodd-parent)">
+    <rect width="100" height="100" fill="green"/>
+  </g>
+  <!-- (200,100) default winding clip -> solid center -->
+  <g transform="translate(200,100)" clip-path="url(#clip-rings-winding)">
+    <rect width="100" height="100" fill="green"/>
+  </g>
+  <!-- (300,100) clipPath reusing the shared contour -> ring with hole -->
+  <g transform="translate(300,100)" clip-path="url(#clip-shared)">
+    <rect width="100" height="100" fill="green"/>
+  </g>
+
+  <!-- Row 3: inheritance, groups, opacity and transforms -->
+  <!-- (0,200) group sets evenodd, plain child inherits it -> hole -->
+  <g transform="translate(0,200)" fill-rule="evenodd">
+    <use href="#rings" fill="blue"/>
+  </g>
+  <!-- (100,200) group evenodd but child overrides nonzero -> solid -->
+  <g transform="translate(100,200)" fill-rule="evenodd">
+    <use href="#rings" fill="blue" fill-rule="nonzero"/>
+  </g>
+  <!-- (200,200) transparent transformed group keeps the hole -->
+  <g transform="translate(205,210)" opacity="0.5">
+    <use href="#rings" fill="blue" fill-rule="evenodd"/>
+  </g>
+  <!-- (300,200) clipped group whose children inherit evenodd: the clip
+       must not reset the fill rule used by the group's own path. -->
+  <g transform="translate(300,200)"
+     clip-path="url(#clip-rings-evenodd-child)" fill-rule="evenodd">
+    <rect width="100" height="100" fill="purple"/>
+    <use href="#rings" fill="yellow"/>
+  </g>
+</svg>
