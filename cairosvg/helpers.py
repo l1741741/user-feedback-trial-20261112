@@ -121,7 +121,12 @@ def preserve_ratio(surface, node, width=None, height=None):
     scale_y = height / viewbox_height if viewbox_height > 0 else 1
 
     aspect_ratio = node.get('preserveAspectRatio', 'xMidYMid').split()
-    align = aspect_ratio[0]
+    if aspect_ratio and aspect_ratio[0] == 'defer':
+        # "defer" asks <image> elements to use the referenced document's own
+        # preserveAspectRatio. CairoSVG always applies the element's value,
+        # so drop the keyword and parse the tokens that follow it.
+        aspect_ratio = aspect_ratio[1:]
+    align = aspect_ratio[0] if aspect_ratio else 'xMidYMid'
     if align == 'none':
         x_position = 'min'
         y_position = 'min'

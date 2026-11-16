@@ -51,6 +51,9 @@ def image(surface, node):
         tree_width, tree_height, viewbox = node_format(
             surface, tree, reference=False)
         if viewbox:
+            if viewbox[2] <= 0 or viewbox[3] <= 0:
+                # Degenerate viewBox: nothing to render
+                return
             tree_scale_x = tree_width / viewbox[2]
             tree_scale_y = tree_height / viewbox[3]
         else:
@@ -70,8 +73,15 @@ def image(surface, node):
         surface.context.save()
         surface.context.translate(x, y)
         surface.context.translate(*surface.context.get_current_point())
-        surface.context.scale(scale_x * tree_scale_x, scale_y * tree_scale_y)
+        # Map the referenced document's viewport into the image viewport
+        # according to preserveAspectRatio…
+        surface.context.scale(scale_x, scale_y)
         surface.context.translate(translate_x, translate_y)
+        # …then map the referenced viewBox onto its own viewport, honoring
+        # a non-zero viewBox origin.
+        surface.context.scale(tree_scale_x, tree_scale_y)
+        if viewbox:
+            surface.context.translate(-viewbox[0], -viewbox[1])
         surface.draw(tree)
         surface.context.restore()
         return
