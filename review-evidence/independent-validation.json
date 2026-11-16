@@ -1,0 +1,24 @@
+{
+  "task_id": "render-20261117-12593-fill-rule",
+  "final_sha": "6a549a0691d0893d6f09ab5af6e0293f6a242fb8",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/render-20261117-12593-fill-rule/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12593-fill-rule/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_fill_rule.py"
+  ],
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12593-fill-rule/local-frozen-source",
+  "log": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12593-fill-rule/independent-validation.log",
+  "exit_code": 0,
+  "tests": 41,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0
+}

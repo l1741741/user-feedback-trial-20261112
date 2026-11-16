@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120"><defs><clipPath id="c"><path d="M10 10H110V110H10Z M40 40H80V80H40Z" fill-rule="evenodd"/></clipPath></defs><rect width="200" height="120" fill="red" clip-path="url(#c)"/></svg>
