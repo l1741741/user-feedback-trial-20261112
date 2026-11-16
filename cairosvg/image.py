@@ -34,9 +34,7 @@ def image(surface, node):
     width = size(surface, node.get('width'), 'x')
     height = size(surface, node.get('height'), 'y')
 
-    if image_bytes.startswith(b'\x89PNG') and not surface.map_image:
-        png_file = BytesIO(image_bytes)
-    elif (
+    if (
         image_bytes.startswith((b'<svg ', b'<?xml', b'<!DOC', b'\x1f\x8b'))
         or b'<svg' in image_bytes
     ):
@@ -62,12 +60,11 @@ def image(surface, node):
         scale_x, scale_y, translate_x, translate_y = preserve_ratio(
             surface, node)
 
-        # Clip image region
+        # Clip image region and draw the nested document, keeping the clip
+        # local to this element so it cannot affect later siblings.
+        surface.context.save()
         surface.context.rectangle(x, y, width, height)
         surface.context.clip()
-
-        # Draw image
-        surface.context.save()
         surface.context.translate(x, y)
         surface.context.translate(*surface.context.get_current_point())
         surface.context.scale(scale_x * tree_scale_x, scale_y * tree_scale_y)
@@ -76,6 +73,8 @@ def image(surface, node):
         surface.context.restore()
         return
     else:
+        # Every raster format goes through Pillow: this is the only path that
+        # honors EXIF orientation tags and the optional map_image callback.
         png_file = BytesIO()
         image = ImageOps.exif_transpose(Image.open(BytesIO(image_bytes)))
 
@@ -93,22 +92,27 @@ def image(surface, node):
 
     node.image_width = image_surface.get_width()
     node.image_height = image_surface.get_height()
+    # An explicitly zero dimension disables rendering (the element has no
+    # viewport); a *missing* dimension instead falls back to the raster's
+    # intrinsic size below.
+    if (('width' in node and width == 0) or
+            ('height' in node and height == 0)):
+        return
     width = width or node.image_width
     height = height or node.image_height
     scale_x, scale_y, translate_x, translate_y = preserve_ratio(
         surface, node, width, height)
 
-    # Clip image region (if necessary)
-    if not (translate_x == 0 and
-            translate_y == 0 and
-            width == scale_x * node.image_width and
-            height == scale_y * node.image_height):
-        surface.context.rectangle(x, y, width, height)
-        surface.context.clip()
-
-    # Paint raster image
-    opacity = float(node.get('opacity', 1))
+    # The image is always clipped to its viewport rectangle: "meet" leaves
+    # gutters inside it, "slice" overflows it and "none" fills it after a
+    # non-uniform scale -- in every case nothing may paint outside.
     surface.context.save()
+    surface.context.rectangle(x, y, width, height)
+    surface.context.clip()
+
+    # Paint raster image. Real alpha is kept: transparent pixels composite
+    # with whatever is below instead of being filled with an opaque color.
+    opacity = float(node.get('opacity', 1))
     surface.context.translate(x, y)
     surface.context.scale(scale_x, scale_y)
     surface.context.translate(translate_x, translate_y)
