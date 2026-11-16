@@ -191,3 +191,187 @@ def test_script(tmp_path):
     # Explicit -f wins
     assert not test_main([svg_filename, '-o', str(temp_3), '-f', 'pdf'])
     assert read_file(str(temp_3))[:100] == expected_pdf
+
+
+# Tests for the handling of 'display' and 'visibility'. They render actual
+# images and check pixels (not only parsed attributes), using overlapping
+# colors and visible borders as visible/hidden controls.
+
+DISPLAY_VISIBILITY_HEAD = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">'
+    '<rect width="100" height="100" fill="white"/>')
+DISPLAY_VISIBILITY_TAIL = '</svg>'
+RED = (255, 0, 0)
+BLUE = (0, 0, 255)
+WHITE = (255, 255, 255)
+
+
+def render_pixels(svg_string):
+    """Render an SVG string and return a pixel getter."""
+    from PIL import Image
+    png = svg2png(
+        bytestring=svg_string.encode(), output_width=100, output_height=100)
+    image = Image.open(io.BytesIO(png)).convert('RGB')
+    return image.getpixel
+
+
+def test_visibility_override():
+    """Visible children of hidden groups must be painted."""
+    # Explicitly visible child of a hidden group, over a blue background
+    for hidden, visible in (
+            ('visibility="hidden"', 'visibility="visible"'),
+            ('style="visibility:hidden"', 'style="visibility:visible"')):
+        pixel = render_pixels(
+            DISPLAY_VISIBILITY_HEAD +
+            '<rect x="10" y="10" width="80" height="80" fill="blue"/>'
+            f'<g {hidden}><rect x="20" y="20" width="60" height="60" '
+            f'fill="red" stroke="black" stroke-width="4" {visible}/></g>' +
+            DISPLAY_VISIBILITY_TAIL)
+        assert pixel((50, 50)) == RED
+        assert pixel((20, 50)) == (0, 0, 0)  # the child's border is drawn
+        assert pixel((15, 15)) == BLUE
+
+    # Same through a stylesheet
+    pixel = render_pixels(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">'
+        '<style>.hid { visibility: hidden } .vis { visibility: visible }'
+        '</style>'
+        '<rect width="100" height="100" fill="white"/>'
+        '<rect x="10" y="10" width="80" height="80" fill="blue"/>'
+        '<g class="hid"><rect class="vis" x="20" y="20" width="60" '
+        'height="60" fill="red"/></g></svg>')
+    assert pixel((50, 50)) == RED
+
+    # Hidden child without override stays hidden
+    pixel = render_pixels(
+        DISPLAY_VISIBILITY_HEAD +
+        '<g visibility="hidden">'
+        '<rect x="10" y="10" width="80" height="80" fill="red"/></g>' +
+        DISPLAY_VISIBILITY_TAIL)
+    assert pixel((50, 50)) == WHITE
+
+    # 'collapse' is treated as 'hidden'
+    pixel = render_pixels(
+        DISPLAY_VISIBILITY_HEAD +
+        '<rect x="10" y="10" width="80" height="80" fill="red" '
+        'visibility="collapse"/>' + DISPLAY_VISIBILITY_TAIL)
+    assert pixel((50, 50)) == WHITE
+
+
+def test_display_none_branch():
+    """display:none removes the whole branch, without any leftover."""
+    # display:none on use: nothing is drawn
+    pixel = render_pixels(
+        DISPLAY_VISIBILITY_HEAD +
+        '<defs><rect id="r" x="10" y="10" width="80" height="80" '
+        'fill="red"/></defs>'
+        '<use href="#r" display="none"/>' + DISPLAY_VISIBILITY_TAIL)
+    assert pixel((50, 50)) == WHITE
+
+    # display:none on image: nothing is drawn
+    pixel = render_pixels(
+        DISPLAY_VISIBILITY_HEAD +
+        '<image href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUAAAAF'
+        'CAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO9TXL0Y4OHwAA'
+        'AABJRU5ErkJggg==" x="10" y="10" width="80" height="80" '
+        'display="none"/>' + DISPLAY_VISIBILITY_TAIL)
+    assert pixel((50, 50)) == WHITE
+
+    # No markers are drawn for hidden or none-displayed paths
+    for attribute in ('visibility="hidden"', 'display="none"'):
+        pixel = render_pixels(
+            DISPLAY_VISIBILITY_HEAD +
+            '<defs><marker id="m" markerWidth="10" markerHeight="10" '
+            'refX="5" refY="5"><rect width="10" height="10" fill="red"/>'
+            '</marker></defs>'
+            f'<path d="M 20 50 L 80 50" stroke="blue" {attribute} '
+            'marker-start="url(#m)" marker-end="url(#m)"/>' +
+            DISPLAY_VISIBILITY_TAIL)
+        assert pixel((20, 50)) == WHITE
+        assert pixel((80, 50)) == WHITE
+
+    # Siblings before and after a hidden branch are unaffected
+    pixel = render_pixels(
+        DISPLAY_VISIBILITY_HEAD +
+        '<rect x="10" y="10" width="20" height="80" fill="red"/>'
+        '<g display="none">'
+        '<rect x="40" y="10" width="20" height="80" fill="red"/></g>'
+        '<rect x="70" y="10" width="20" height="80" fill="blue"/>' +
+        DISPLAY_VISIBILITY_TAIL)
+    assert pixel((20, 50)) == RED
+    assert pixel((50, 50)) == WHITE
+    assert pixel((80, 50)) == BLUE
+
+
+def test_display_visibility_text_layout():
+    """Hidden text keeps layout, none-displayed text has no layout effect."""
+    # A display:none tspan doesn't advance the text cursor: same as 'AC'
+    with_none = svg2png(bytestring=(
+        DISPLAY_VISIBILITY_HEAD +
+        '<text x="10" y="50" font-size="40" fill="red">'
+        'A<tspan display="none">WWWW</tspan>C</text>' +
+        DISPLAY_VISIBILITY_TAIL).encode())
+    adjacent = svg2png(bytestring=(
+        DISPLAY_VISIBILITY_HEAD +
+        '<text x="10" y="50" font-size="40" fill="red">AC</text>' +
+        DISPLAY_VISIBILITY_TAIL).encode())
+    assert with_none == adjacent
+
+    # A visibility:hidden tspan is not painted but still advances the cursor
+    pixel = render_pixels(
+        DISPLAY_VISIBILITY_HEAD +
+        '<text x="10" y="50" font-size="20" fill="red">'
+        'A<tspan visibility="hidden">WW</tspan>C</text>' +
+        DISPLAY_VISIBILITY_TAIL)
+    assert pixel((45, 45)) == WHITE  # hidden glyphs leave no mark
+    # The trailing C is shifted right, past the hidden glyphs
+    assert any(
+        pixel((x, y)) == RED
+        for x in range(55, 75) for y in range(35, 50))
+
+    # Hidden text leaves no ghost path behind for following shapes
+    pixel = render_pixels(
+        DISPLAY_VISIBILITY_HEAD +
+        '<text x="5" y="90" font-size="80" visibility="hidden" '
+        'fill="red">B</text>'
+        '<rect x="70" y="10" width="20" height="20" fill="blue"/>' +
+        DISPLAY_VISIBILITY_TAIL)
+    assert pixel((30, 70)) == WHITE
+    assert pixel((80, 20)) == BLUE
+
+
+def test_display_visibility_references():
+    """use and clip-path references follow display/visibility semantics."""
+    # Hidden use with an explicitly visible grandchild: grandchild is drawn
+    pixel = render_pixels(
+        DISPLAY_VISIBILITY_HEAD +
+        '<defs><g id="g"><rect x="10" y="10" width="80" height="80" '
+        'fill="red" visibility="visible"/></g></defs>'
+        '<use href="#g" visibility="hidden"/>' + DISPLAY_VISIBILITY_TAIL)
+    assert pixel((50, 50)) == RED
+
+    # A hidden use instance doesn't affect other instances of the same
+    # element (no input tree mutation), and rendering twice is stable
+    svg_string = (
+        DISPLAY_VISIBILITY_HEAD +
+        '<defs><rect id="r" x="10" y="10" width="80" height="80" '
+        'fill="red"/></defs>'
+        '<use href="#r" visibility="hidden"/>'
+        '<use href="#r"/>' + DISPLAY_VISIBILITY_TAIL)
+    assert svg2png(bytestring=svg_string.encode()) == svg2png(
+        bytestring=svg_string.encode())
+    pixel = render_pixels(svg_string)
+    assert pixel((50, 50)) == RED
+
+    # A display:none child of a clipPath contributes no geometry and
+    # doesn't discard the geometry of its siblings
+    pixel = render_pixels(
+        DISPLAY_VISIBILITY_HEAD +
+        '<defs><clipPath id="c">'
+        '<rect x="0" y="0" width="50" height="100"/>'
+        '<rect x="50" y="0" width="50" height="100" display="none"/>'
+        '</clipPath></defs>'
+        '<rect width="100" height="100" fill="red" clip-path="url(#c)"/>' +
+        DISPLAY_VISIBILITY_TAIL)
+    assert pixel((25, 50)) == RED
+    assert pixel((75, 50)) == WHITE

@@ -299,6 +299,14 @@ class Surface(object):
                 ('height' in node and size(self, node['height']) == 0)):
             return
 
+        # 'display: none' removes the element and its whole branch from the
+        # output: nothing is painted, no marker is drawn, no text layout is
+        # performed and no clip geometry is contributed. Definitions have
+        # already been collected by parse_all_defs, so references to elements
+        # in this branch keep working.
+        if node.get('display', 'inline') == 'none':
+            return
+
         # Save context and related attributes
         old_parent_node = self.parent_node
         old_font_size = self.font_size
@@ -403,8 +411,23 @@ class Surface(object):
             (self.cursor_position, self.cursor_d_position,
              self.text_path_width))
 
-        # Only draw known tags
-        if node.tag in TAGS:
+        # Manage visibility. Unlike 'display', 'visibility' is inherited but
+        # can be overridden by descendants: a hidden element is not painted,
+        # but its children with an explicit 'visible' value are. 'collapse'
+        # is treated as 'hidden' for SVG elements.
+        visible = (
+            node.get('visibility', 'visible') not in ('hidden', 'collapse'))
+
+        # Only draw known tags. Tags that only paint their own geometry
+        # (shapes and images) are skipped when hidden; other tags must still
+        # be processed when hidden: text advances the text cursor, and the
+        # children of use/svg/text tags may override visibility and be
+        # painted. When collecting geometry instead of painting (clip paths,
+        # text paths), geometry is needed whatever the visibility is.
+        paints_own_geometry = node.tag in PATH_TAGS or node.tag == 'image'
+        if node.tag in TAGS and (
+                visible or not self.stroke_and_fill or
+                not paints_own_geometry):
             try:
                 TAGS[node.tag](self, node)
             except PointError:
@@ -417,10 +440,6 @@ class Surface(object):
         if opacity < 1 and not node.children:
             stroke_opacity *= opacity
             fill_opacity *= opacity
-
-        # Manage display and visibility
-        display = node.get('display', 'inline') != 'none'
-        visible = display and (node.get('visibility', 'visible') != 'hidden')
 
         # Set font rendering properties
         self.context.set_antialias(SHAPE_ANTIALIAS.get(
@@ -465,14 +484,19 @@ class Surface(object):
                     *self.map_color(paint_color, stroke_opacity))
             self.context.stroke()
             self.context.restore()
-        elif not visible:
+        elif not visible and self.stroke_and_fill:
+            # Discard the geometry built for text layout: it must not leak
+            # into the paths of following siblings. When collecting geometry
+            # (clip paths, text paths), the path is kept instead, as
+            # visibility doesn't apply there.
             self.context.new_path()
 
         # Draw path markers
-        draw_markers(self, node)
+        if visible:
+            draw_markers(self, node)
 
         # Draw children
-        if display and node.tag not in INVISIBLE_TAGS:
+        if node.tag not in INVISIBLE_TAGS:
             for child in node.children:
                 self.draw(child)
 

@@ -3,6 +3,28 @@
 ======
 
 
+Unreleased
+==========
+
+* Fix the handling of 'display' and 'visibility':
+
+  * 'display: none' now removes the whole branch from the output. Previously,
+    'use' and 'image' elements with 'display: none' were still painted,
+    markers of none-displayed paths were still drawn, none-displayed tspans
+    still advanced the text cursor, and a none-displayed child of a clipPath
+    discarded the clip geometry accumulated by its siblings.
+  * 'visibility: hidden' only hides the element itself: descendants with an
+    explicit 'visibility: visible' (presentation attribute, inline style or
+    stylesheet rule, with the usual CSS priority) are painted, including
+    through 'use' references and nested text. Hidden text still advances the
+    text cursor but leaves no ghost geometry behind, and markers of hidden
+    paths are no longer drawn.
+  * 'visibility: collapse' is treated as 'hidden'.
+  * The semantics are decided at rendering time without modifying the
+    document tree, so reused elements ('use', clip paths) and repeated
+    renders of the same document behave consistently.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 
