@@ -1,0 +1,68 @@
+{
+  "renderer": "/Users/lichao/.local/share/user-feedback/graphics/20261117/seed/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 3,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "gradient-definition-inherits-red",
+      "point": [
+        50,
+        50
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "paint-target-colour-does-not-replace-gradient-definition",
+      "point": [
+        170,
+        50
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "stop-local-colour-overrides-inherited-colour",
+      "point": [
+        50,
+        50
+      ],
+      "expected": [
+        0,
+        255,
+        0,
+        255
+      ],
+      "actual": [
+        0,
+        255,
+        0,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}

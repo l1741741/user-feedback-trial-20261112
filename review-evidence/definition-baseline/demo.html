@@ -1,0 +1,62 @@
+<!doctype html><meta charset="utf-8"><title>色标颜色继承核验</title><style>body{font:20px system-ui;margin:30px;background:#eee}section{display:inline-block;vertical-align:top;background:white;padding:20px;margin:10px}img{width:480px;image-rendering:pixelated;border:1px solid #aaa}pre{white-space:pre-wrap}</style><h1>色标颜色继承：输入与本次PNG输出</h1><p>定义色为红色时，左右图形都应使用红色渐变；下方局部覆盖应为绿色。</p><section><h2>SVG输入</h2><img src="definition.svg"><h2>PNG实际输出</h2><img src="definition.png"></section><section><h2>色标局部覆盖SVG</h2><img src="stop-override.svg"><h2>PNG实际输出</h2><img src="stop-override.png"></section><pre>[
+  {
+    "name": "gradient-definition-inherits-red",
+    "point": [
+      50,
+      50
+    ],
+    "expected": [
+      255,
+      0,
+      0,
+      255
+    ],
+    "actual": [
+      255,
+      0,
+      0,
+      255
+    ],
+    "passed": true
+  },
+  {
+    "name": "paint-target-colour-does-not-replace-gradient-definition",
+    "point": [
+      170,
+      50
+    ],
+    "expected": [
+      255,
+      0,
+      0,
+      255
+    ],
+    "actual": [
+      255,
+      0,
+      0,
+      255
+    ],
+    "passed": true
+  },
+  {
+    "name": "stop-local-colour-overrides-inherited-colour",
+    "point": [
+      50,
+      50
+    ],
+    "expected": [
+      0,
+      255,
+      0,
+      255
+    ],
+    "actual": [
+      0,
+      255,
+      0,
+      255
+    ],
+    "passed": true
+  }
+]</pre>

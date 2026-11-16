@@ -1,0 +1,28 @@
+{
+  "slug": "currentcolor-inherit",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12583-currentcolor-inherit/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 2,
+  "failures": 1,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "same-symbol-two-currentcolor-themes",
+      "passed": true
+    },
+    {
+      "name": "currentcolor-gradient-stops",
+      "passed": false,
+      "error": "(50, 50, (0, 0, 0, 255), (255, 0, 0, 255))",
+      "traceback": "Traceback (most recent call last):\n  File \"/Users/lichao/Desktop/xpert/user-feedback/state/graphics-production-20261117-002615/acceptance/render_check.py\", line 22, in case\n    try:fn();CASES.append({'name':name,'passed':True})\n        ^^^^\n  File \"/Users/lichao/Desktop/xpert/user-feedback/state/graphics-production-20261117-002615/acceptance/render_check.py\", line 136, in stop\n    a=render('stop-color',svg('<defs><linearGradient id=\"g\" color=\"red\"><stop stop-color=\"currentColor\"/><stop offset=\"1\" stop-color=\"currentColor\"/></linearGradient></defs><rect width=\"100\" height=\"100\" fill=\"url(#g)\"/>'));px(a,50,50,red)\n                                                                                                                                                                                                                                ^^^^^^^^^^^^^^^\n  File \"/Users/lichao/Desktop/xpert/user-feedback/state/graphics-production-20261117-002615/acceptance/render_check.py\", line 16, in px\n    value=im.getpixel((x,y));assert max(abs(a-b) for a,b in zip(value,expected))<=tol,(x,y,value,expected)\n                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: (50, 50, (0, 0, 0, 255), (255, 0, 0, 255))\n"
+    }
+  ],
+  "images": [
+    "ordinary",
+    "theme-use",
+    "stop-color"
+  ]
+}

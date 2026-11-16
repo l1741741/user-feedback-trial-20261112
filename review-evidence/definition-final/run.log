@@ -1,0 +1,68 @@
+{
+  "renderer": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12583-currentcolor-inherit/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 0,
+  "failed": 3,
+  "checks": [
+    {
+      "name": "gradient-definition-inherits-red",
+      "point": [
+        50,
+        50
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "passed": false
+    },
+    {
+      "name": "paint-target-colour-does-not-replace-gradient-definition",
+      "point": [
+        170,
+        50
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": false
+    },
+    {
+      "name": "stop-local-colour-overrides-inherited-colour",
+      "point": [
+        50,
+        50
+      ],
+      "expected": [
+        0,
+        255,
+        0,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": false
+    }
+  ]
+}
