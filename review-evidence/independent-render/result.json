@@ -1,0 +1,28 @@
+{
+  "slug": "path-arcs",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12591-path-arcs/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 3,
+  "failures": 0,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "zero-radius-arc-is-line",
+      "passed": true
+    },
+    {
+      "name": "negative-radii-use-absolute-values",
+      "passed": true
+    }
+  ],
+  "images": [
+    "ordinary",
+    "zero-arc",
+    "zero-line",
+    "negative-radius",
+    "positive-radius"
+  ]
+}

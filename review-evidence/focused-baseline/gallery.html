@@ -1,0 +1,32 @@
+<!doctype html><meta charset="utf-8"><title>SVG渲染核验 12591</title><style>body{font:18px system-ui;background:#ddd;margin:24px}section{display:inline-block;padding:20px;margin:10px;background:white;vertical-align:top}img{width:440px;border:1px solid #888;background:white;image-rendering:pixelated}pre{white-space:pre-wrap}</style><h1>SVG输入与本次PNG输出 12591</h1><pre>{
+  "uid": "12591",
+  "source": "/Users/lichao/.local/share/user-feedback/graphics/20261117/seed/cairosvg/__init__.py",
+  "tests": 5,
+  "passed": 2,
+  "failed": 3,
+  "checks": [
+    {
+      "name": "negative-radii--60-30-0",
+      "passed": false,
+      "error": "images differ"
+    },
+    {
+      "name": "negative-radii-60--30-45",
+      "passed": false,
+      "error": "images differ"
+    },
+    {
+      "name": "negative-radii--60--30-75",
+      "passed": true
+    },
+    {
+      "name": "negative-radii--20-10-30",
+      "passed": false,
+      "error": "images differ"
+    },
+    {
+      "name": "same-endpoint-arc-omitted-before-line",
+      "passed": true
+    }
+  ]
+}</pre><section><h2>arc--60-30-0</h2><p>SVG输入</p><img src="arc--60-30-0.svg"><p>PNG输出</p><img src="arc--60-30-0.png"></section><section><h2>arc--60-30-0-positive</h2><p>SVG输入</p><img src="arc--60-30-0-positive.svg"><p>PNG输出</p><img src="arc--60-30-0-positive.png"></section><section><h2>arc-60--30-45</h2><p>SVG输入</p><img src="arc-60--30-45.svg"><p>PNG输出</p><img src="arc-60--30-45.png"></section><section><h2>arc-60--30-45-positive</h2><p>SVG输入</p><img src="arc-60--30-45-positive.svg"><p>PNG输出</p><img src="arc-60--30-45-positive.png"></section><section><h2>arc--60--30-75</h2><p>SVG输入</p><img src="arc--60--30-75.svg"><p>PNG输出</p><img src="arc--60--30-75.png"></section><section><h2>arc--60--30-75-positive</h2><p>SVG输入</p><img src="arc--60--30-75-positive.svg"><p>PNG输出</p><img src="arc--60--30-75-positive.png"></section><section><h2>arc--20-10-30</h2><p>SVG输入</p><img src="arc--20-10-30.svg"><p>PNG输出</p><img src="arc--20-10-30.png"></section><section><h2>arc--20-10-30-positive</h2><p>SVG输入</p><img src="arc--20-10-30-positive.svg"><p>PNG输出</p><img src="arc--20-10-30-positive.png"></section><section><h2>omitted-arc</h2><p>SVG输入</p><img src="omitted-arc.svg"><p>PNG输出</p><img src="omitted-arc.png"></section><section><h2>omitted-reference</h2><p>SVG输入</p><img src="omitted-reference.svg"><p>PNG输出</p><img src="omitted-reference.png"></section>

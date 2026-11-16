@@ -1,0 +1,24 @@
+{
+  "task_id": "render-20261117-12591-path-arcs",
+  "final_sha": "115e2053c5587267dcc94fbe3c0ff1ad340c92dd",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/render-20261117-12591-path-arcs/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12591-path-arcs/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_path_arcs.py"
+  ],
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12591-path-arcs/local-frozen-source",
+  "log": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12591-path-arcs/independent-validation.log",
+  "exit_code": 0,
+  "tests": 82,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0
+}

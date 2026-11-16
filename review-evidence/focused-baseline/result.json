@@ -1,0 +1,32 @@
+{
+  "uid": "12591",
+  "source": "/Users/lichao/.local/share/user-feedback/graphics/20261117/seed/cairosvg/__init__.py",
+  "tests": 5,
+  "passed": 2,
+  "failed": 3,
+  "checks": [
+    {
+      "name": "negative-radii--60-30-0",
+      "passed": false,
+      "error": "images differ"
+    },
+    {
+      "name": "negative-radii-60--30-45",
+      "passed": false,
+      "error": "images differ"
+    },
+    {
+      "name": "negative-radii--60--30-75",
+      "passed": true
+    },
+    {
+      "name": "negative-radii--20-10-30",
+      "passed": false,
+      "error": "images differ"
+    },
+    {
+      "name": "same-endpoint-arc-omitted-before-line",
+      "passed": true
+    }
+  ]
+}

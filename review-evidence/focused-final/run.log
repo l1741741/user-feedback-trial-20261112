@@ -1,0 +1,29 @@
+{
+  "uid": "12591",
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12591-path-arcs/local-frozen-source/cairosvg/__init__.py",
+  "tests": 5,
+  "passed": 5,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "negative-radii--60-30-0",
+      "passed": true
+    },
+    {
+      "name": "negative-radii-60--30-45",
+      "passed": true
+    },
+    {
+      "name": "negative-radii--60--30-75",
+      "passed": true
+    },
+    {
+      "name": "negative-radii--20-10-30",
+      "passed": true
+    },
+    {
+      "name": "same-endpoint-arc-omitted-before-line",
+      "passed": true
+    }
+  ]
+}
