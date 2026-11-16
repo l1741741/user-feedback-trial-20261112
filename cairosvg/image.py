@@ -25,7 +25,12 @@ def image(surface, node):
     if not base_url and node.url:
         base_url = os.path.dirname(node.url) + '/'
     url = parse_url(node.get_href(), base_url)
-    image_bytes = node.fetch_url(url, 'image/*')
+    try:
+        image_bytes = node.fetch_url(url, 'image/*')
+    except Exception:
+        # A resource that cannot be fetched is a broken image: skip it and
+        # let the sibling nodes be drawn normally.
+        return
 
     if len(image_bytes) < 5:
         return
@@ -40,51 +45,25 @@ def image(surface, node):
         image_bytes.startswith((b'<svg ', b'<?xml', b'<!DOC', b'\x1f\x8b'))
         or b'<svg' in image_bytes
     ):
-        if 'x' in node:
-            del node['x']
-        if 'y' in node:
-            del node['y']
-        tree = Tree(
-            url=url.geturl(), url_fetcher=node.url_fetcher,
-            bytestring=image_bytes, tree_cache=surface.tree_cache,
-            unsafe=node.unsafe)
-        tree_width, tree_height, viewbox = node_format(
-            surface, tree, reference=False)
-        if viewbox:
-            tree_scale_x = tree_width / viewbox[2]
-            tree_scale_y = tree_height / viewbox[3]
-        else:
-            tree_width = tree['width'] = width
-            tree_height = tree['height'] = height
-            tree_scale_x = tree_scale_y = 1
-        node.image_width = tree_width or width
-        node.image_height = tree_height or height
-        scale_x, scale_y, translate_x, translate_y = preserve_ratio(
-            surface, node)
-
-        # Clip image region
-        surface.context.rectangle(x, y, width, height)
-        surface.context.clip()
-
-        # Draw image
-        surface.context.save()
-        surface.context.translate(x, y)
-        surface.context.translate(*surface.context.get_current_point())
-        surface.context.scale(scale_x * tree_scale_x, scale_y * tree_scale_y)
-        surface.context.translate(translate_x, translate_y)
-        surface.draw(tree)
-        surface.context.restore()
+        draw_svg_image(
+            surface, node, url, image_bytes, x, y, width, height)
         return
     else:
-        png_file = BytesIO()
-        image = ImageOps.exif_transpose(Image.open(BytesIO(image_bytes)))
+        try:
+            png_file = BytesIO()
+            image = ImageOps.exif_transpose(
+                Image.open(BytesIO(image_bytes)))
 
-        if surface.map_image:
-            image = surface.map_image(image)
-        if image.mode == "CMYK":
-            image = image.convert("RGB")
-        image.save(png_file, 'PNG')
-        png_file.seek(0)
+            if surface.map_image:
+                image = surface.map_image(image)
+            if image.mode == "CMYK":
+                image = image.convert("RGB")
+            image.save(png_file, 'PNG')
+            png_file.seek(0)
+        except Exception:
+            # A raster image that cannot be decoded is a broken image: skip
+            # it and keep drawing the sibling nodes.
+            return
 
     image_surface = cairo.ImageSurface.create_from_png(png_file)
     image_surface.pattern = cairo.SurfacePattern(image_surface)
@@ -115,6 +94,114 @@ def image(surface, node):
     surface.context.set_source(image_surface.pattern)
     surface.context.paint_with_alpha(opacity)
     surface.context.restore()
+
+
+def draw_svg_image(surface, node, url, image_bytes, x, y, width, height):
+    """Draw an embedded SVG document in the image region.
+
+    The embedded document is parsed and drawn with its own coordinates,
+    styles and definitions: same-id gradients, clip paths and other
+    definitions of different documents never collide, and the relative
+    resources of the embedded document are resolved against its own URL.
+
+    Any parsing or drawing failure turns the embedded document into a
+    broken image and leaves the parent document rendering untouched.
+
+    """
+    if width <= 0 or height <= 0:
+        return
+    try:
+        tree = Tree(
+            url=url.geturl(), url_fetcher=node.url_fetcher,
+            bytestring=image_bytes, tree_cache=surface.tree_cache,
+            unsafe=node.unsafe)
+        tree_width, tree_height, _ = node_format(
+            surface, tree, reference=False)
+        # An embedded document without an intrinsic size (no width/height,
+        # no viewBox) uses the image region as its viewport, as required
+        # by the SVG specification for referenced SVG documents.
+        if not tree_width:
+            tree_width = width
+        if not tree_height:
+            tree_height = height
+        # The embedded document gets the image region as its own viewport:
+        # its viewBox and preserveAspectRatio are then resolved by the
+        # regular nested <svg> drawing, independently of the parent. The
+        # tree may be cached and reused, so the original attributes are
+        # restored after drawing.
+        tree_width_attr = tree.get('width')
+        tree_height_attr = tree.get('height')
+        tree['width'] = str(width)
+        tree['height'] = str(height)
+        node.image_width = tree_width
+        node.image_height = tree_height
+        # The aspect-ratio alignment of an embedded SVG document is defined
+        # by the document itself (its own preserveAspectRatio), not by the
+        # image node: temporarily expose it through the node so that the
+        # generic ratio-preservation logic applies the document's rule.
+        document_ratio = tree.get('preserveAspectRatio', 'xMidYMid')
+        image_ratio = node.get('preserveAspectRatio')
+        node['preserveAspectRatio'] = document_ratio
+        try:
+            scale_x, scale_y, translate_x, translate_y = preserve_ratio(
+                surface, node)
+        finally:
+            if image_ratio is None:
+                del node['preserveAspectRatio']
+            else:
+                node['preserveAspectRatio'] = image_ratio
+        # Alignment is applied once, at the image level above. Inside the
+        # nested <svg> drawing the viewBox must therefore be mapped without
+        # a second alignment. The tree may be cached and reused when the
+        # same document is embedded several times, so the change is
+        # restored after drawing.
+        tree_ratio = tree.get('preserveAspectRatio')
+        tree['preserveAspectRatio'] = 'none'
+    except Exception:
+        # Broken embedded document: the Cairo context is untouched, skip
+        # the image and let the sibling nodes be drawn.
+        return
+
+    try:
+        surface.context.save()
+        # Clip the image region: content overflowing the region is
+        # never painted on the parent document.
+        surface.context.rectangle(x, y, width, height)
+        surface.context.clip()
+        # Map the document's intrinsic viewport to the image region using
+        # the document's own meet/slice/none alignment (computed above);
+        # the nested <svg> drawing then maps its viewBox without a second
+        # alignment.
+        surface.context.translate(x, y)
+        surface.context.translate(*surface.context.get_current_point())
+        surface.context.scale(scale_x, scale_y)
+        surface.context.translate(translate_x, translate_y)
+        opacity = float(node.get('opacity', 1))
+        if opacity < 1:
+            # Paint the whole embedded document as a group so that the
+            # image opacity applies to the composited result.
+            surface.context.push_group()
+        with surface.isolated_definitions():
+            surface.draw(tree)
+        if opacity < 1:
+            surface.context.pop_group_to_source()
+            surface.context.paint_with_alpha(opacity)
+    except Exception:
+        # A drawing failure must not abort the parent document: the
+        # context is restored below and the image is skipped.
+        pass
+    finally:
+        surface.context.restore()
+        # Restore the cached tree so another embedding of the same
+        # document starts from its original attributes.
+        for name, original in (
+                ('width', tree_width_attr),
+                ('height', tree_height_attr),
+                ('preserveAspectRatio', tree_ratio)):
+            if original is None:
+                tree.pop(name, None)
+            else:
+                tree[name] = original
 
 
 def invert_image(img):

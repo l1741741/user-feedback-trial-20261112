@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<!-- Orange icon: same ids "paint"/"frame" as the other documents,
+     different colors and a different (rounded-rect) clip shape. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"
+     viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="paint" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffaa22"/>
+      <stop offset="1" stop-color="#883300"/>
+    </linearGradient>
+    <clipPath id="frame">
+      <rect x="6" y="6" width="52" height="52" rx="10"/>
+    </clipPath>
+  </defs>
+  <rect x="0" y="0" width="64" height="64" fill="url(#paint)"
+        clip-path="url(#frame)"/>
+</svg>

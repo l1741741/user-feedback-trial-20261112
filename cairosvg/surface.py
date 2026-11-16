@@ -5,6 +5,7 @@ Cairo surface creators.
 
 import copy
 import io
+from contextlib import contextmanager
 
 import cairocffi as cairo
 
@@ -282,6 +283,39 @@ class Surface(object):
         """Parse a color ``string`` and apply ``map_rgba`` function to it."""
         rgba = color(string, opacity)
         return self.map_rgba(rgba) if self.map_rgba else rgba
+
+    @contextmanager
+    def isolated_definitions(self):
+        """Use isolated definition dictionaries while drawing an image.
+
+        An embedded SVG document is an independent document: its markers,
+        gradients, patterns, masks, clip paths, filters and image
+        definitions must be resolved against itself, instead of sharing the
+        dictionaries of the parent surface. Definitions with the same ``id``
+        in different documents must never collide or leak to the parent.
+
+        The parent dictionaries are saved, replaced by empty ones for the
+        duration of the nested drawing and restored afterwards, so that
+        parent and sibling elements keep their own definitions.
+
+        """
+        parent_definitions = {
+            name: getattr(self, name)
+            for name in (
+                'markers', 'gradients', 'patterns', 'masks', 'paths',
+                'filters', 'images')}
+        self.markers = {}
+        self.gradients = {}
+        self.patterns = {}
+        self.masks = {}
+        self.paths = {}
+        self.filters = {}
+        self.images = {}
+        try:
+            yield
+        finally:
+            for name, definitions in parent_definitions.items():
+                setattr(self, name, definitions)
 
     def draw(self, node):
         """Draw ``node`` and its children."""

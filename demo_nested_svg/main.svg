@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<!--
+  Offline nested-SVG demo: one main document embedding two icon documents.
+
+  All three documents define a gradient with the SAME id "paint" and a
+  clip path with the SAME id "frame". Each document must resolve its
+  references against itself:
+    - icon_green.svg: green gradient, transparent outer ring (clip)
+    - icon_orange.svg: orange gradient, transparent outer ring (clip)
+    - main.svg (this): blue gradient used by the bottom rectangle
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="160"
+     viewBox="0 0 200 160">
+  <defs>
+    <linearGradient id="paint" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1133ff"/>
+      <stop offset="1" stop-color="#000066"/>
+    </linearGradient>
+    <clipPath id="frame">
+      <rect x="0" y="0" width="200" height="160"/>
+    </clipPath>
+  </defs>
+
+  <!-- Two embedded icons, each an independent SVG document -->
+  <image x="20" y="15" width="70" height="70" href="icon_green.svg"/>
+  <image x="110" y="15" width="70" height="70" href="icon_orange.svg"/>
+
+  <!-- Main-document shapes use the main document's own same-id defs -->
+  <rect x="20" y="100" width="160" height="45" rx="6"
+        fill="url(#paint)" clip-path="url(#frame)"/>
+  <rect x="20" y="15" width="70" height="70" fill="none"
+        stroke="#222222" stroke-width="1"/>
+  <rect x="110" y="15" width="70" height="70" fill="none"
+        stroke="#222222" stroke-width="1"/>
+</svg>
