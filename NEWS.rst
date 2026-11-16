@@ -3,6 +3,19 @@
 ======
 
 
+Unreleased
+==========
+
+* Add support of the SVG2 ``paint-order`` property on shapes, paths and text.
+  The relative order of the fill, stroke and markers can now be set with the
+  ``normal`` keyword or any ordered subset of ``fill``, ``stroke`` and
+  ``markers``; omitted operations keep their default position
+  (fill → stroke → markers). The property is inherited like other
+  presentation attributes and can be set from a ``style`` attribute or a
+  presentation attribute, with invalid or partially invalid declarations
+  falling back to the default order instead of hiding the node.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

@@ -15,7 +15,7 @@ from .defs import (
     parse_all_defs, pattern, prepare_filter, radial_gradient, use)
 from .helpers import (
     UNITS, PointError, clip_rect, node_format, normalize, paint,
-    preserve_ratio, size, transform)
+    paint_order, preserve_ratio, size, transform)
 from .image import image, invert_image
 from .parser import Tree
 from .path import draw_markers, path
@@ -283,6 +283,44 @@ class Surface(object):
         rgba = color(string, opacity)
         return self.map_rgba(rgba) if self.map_rgba else rgba
 
+    def paint_fill(self, node, fill_opacity, save_cursor):
+        """Fill the current path, keeping it for further painting.
+
+        Unlike Cairo's ``fill``, ``fill_preserve`` leaves the path in place so
+        that the stroke and the markers (which may be painted first according
+        to ``paint-order``) can still use it. The path is cleared once every
+        painting operation has been performed (see :meth:`draw`).
+
+        """
+        self.context.save()
+        paint_source, paint_color = paint(node.get('fill', 'black'))
+        if node.get('fill-rule') == 'evenodd':
+            self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+        if not gradient_or_pattern(self, node, paint_source, fill_opacity):
+            self.context.set_source_rgba(
+                *self.map_color(paint_color, fill_opacity))
+        if TAGS[node.tag] == text:
+            self.cursor_position = save_cursor[0]
+            self.cursor_d_position = save_cursor[1]
+            self.text_path_width = save_cursor[2]
+            text(self, node, draw_as_text=True)
+        else:
+            self.context.fill_preserve()
+        self.context.restore()
+
+    def paint_stroke(self, node, stroke_opacity):
+        """Stroke the current path, keeping it for further painting."""
+        self.context.save()
+        self.context.set_line_width(
+            size(self, node.get('stroke-width', '1')))
+        paint_source, paint_color = paint(node.get('stroke'))
+        if not gradient_or_pattern(
+                self, node, paint_source, stroke_opacity):
+            self.context.set_source_rgba(
+                *self.map_color(paint_color, stroke_opacity))
+        self.context.stroke_preserve()
+        self.context.restore()
+
     def draw(self, node):
         """Draw ``node`` and its children."""
 
@@ -435,41 +473,28 @@ class Surface(object):
             node.get('text-rendering'), cairo.HINT_METRICS_DEFAULT))
         self.context.set_font_options(font_options)
 
-        # Fill and stroke
+        # Fill, stroke and markers, in the order defined by paint-order
+        markers_drawn = False
         if self.stroke_and_fill and visible and node.tag in TAGS:
-            # Fill
-            self.context.save()
-            paint_source, paint_color = paint(node.get('fill', 'black'))
-            if node.get('fill-rule') == 'evenodd':
-                self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
-            if not gradient_or_pattern(self, node, paint_source, fill_opacity):
-                self.context.set_source_rgba(
-                    *self.map_color(paint_color, fill_opacity))
-            if TAGS[node.tag] == text:
-                self.cursor_position = save_cursor[0]
-                self.cursor_d_position = save_cursor[1]
-                self.text_path_width = save_cursor[2]
-                text(self, node, draw_as_text=True)
-            else:
-                self.context.fill_preserve()
-            self.context.restore()
-
-            # Stroke
-            self.context.save()
-            self.context.set_line_width(
-                size(self, node.get('stroke-width', '1')))
-            paint_source, paint_color = paint(node.get('stroke'))
-            if not gradient_or_pattern(
-                    self, node, paint_source, stroke_opacity):
-                self.context.set_source_rgba(
-                    *self.map_color(paint_color, stroke_opacity))
-            self.context.stroke()
-            self.context.restore()
+            for operation in paint_order(node.get('paint-order')):
+                if operation == 'fill':
+                    self.paint_fill(
+                        node, fill_opacity, save_cursor)
+                elif operation == 'stroke':
+                    self.paint_stroke(node, stroke_opacity)
+                else:  # markers
+                    draw_markers(self, node)
+                    markers_drawn = True
+            # Every painting operation preserved the path; clear it now so
+            # that it does not leak into the next node.
+            self.context.new_path()
         elif not visible:
             self.context.new_path()
 
-        # Draw path markers
-        draw_markers(self, node)
+        # Draw path markers when they were not part of the paint-order loop
+        # above (e.g. unknown tags or nodes with stroke_and_fill disabled).
+        if not markers_drawn:
+            draw_markers(self, node)
 
         # Draw children
         if display and node.tag not in INVISIBLE_TAGS:

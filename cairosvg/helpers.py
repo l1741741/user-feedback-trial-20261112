@@ -22,9 +22,43 @@ PAINT_URL = re.compile(r'(url\(.+\)) *(.*)')
 PATH_LETTERS = 'achlmqstvzACHLMQSTVZ'
 RECT = re.compile(r'rect\( ?(.+?) ?\)')
 
+# Painting operations of the ``paint-order`` property, in their default
+# (``normal``) order. See https://www.w3.org/TR/SVG2/painting.html#PaintOrder
+PAINT_OPERATIONS = ('fill', 'stroke', 'markers')
+DEFAULT_PAINT_ORDER = PAINT_OPERATIONS
+
 
 class PointError(Exception):
     """Exception raised when parsing a point fails."""
+
+
+def paint_order(value):
+    """Parse a ``paint-order`` value.
+
+    Return a tuple giving the painting order, always containing the three
+    ``fill``, ``stroke`` and ``markers`` operations.
+
+    The property is inherited and defaults to ``normal``, meaning
+    ``('fill', 'stroke', 'markers')``. The listed keywords are painted in the
+    given order; omitted keywords are appended in their default position.
+    Unknown keywords, duplicates or any other invalid value make the whole
+    declaration invalid, in which case the default order is returned so that
+    the node is still painted.
+
+    See https://www.w3.org/TR/SVG2/painting.html#PaintOrder
+
+    """
+    if not value:
+        return DEFAULT_PAINT_ORDER
+    order = []
+    for token in value.strip().lower().replace(',', ' ').split():
+        if token not in PAINT_OPERATIONS or token in order:
+            return DEFAULT_PAINT_ORDER
+        order.append(token)
+    for operation in PAINT_OPERATIONS:
+        if operation not in order:
+            order.append(operation)
+    return tuple(order)
 
 
 def distance(x1, y1, x2, y2):

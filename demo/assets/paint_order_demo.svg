@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="560"
+     viewBox="0 0 640 560" font-family="sans-serif">
+  <title>paint-order demonstration</title>
+  <rect width="640" height="560" fill="white"/>
+
+  <!--
+    Each row draws the same open rounded-rectangle path, with the same fill,
+    stroke width and red square markers, shifted down with a translate. Only
+    the paint-order attribute differs, so all visible differences at the
+    overlaps come from the painting order alone.
+  -->
+  <defs>
+    <marker id="flag" markerWidth="22" markerHeight="22" refX="11"
+            refY="11" markerUnits="userSpaceOnUse">
+      <rect x="0" y="0" width="22" height="22" fill="#d7191c"/>
+    </marker>
+  </defs>
+
+  <!-- Row 1: default order = fill, then stroke, then markers -->
+  <text x="30" y="40" font-size="20" fill="#222">
+    default: fill, then stroke, then markers</text>
+  <path d="M110 90 h340 a40 40 0 0 1 0 80 h-340 a40 40 0 0 1 0 -80"
+        fill="#ffffbf" stroke="#2c7bb6" stroke-width="24"
+        marker-start="url(#flag)" marker-end="url(#flag)"/>
+
+  <!-- Row 2: stroke painted first, then fill; omitted markers stay last -->
+  <text x="30" y="220" font-size="20" fill="#222">
+    paint-order="stroke": stroke, then fill, then markers</text>
+  <g transform="translate(0 180)">
+    <path d="M110 90 h340 a40 40 0 0 1 0 80 h-340 a40 40 0 0 1 0 -80"
+          fill="#ffffbf" stroke="#2c7bb6" stroke-width="24"
+          marker-start="url(#flag)" marker-end="url(#flag)"
+          paint-order="stroke"/>
+  </g>
+
+  <!-- Row 3: markers painted first, then fill, then stroke -->
+  <text x="30" y="400" font-size="20" fill="#222">
+    paint-order="markers": markers, then fill, then stroke</text>
+  <g transform="translate(0 360)">
+    <path d="M110 90 h340 a40 40 0 0 1 0 80 h-340 a40 40 0 0 1 0 -80"
+          fill="#ffffbf" stroke="#2c7bb6" stroke-width="24"
+          marker-start="url(#flag)" marker-end="url(#flag)"
+          paint-order="markers"/>
+  </g>
+</svg>
