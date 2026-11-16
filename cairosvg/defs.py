@@ -7,7 +7,7 @@ This module handles clips, gradients, masks, patterns and external nodes.
 
 from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
 from .features import match_features
-from .helpers import paint, size, transform
+from .helpers import current_color, paint, size, transform
 from .parser import Tree
 from .shapes import rect
 from .surface import cairo
@@ -203,8 +203,10 @@ def draw_gradient(surface, node, name, opacity):
     offset = 0
     for child in gradient_node.children:
         offset = max(offset, size(surface, child.get('offset'), 1))
+        # currentColor on a stop is resolved against the color of the
+        # element being painted, not of the gradient definition
         stop_color = surface.map_color(
-            child.get('stop-color', 'black'),
+            current_color(node, child.get('stop-color', 'black')),
             float(child.get('stop-opacity', 1)) * opacity)
         gradient_pattern.add_color_stop_rgba(offset, *stop_color)
 
@@ -326,7 +328,7 @@ def apply_filter_after_painting(surface, node, name):
                 height *= size(surface, child.get('height', 0), 1)
                 rect(surface, dict(x=x, y=y, width=width, height=height))
                 surface.context.set_source_rgba(*surface.map_color(
-                    paint(child.get('flood-color'))[1],
+                    current_color(node, paint(child.get('flood-color'))[1]),
                     float(child.get('flood-opacity', 1))))
                 surface.context.fill()
                 surface.context.restore()
@@ -370,6 +372,4 @@ def use(surface, node):
             tree['width'], tree['height'] = node['width'], node['height']
 
     surface.draw(tree)
-    node.get('fill', None)
-    node.get('stroke', None)
     surface.context.restore()

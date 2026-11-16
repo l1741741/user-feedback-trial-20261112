@@ -45,15 +45,6 @@ NOT_INHERITED_ATTRIBUTES = frozenset((
     'href',
 ))
 
-COLOR_ATTRIBUTES = frozenset((
-    'fill',
-    'flood-color',
-    'lighting-color',
-    'stop-color',
-    'stroke',
-))
-
-
 def handle_white_spaces(string, preserve):
     """Handle white spaces in text nodes.
 
@@ -206,10 +197,9 @@ class Node(dict):
                 for name, value in declarations:
                     self[name] = value.strip()
 
-        # Replace currentColor by a real color value
-        for attribute in COLOR_ATTRIBUTES:
-            if self.get(attribute) == 'currentColor':
-                self[attribute] = self.get('color', 'black')
+        # Keep currentColor as-is: it is resolved at paint time, against the
+        # color of the context where the element is actually drawn (which may
+        # be a use instance), not against the color at the definition place.
 
         # Replace inherit by the parent value
         for attribute in [

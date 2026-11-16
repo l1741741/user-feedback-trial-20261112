@@ -14,8 +14,8 @@ from .defs import (
     filter_, gradient_or_pattern, linear_gradient, marker, mask, paint_mask,
     parse_all_defs, pattern, prepare_filter, radial_gradient, use)
 from .helpers import (
-    UNITS, PointError, clip_rect, node_format, normalize, paint,
-    preserve_ratio, size, transform)
+    UNITS, PointError, clip_rect, current_color, node_format, normalize,
+    paint, preserve_ratio, size, transform)
 from .image import image, invert_image
 from .parser import Tree
 from .path import draw_markers, path
@@ -440,6 +440,7 @@ class Surface(object):
             # Fill
             self.context.save()
             paint_source, paint_color = paint(node.get('fill', 'black'))
+            paint_color = current_color(node, paint_color)
             if node.get('fill-rule') == 'evenodd':
                 self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
             if not gradient_or_pattern(self, node, paint_source, fill_opacity):
@@ -459,6 +460,7 @@ class Surface(object):
             self.context.set_line_width(
                 size(self, node.get('stroke-width', '1')))
             paint_source, paint_color = paint(node.get('stroke'))
+            paint_color = current_color(node, paint_color)
             if not gradient_or_pattern(
                     self, node, paint_source, stroke_opacity):
                 self.context.set_source_rgba(

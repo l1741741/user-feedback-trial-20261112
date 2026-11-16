@@ -32,6 +32,27 @@ def distance(x1, y1, x2, y2):
     return hypot(x2 - x1, y2 - y1)
 
 
+def current_color(node, value):
+    """Resolve ``currentColor`` in ``value`` against ``node``'s color.
+
+    The ``color`` property is inherited through the node tree, including
+    through ``use`` instances, so reading it at paint time gives the color of
+    the context where the element is actually drawn, not the color of the
+    context where it was defined. Shared definitions (symbols, gradients)
+    are never modified.
+
+    """
+    if not value or value.strip().lower() != 'currentcolor':
+        return value
+    while node is not None:
+        color = node.get('color')
+        if color and color.strip().lower() != 'currentcolor':
+            return color
+        # ``color: currentColor`` means the inherited color value: walk up
+        node = node.parent
+    return 'black'
+
+
 def paint(value):
     """Extract from value an uri and a color.
 
