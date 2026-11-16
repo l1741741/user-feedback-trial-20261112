@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="180">
+  <defs>
+    <linearGradient id="r" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="yellow"/>
+      <stop offset="0.5" stop-color="seagreen"/>
+      <stop offset="1" stop-color="purple"/>
+    </linearGradient>
+  </defs>
+  <rect width="220" height="180" fill="white"/>
+  <!-- Smooth cubic S: the old code used the endpoint-only box for the S
+       segment, so its vertical gradient was stretched over y=40..150 instead
+       of the tight y=53.7..150. -->
+  <path d="M20 120 C40 40 80 40 100 80 S160 120 180 60 L180 150 L20 150 Z"
+        fill="url(#r)"/>
+</svg>

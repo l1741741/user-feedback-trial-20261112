@@ -1,13 +1,30 @@
 """
-Calculate bounding box for SVG shapes and paths.
+Calculate bounding boxes for SVG shapes and paths.
 
-A bounding box is a (minx, miny, width, height) tuple.
+A bounding box is a ``(minx, miny, width, height)`` tuple.
+
+Two different notions must not be mixed up:
+
+* The boxes computed here are *geometry* (fill) bounding boxes expressed in the
+  local user-space coordinate system of the node. They only follow the path's
+  geometry, never its style: stroke width, markers, line caps and joins do not
+  extend them. They are the boxes used by the ``objectBoundingBox`` unit of
+  gradients, patterns and clip paths, see
+  https://www.w3.org/TR/SVG/coords.html#ObjectBoundingBox
+* A *stroke* bounding box would additionally include the painted stroke,
+  markers and line caps. Cairo computes that one itself when painting (for
+  example through ``fill_extents`` / ``stroke_extents``); this module never
+  tries to emulate it and never looks at paint attributes.
+
+The computation is purely analytical and read-only: it parses the geometry
+attributes of a node without creating any Cairo path, mutating the node (apart
+from caching the result on it) or changing the current point used by later
+drawing operations.
 
 """
 
 from math import (
-    acos, atan, copysign, cos, fmod, hypot, isinf, pi, radians, sin, sqrt, tan,
-    tau)
+    atan2, cos, fmod, isinf, pi, radians, sin, sqrt, tau)
 
 from .features import match_features
 from .helpers import PATH_LETTERS, normalize, point, size
@@ -16,12 +33,20 @@ from .url import parse_url
 
 EMPTY_BOUNDING_BOX = float('inf'), float('inf'), 0, 0
 
+# Numerical tolerance used when deciding that a polynomial coefficient or a
+# coordinate difference is zero. Path coordinates are SVG user units (pixels),
+# so boxes of documents drawn at ordinary scales are well above this scale.
+_EPSILON = 1e-12
+
 
 def calculate_bounding_box(surface, node):
-    """Calculate ``node``'s bounding box.
+    """Calculate ``node``'s geometry bounding box.
 
     See https://www.w3.org/TR/SVG/coords.html#ObjectBoundingBox
 
+    The result is cached on the node. The cache stores geometry boxes only and
+    is never invalidated by paint attributes (``stroke``, ``stroke-width``,
+    markers...), as those have no influence on an ``objectBoundingBox``.
     """
     if 'bounding_box' not in node and node.tag in BOUNDING_BOX_METHODS:
         bounding_box = BOUNDING_BOX_METHODS[node.tag](surface, node)
@@ -32,6 +57,18 @@ def calculate_bounding_box(surface, node):
 
 def bounding_box_rect(surface, node):
     """Get the bounding box of a ``rect`` node."""
+    x, y = size(surface, node.get('x'), 'x'), size(surface, node.get('y'), 'y')
+    width = size(surface, node.get('width'), 'x')
+    height = size(surface, node.get('height'), 'y')
+    return x, y, width, height
+
+
+def bounding_box_image(surface, node):
+    """Get the bounding box of an ``image`` node.
+
+    Only the placement rectangle is known without decoding the image; it is
+    exactly the region the element occupies in user space.
+    """
     x, y = size(surface, node.get('x'), 'x'), size(surface, node.get('y'), 'y')
     width = size(surface, node.get('width'), 'x')
     height = size(surface, node.get('height'), 'y')
@@ -56,7 +93,11 @@ def bounding_box_ellipse(surface, node):
 
 
 def bounding_box_line(surface, node):
-    """Get the bounding box of a ``line`` node."""
+    """Get the geometry bounding box of a ``line`` node.
+
+    The box only contains the two endpoints; stroke caps are deliberately
+    ignored as they belong to the stroke bounding box.
+    """
     x1, y1, x2, y2 = tuple(
         size(surface, node.get(position), position[0])
         for position in ('x1', 'y1', 'x2', 'y2'))
@@ -73,11 +114,24 @@ def bounding_box_polyline(surface, node):
     while normalized_points:
         x, y, normalized_points = point(surface, normalized_points)
         points.append((x, y))
-    return extend_bounding_box(bounding_box, points)
+    if points:
+        bounding_box = extend_bounding_box(bounding_box, points)
+    return bounding_box
 
 
 def bounding_box_path(surface, node):
-    """Get the bounding box of a ``path`` node."""
+    """Get the tight geometry bounding box of a ``path`` node.
+
+    Every segment is handled analytically: line segments contribute their
+    endpoints, quadratic and cubic Beziers contribute the roots of their
+    derivative (their true extrema, not merely their control points), and
+    elliptical arcs contribute their extreme points after the standard
+    endpoint-to-center parameterization.
+
+    Multiple subpaths, relative commands, smooth curves (``S/s/T/t``) and
+    closed paths (``Z/z``) are tracked explicitly. The function never mutates
+    the node nor any drawing state.
+    """
     path_data = node.get('d', '')
 
     # Normalize path data for correct parsing
@@ -86,8 +140,13 @@ def bounding_box_path(surface, node):
     path_data = normalize(path_data)
 
     bounding_box = EMPTY_BOUNDING_BOX
-    previous_x = 0
-    previous_y = 0
+    previous_x = previous_y = 0.0
+    # First point of the current subpath, used by Z/z.
+    subpath_x = subpath_y = 0.0
+    # Last explicit cubic (x2, y2) and quadratic (x1, y1) control points, in
+    # absolute coordinates, used to resolve smooth S/s and T/t commands.
+    previous_cubic_control = None
+    previous_quad_control = None
     letter = 'M'    # Move as default
     while path_data:
         path_data = path_data.strip()
@@ -118,19 +177,18 @@ def bounding_box_path(surface, node):
                 x += previous_x
                 y += previous_y
 
-            # Extend bounding box with start and end coordinates
+            # Tight box of the arc itself, including its extreme points
             arc_bounding_box = bounding_box_elliptical_arc(
                 previous_x, previous_y, rx, ry, rotation, large, sweep, x, y)
-            x1, y1, width, height = arc_bounding_box
-            x2 = x1 + width
-            y2 = y1 + height
-            points = (x1, y1), (x2, y2)
-            bounding_box = extend_bounding_box(bounding_box, points)
-            previous_x = x
-            previous_y = y
+            ax, ay, arc_width, arc_height = arc_bounding_box
+            bounding_box = extend_bounding_box(
+                bounding_box,
+                ((ax, ay), (ax + arc_width, ay + arc_height)))
+            previous_x, previous_y = x, y
+            previous_cubic_control = previous_quad_control = None
 
         elif letter in 'cC':
-            # Curve
+            # Cubic Bezier curve
             x1, y1, path_data = point(None, path_data)
             x2, y2, path_data = point(None, path_data)
             x, y, path_data = point(None, path_data)
@@ -144,11 +202,15 @@ def bounding_box_path(surface, node):
                 x += previous_x
                 y += previous_y
 
-            # Extend bounding box with all coordinates
+            # Extend with the true extrema of the curve, not only its control
+            # polygon, then record the last control point for S/s.
+            minx, miny, maxx, maxy = cubic_bezier_bounding_box(
+                (previous_x, previous_y), (x1, y1), (x2, y2), (x, y))
             bounding_box = extend_bounding_box(
-                bounding_box, ((x1, y1), (x2, y2), (x, y)))
-            previous_x = x
-            previous_y = y
+                bounding_box, ((minx, miny), (maxx, maxy)))
+            previous_cubic_control = (x2, y2)
+            previous_quad_control = None
+            previous_x, previous_y = x, y
 
         elif letter in 'hH':
             # Horizontal line
@@ -159,42 +221,105 @@ def bounding_box_path(surface, node):
             if letter == 'h':
                 x += previous_x
 
-            # Extend bounding box with coordinate
             bounding_box = extend_bounding_box(
                 bounding_box, ((x, previous_y),))
             previous_x = x
+            previous_cubic_control = previous_quad_control = None
 
-        elif letter in 'lLmMtT':
-            # Line/Move/Smooth quadratic curve
+        elif letter in 'lL':
+            # Line
             x, y, path_data = point(None, path_data)
 
             # Relative coordinate, convert to absolute
-            if letter in 'lmt':
+            if letter == 'l':
                 x += previous_x
                 y += previous_y
 
-            # Extend bounding box with coordinate
             bounding_box = extend_bounding_box(bounding_box, ((x, y),))
-            previous_x = x
-            previous_y = y
+            previous_x, previous_y = x, y
+            previous_cubic_control = previous_quad_control = None
 
-        elif letter in 'qQsS':
-            # Quadratic curve/Smooth curve
+        elif letter in 'mM':
+            # Move, possibly starting a new subpath
+            x, y, path_data = point(None, path_data)
+
+            # Relative coordinate, convert to absolute
+            if letter == 'm':
+                x += previous_x
+                y += previous_y
+
+            bounding_box = extend_bounding_box(bounding_box, ((x, y),))
+            previous_x, previous_y = x, y
+            subpath_x, subpath_y = x, y
+            previous_cubic_control = previous_quad_control = None
+
+        elif letter in 'tT':
+            # Smooth quadratic Bezier curve: the first control point is the
+            # reflection of the previous quadratic control point about the
+            # current point (or the current point itself after a non-quadratic
+            # command). The old code ignored it entirely and used only the
+            # endpoint, clipping the box on curved paths.
+            x, y, path_data = point(None, path_data)
+            if letter == 't':
+                x += previous_x
+                y += previous_y
+            if previous_quad_control is not None:
+                x1 = 2 * previous_x - previous_quad_control[0]
+                y1 = 2 * previous_y - previous_quad_control[1]
+            else:
+                x1, y1 = previous_x, previous_y
+            minx, miny, maxx, maxy = quadratic_bezier_bounding_box(
+                (previous_x, previous_y), (x1, y1), (x, y))
+            bounding_box = extend_bounding_box(
+                bounding_box, ((minx, miny), (maxx, maxy)))
+            previous_quad_control = (x1, y1)
+            previous_cubic_control = None
+            previous_x, previous_y = x, y
+
+        elif letter in 'qQ':
+            # Quadratic Bezier curve
             x1, y1, path_data = point(None, path_data)
             x, y, path_data = point(None, path_data)
 
             # Relative coordinates, convert to absolute
-            if letter in 'qs':
+            if letter == 'q':
                 x1 += previous_x
                 y1 += previous_y
                 x += previous_x
                 y += previous_y
 
-            # Extend bounding box with coordinates
+            # Extend with the true extrema of the curve
+            minx, miny, maxx, maxy = quadratic_bezier_bounding_box(
+                (previous_x, previous_y), (x1, y1), (x, y))
             bounding_box = extend_bounding_box(
-                bounding_box, ((x1, y1), (x, y)))
-            previous_x = x
-            previous_y = y
+                bounding_box, ((minx, miny), (maxx, maxy)))
+            previous_quad_control = (x1, y1)
+            previous_cubic_control = None
+            previous_x, previous_y = x, y
+
+        elif letter in 'sS':
+            # Smooth cubic Bezier curve: the first control point is the
+            # reflection of the previous cubic control point about the current
+            # point (or the current point itself after a non-cubic command).
+            x2, y2, path_data = point(None, path_data)
+            x, y, path_data = point(None, path_data)
+            if letter == 's':
+                x2 += previous_x
+                y2 += previous_y
+                x += previous_x
+                y += previous_y
+            if previous_cubic_control is not None:
+                x1 = 2 * previous_x - previous_cubic_control[0]
+                y1 = 2 * previous_y - previous_cubic_control[1]
+            else:
+                x1, y1 = previous_x, previous_y
+            minx, miny, maxx, maxy = cubic_bezier_bounding_box(
+                (previous_x, previous_y), (x1, y1), (x2, y2), (x, y))
+            bounding_box = extend_bounding_box(
+                bounding_box, ((minx, miny), (maxx, maxy)))
+            previous_cubic_control = (x2, y2)
+            previous_quad_control = None
+            previous_x, previous_y = x, y
 
         elif letter in 'vV':
             # Vertical line
@@ -205,10 +330,17 @@ def bounding_box_path(surface, node):
             if letter == 'v':
                 y += previous_y
 
-            # Extend bounding box with coordinate
             bounding_box = extend_bounding_box(
                 bounding_box, ((previous_x, y),))
             previous_y = y
+            previous_cubic_control = previous_quad_control = None
+
+        elif letter in 'zZ':
+            # Close the current subpath: the current point returns to the
+            # subpath start. The closing segment is a straight line whose
+            # endpoints are already part of the accumulated box.
+            previous_x, previous_y = subpath_x, subpath_y
+            previous_cubic_control = previous_quad_control = None
 
         path_data = path_data.strip()
 
@@ -216,114 +348,201 @@ def bounding_box_path(surface, node):
 
 
 def bounding_box_text(surface, node):
-    """Get the bounding box of a ``text`` node."""
+    """Get the bounding box of a ``text`` node.
+
+    Text outlines depend on the loaded fonts and are only known while the text
+    is being drawn; :mod:`cairosvg.text` stores the font-metrics based box on
+    the node. There is no analytical geometry available before rendering, so
+    an unrendered text node reports no box.
+    """
     return node.get('text_bounding_box')
 
 
+def _derivative_roots(a, b, c):
+    """Roots of ``a*t² + b*t + c = 0`` that lie strictly inside ``(0, 1)``."""
+    if abs(a) < _EPSILON:
+        if abs(b) >= _EPSILON:
+            root = -c / b
+            if 0 < root < 1:
+                return (root,)
+        return ()
+    discriminant = b * b - 4 * a * c
+    if discriminant < 0:
+        return ()
+    if discriminant == 0:
+        root = -b / (2 * a)
+        return (root,) if 0 < root < 1 else ()
+    square_root = sqrt(discriminant)
+    return tuple(
+        root for root in (
+            (-b - square_root) / (2 * a),
+            (-b + square_root) / (2 * a))
+        if 0 < root < 1)
+
+
+def cubic_bezier_bounding_box(p0, p1, p2, p3):
+    """Return the tight ``(minx, miny, maxx, maxy)`` of a cubic Bezier.
+
+    The curve is ``B(t) = (1-t)³p0 + 3(1-t)²t·p1 + 3(1-t)t²·p2 + t³p3`` with
+    ``t`` in ``[0, 1]``. Each coordinate is a cubic polynomial whose extrema
+    are the endpoints and the roots of its quadratic derivative.
+    """
+    minx = miny = float('inf')
+    maxx = maxy = float('-inf')
+    for coordinate in (0, 1):
+        p0c, p1c, p2c, p3c = (
+            point[coordinate] for point in (p0, p1, p2, p3))
+        # Coefficients of the derivative B'(t) = 3(a·t² + b·t + c)
+        a = -p0c + 3 * p1c - 3 * p2c + p3c
+        b = 2 * (p0c - 2 * p1c + p2c)
+        c = p1c - p0c
+        values = [p0c, p3c]
+        for root in _derivative_roots(a, b, c):
+            one_minus_t = 1 - root
+            values.append(
+                one_minus_t ** 3 * p0c
+                + 3 * one_minus_t ** 2 * root * p1c
+                + 3 * one_minus_t * root ** 2 * p2c
+                + root ** 3 * p3c)
+        if coordinate == 0:
+            minx, maxx = min(values), max(values)
+        else:
+            miny, maxy = min(values), max(values)
+    return minx, miny, maxx, maxy
+
+
+def quadratic_bezier_bounding_box(p0, p1, p2):
+    """Return the tight ``(minx, miny, maxx, maxy)`` of a quadratic Bezier.
+
+    The curve is ``B(t) = (1-t)²p0 + 2(1-t)t·p1 + t²p2``. Each coordinate is a
+    quadratic polynomial; its derivative is linear and has at most one root in
+    ``(0, 1)``.
+    """
+    minx = miny = float('inf')
+    maxx = maxy = float('-inf')
+    for coordinate in (0, 1):
+        p0c, p1c, p2c = p0[coordinate], p1[coordinate], p2[coordinate]
+        a = p0c - 2 * p1c + p2c
+        b = 2 * (p1c - p0c)
+        values = [p0c, p2c]
+        if abs(a) >= _EPSILON:
+            root = -b / (2 * a)
+            if 0 < root < 1:
+                one_minus_t = 1 - root
+                values.append(
+                    one_minus_t ** 2 * p0c
+                    + 2 * one_minus_t * root * p1c
+                    + root ** 2 * p2c)
+        if coordinate == 0:
+            minx, maxx = min(values), max(values)
+        else:
+            miny, maxy = min(values), max(values)
+    return minx, miny, maxx, maxy
+
+
 def angle(bx, by):
-    """Get the angle between vector (1,0) and vector (bx,by)."""
-    return fmod(tau + copysign(acos(bx / hypot(bx, by)), by), tau)
+    """Get the angle between vector (1,0) and vector (bx,by), in [0, 2π)."""
+    return fmod(tau + atan2(by, bx), tau)
 
 
 def bounding_box_elliptical_arc(x1, y1, rx, ry, phi, large, sweep, x, y):
-    """Get the bounding box of an elliptical arc described by the parameters.
+    """Get the tight bounding box of an elliptical arc.
 
-    See following website for original code:
-    http://fridrich.blogspot.nl/2011/06/bounding-box-of-svg-elliptical-arc.html
+    The SVG endpoint parameters are first converted to the center
+    parameterization (SVG 1.1 appendix F.6); the box then follows from the
+    points of the arc where the tangent is horizontal or vertical, plus the
+    two endpoints.
 
+    Degenerate cases have a defined, stable behavior:
+
+    * a zero radius or identical endpoints draw a straight line (or nothing),
+      so the box is the endpoints' box,
+    * radii too small for the chord are scaled up exactly as mandated by the
+      specification,
+    * negative radii are treated as their absolute value.
     """
     rx, ry = abs(rx), abs(ry)
-    if rx == 0 or ry == 0:
+    if rx == 0 or ry == 0 or (x1 == x and y1 == y):
         return min(x, x1), min(y, y1), abs(x - x1), abs(y - y1)
 
-    x1prime = cos(phi) * (x1 - x) / 2 + sin(phi) * (y1 - y) / 2
-    y1prime = -sin(phi) * (x1 - x) / 2 + cos(phi) * (y1 - y) / 2
+    center = _arc_center_parameterization(
+        x1, y1, rx, ry, phi, large, sweep, x, y)
+    cx, cy, rx, ry, theta1, delta_theta = center
+    cphi, sphi = cos(phi), sin(phi)
 
-    radicant = (
-        rx ** 2 * ry ** 2 - rx ** 2 * y1prime ** 2 - ry ** 2 * x1prime ** 2)
-    radicant /= rx ** 2 * y1prime ** 2 + ry ** 2 * x1prime ** 2
-    cxprime = cyprime = 0
+    def arc_point(theta):
+        ellipse_x = rx * cos(theta)
+        ellipse_y = ry * sin(theta)
+        return (
+            cx + cphi * ellipse_x - sphi * ellipse_y,
+            cy + sphi * ellipse_x + cphi * ellipse_y)
 
-    if radicant < 0:
-        ratio = rx / ry
-        radicant = y1prime ** 2 + x1prime ** 2 / ratio ** 2
-        if radicant < 0:
-            return min(x, x1), min(y, y1), abs(x - x1), abs(y - y1)
-        ry = sqrt(radicant)
-        rx = ratio * ry
-    else:
-        factor = (-1 if large == sweep else 1) * sqrt(radicant)
+    # Angles at which the rotated ellipse has a vertical (x extremum) or
+    # horizontal (y extremum) tangent. Each equation has two solutions pi
+    # apart; examine a few periods around the arc to catch every candidate.
+    extremal_angles = (
+        atan2(-ry * sphi, rx * cphi),
+        atan2(ry * cphi, rx * sphi))
+    interval_start = min(theta1, theta1 + delta_theta)
+    interval_end = max(theta1, theta1 + delta_theta)
+    points = [(x1, y1), (x, y)]
+    for base_angle in extremal_angles:
+        for period in range(-2, 3):
+            theta = base_angle + period * pi
+            if interval_start - _EPSILON <= theta <= interval_end + _EPSILON:
+                points.append(arc_point(theta))
 
-        cxprime = factor * rx * y1prime / ry
-        cyprime = -factor * ry * x1prime / rx
-
-    cx = cxprime * cos(phi) - cyprime * sin(phi) + (x1 + x) / 2
-    cy = cxprime * sin(phi) + cyprime * cos(phi) + (y1 + y) / 2
-
-    if phi in (0, pi):
-        minx = cx - rx
-        tminx = angle(-rx, 0)
-        maxx = cx + rx
-        tmaxx = angle(rx, 0)
-        miny = cy - ry
-        tminy = angle(0, -ry)
-        maxy = cy + ry
-        tmaxy = angle(0, ry)
-    elif phi in (pi / 2, 3 * pi / 2):
-        minx = cx - ry
-        tminx = angle(-ry, 0)
-        maxx = cx + ry
-        tmaxx = angle(ry, 0)
-        miny = cy - rx
-        tminy = angle(0, -rx)
-        maxy = cy + rx
-        tmaxy = angle(0, rx)
-    else:
-        tminx = -atan(ry * tan(phi) / rx)
-        tmaxx = pi - atan(ry * tan(phi) / rx)
-        minx = cx + rx * cos(tminx) * cos(phi) - ry * sin(tminx) * sin(phi)
-        maxx = cx + rx * cos(tmaxx) * cos(phi) - ry * sin(tmaxx) * sin(phi)
-        if minx > maxx:
-            minx, maxx = maxx, minx
-            tminx, tmaxx = tmaxx, tminx
-        tmp_y = cy + rx * cos(tminx) * sin(phi) + ry * sin(tminx) * cos(phi)
-        tminx = angle(minx - cx, tmp_y - cy)
-        tmp_y = cy + rx * cos(tmaxx) * sin(phi) + ry * sin(tmaxx) * cos(phi)
-        tmaxx = angle(maxx - cx, tmp_y - cy)
-
-        tminy = atan(ry / (tan(phi) * rx))
-        tmaxy = atan(ry / (tan(phi) * rx)) + pi
-        miny = cy + rx * cos(tminy) * sin(phi) + ry * sin(tminy) * cos(phi)
-        maxy = cy + rx * cos(tmaxy) * sin(phi) + ry * sin(tmaxy) * cos(phi)
-        if miny > maxy:
-            miny, maxy = maxy, miny
-            tminy, tmaxy = tmaxy, tminy
-        tmp_x = cx + rx * cos(tminy) * cos(phi) - ry * sin(tminy) * sin(phi)
-        tminy = angle(tmp_x - cx, miny - cy)
-        tmp_x = cx + rx * cos(tmaxy) * cos(phi) - ry * sin(tmaxy) * sin(phi)
-        tmaxy = angle(tmp_x - cx, maxy - cy)
-
-    angle1 = angle(x1 - cx, y1 - cy)
-    angle2 = angle(x - cx, y - cy)
-
-    if not sweep:
-        angle1, angle2 = angle2, angle1
-
-    other_arc = False
-    if angle1 > angle2:
-        angle1, angle2 = angle2, angle1
-        other_arc = True
-
-    if other_arc == (angle1 <= tminx <= angle2):
-        minx = min(x, x1)
-    if other_arc == (angle1 <= tmaxx <= angle2):
-        maxx = max(x, x1)
-    if other_arc == (angle1 <= tminy <= angle2):
-        miny = min(y, y1)
-    if other_arc == (angle1 <= tmaxy <= angle2):
-        maxy = max(y, y1)
-
+    x_values = [point[0] for point in points]
+    y_values = [point[1] for point in points]
+    minx, maxx = min(x_values), max(x_values)
+    miny, maxy = min(y_values), max(y_values)
     return minx, miny, maxx - minx, maxy - miny
+
+
+def _arc_center_parameterization(x1, y1, rx, ry, phi, large, sweep, x2, y2):
+    """Convert SVG arc endpoint parameters to center parameters.
+
+    Returns ``(cx, cy, rx, ry, theta1, delta_theta)`` where ``delta_theta``
+    follows the sweep flag and is in ``(-2π, 2π)``. Mirrors SVG 1.1
+    appendix F.6, including the radius correction of step F.6.6.
+    """
+    cphi, sphi = cos(phi), sin(phi)
+    half_dx = (x1 - x2) / 2
+    half_dy = (y1 - y2) / 2
+    x1prime = cphi * half_dx + sphi * half_dy
+    y1prime = -sphi * half_dx + cphi * half_dy
+
+    # Correct radii too small to reach the endpoints (F.6.6)
+    lambda_factor = (
+        x1prime ** 2 / rx ** 2 + y1prime ** 2 / ry ** 2)
+    if lambda_factor > 1:
+        scale = sqrt(lambda_factor)
+        rx *= scale
+        ry *= scale
+
+    numerator = (
+        rx ** 2 * ry ** 2
+        - rx ** 2 * y1prime ** 2 - ry ** 2 * x1prime ** 2)
+    denominator = (
+        rx ** 2 * y1prime ** 2 + ry ** 2 * x1prime ** 2)
+    factor = sqrt(max(0, numerator / denominator))
+    if large == sweep:
+        factor = -factor
+
+    cxprime = factor * rx * y1prime / ry
+    cyprime = -factor * ry * x1prime / rx
+    cx = cphi * cxprime - sphi * cyprime + (x1 + x2) / 2
+    cy = sphi * cxprime + cphi * cyprime + (y1 + y2) / 2
+
+    theta1 = angle(
+        (x1prime - cxprime) / rx, (y1prime - cyprime) / ry)
+    delta_theta = angle(
+        (-x1prime - cxprime) / rx, (-y1prime - cyprime) / ry) - theta1
+    if not sweep and delta_theta > 0:
+        delta_theta -= tau
+    elif sweep and delta_theta < 0:
+        delta_theta += tau
+    return cx, cy, rx, ry, theta1, delta_theta
 
 
 def bounding_box_group(surface, node):
@@ -377,12 +596,18 @@ def is_valid_bounding_box(bounding_box):
 
 
 def is_non_empty_bounding_box(bounding_box):
-    """Know whether bounding box is valid and has a size."""
+    """Know whether bounding box is valid and has a size.
+
+    A zero-width or zero-height geometry (a horizontal line, a point...) is a
+    valid box but cannot define an ``objectBoundingBox`` coordinate system, so
+    gradients and patterns reject it; see the callers in :mod:`cairosvg.defs`.
+    """
     return is_valid_bounding_box(bounding_box) and 0 not in bounding_box[2:]
 
 
 BOUNDING_BOX_METHODS = {
     'rect': bounding_box_rect,
+    'image': bounding_box_image,
     'circle': bounding_box_circle,
     'ellipse': bounding_box_ellipse,
     'line': bounding_box_line,

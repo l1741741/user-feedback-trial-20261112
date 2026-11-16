@@ -238,7 +238,12 @@ def draw_pattern(surface, node, name, opacity):
         pattern_width = size(surface, pattern_node.get('width', 0), 1)
         pattern_height = size(surface, pattern_node.get('height', 0), 1)
     else:
-        _, _, width, height = calculate_bounding_box(surface, node)
+        bounding_box = calculate_bounding_box(surface, node)
+        if not is_non_empty_bounding_box(bounding_box):
+            # A degenerate object cannot define an objectBoundingBox
+            # coordinate system: behave like an unusable pattern.
+            return False
+        _, _, width, height = bounding_box
         x = size(surface, pattern_node.get('x'), 1) * width
         y = size(surface, pattern_node.get('y'), 1) * height
         pattern_width = (

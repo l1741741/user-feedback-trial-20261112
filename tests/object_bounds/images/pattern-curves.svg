@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="180">
+  <defs>
+    <!-- No viewBox: with objectBoundingBox pattern units CairoSVG scales the
+         tile coordinate system by the geometry box, so an inflated box (the
+         old T/t result) enlarges every stripe directly. -->
+    <pattern id="p" width="0.12" height="0.12"
+             patternContentUnits="objectBoundingBox">
+      <rect width="0.12" height="0.12" fill="white"/>
+      <rect width="0.06" height="0.12" fill="teal"/>
+    </pattern>
+  </defs>
+  <rect width="220" height="180" fill="white"/>
+  <!-- T/t smooth quadratic: the old code dropped the reflected control point,
+       inflating the y-box (height 140 instead of the tight 105.6) and so
+       enlarging every pattern tile. -->
+  <path d="M20 130 Q60 20 110 70 T200 130 L200 160 L20 160 Z"
+        fill="url(#p)"/>
+</svg>

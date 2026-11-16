@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="red"/>
+      <stop offset="0.5" stop-color="lime"/>
+      <stop offset="1" stop-color="blue"/>
+    </linearGradient>
+  </defs>
+  <rect width="200" height="200" fill="white"/>
+  <!-- Control polygon spans y=0..100; the real curve only spans y=25..100,
+       so the old code stretched the gradient over 100 units instead of 75. -->
+  <path d="M20 100 C20 0 180 0 180 100 Z" fill="url(#g)"/>
+</svg>

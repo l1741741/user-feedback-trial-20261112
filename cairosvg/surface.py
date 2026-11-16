@@ -13,6 +13,7 @@ from .defs import (
     apply_filter_after_painting, apply_filter_before_painting, clip_path,
     filter_, gradient_or_pattern, linear_gradient, marker, mask, paint_mask,
     parse_all_defs, pattern, prepare_filter, radial_gradient, use)
+from .bounding_box import calculate_bounding_box
 from .helpers import (
     UNITS, PointError, clip_rect, node_format, normalize, paint,
     preserve_ratio, size, transform)
@@ -381,12 +382,22 @@ class Surface(object):
             if path:
                 self.context.save()
                 if path.get('clipPathUnits') == 'objectBoundingBox':
-                    x = size(self, node.get('x'), 'x')
-                    y = size(self, node.get('y'), 'y')
-                    width = size(self, node.get('width'), 'x')
-                    height = size(self, node.get('height'), 'y')
-                    self.context.translate(x, y)
-                    self.context.scale(width, height)
+                    # The clip geometry is expressed in fractions of the
+                    # referenced element's *geometry* bounding box, not of its
+                    # x/width attributes (which are zero or absent on paths,
+                    # circles and other non-rect shapes). A degenerate box
+                    # cannot define the coordinate system: clip to nothing,
+                    # keeping the save/restore stack balanced.
+                    bounding_box = calculate_bounding_box(self, node)
+                    if bounding_box:
+                        x, y, width, height = bounding_box
+                        self.context.translate(x, y)
+                        self.context.scale(width, height)
+                    else:
+                        self.context.restore()
+                        self.context.new_path()
+                        self.context.clip()
+                        self.context.save()
                 path.tag = 'g'
                 self.stroke_and_fill = False
                 self.draw(path)

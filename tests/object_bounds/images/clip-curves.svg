@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="180">
+  <defs>
+    <clipPath id="c" clipPathUnits="objectBoundingBox">
+      <rect x="0.1" y="0.1" width="0.8" height="0.8"/>
+    </clipPath>
+  </defs>
+  <rect width="220" height="180" fill="white"/>
+  <!-- On the old code this raises CAIRO_STATUS_INVALID_MATRIX, because
+       objectBoundingBox clips scaled by the path's zero width/height. -->
+  <path d="M20 140 C20 40 200 40 200 140 Z" fill="crimson"
+        clip-path="url(#c)"/>
+</svg>
