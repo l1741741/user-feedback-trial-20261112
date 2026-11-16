@@ -341,14 +341,6 @@ def use(surface, node):
     surface.context.save()
     surface.context.translate(
         size(surface, node.get('x'), 'x'), size(surface, node.get('y'), 'y'))
-    if 'x' in node:
-        del node['x']
-    if 'y' in node:
-        del node['y']
-    if 'viewBox' in node:
-        del node['viewBox']
-    if 'mask' in node:
-        del node['mask']
     href = parse_url(node.get_href()).geturl()
     try:
         tree = Tree(

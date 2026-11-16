@@ -1,0 +1,12 @@
+<!doctype html><meta charset="utf-8">
+<title>transform demo</title>
+<style>body{font-family:sans-serif;margin:24px;color:#282c34}.grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}.panel{border:1px solid #b4b8be;border-radius:8px;padding:12px}h2{font-size:15px;margin:0 0 6px}p{font-size:12px;margin:0 0 10px}</style><h1>Panel index</h1><div class="grid">
+<div class="panel"><h2>1. Explicit length origin</h2><p>rotate(90) about origin 100,100: the rect pivots on the crosshair and its center stays put.</p><p><b>viewBox:</b> none</p></div>
+<div class="panel"><h2>2. Keyword origin, viewBox x2</h2><p>"center" resolves in local units (50,50) -> device (100,100), not at the device corner.</p><p><b>viewBox:</b> 0 0 100 100</p></div>
+<div class="panel"><h2>3. Nested group, local origin</h2><p>Parent translate(40,50); child rotates about local (40,40). The parent then moves the rotated result.</p><p><b>viewBox:</b> none</p></div>
+<div class="panel"><h2>4. transform-box: fill-box</h2><p>"center" targets the rect bounding box, so off-center geometry rotates about its own middle.</p><p><b>viewBox:</b> none</p></div>
+<div class="panel"><h2>5. Percentage origin in group</h2><p>50% 50% references the local viewport inside the translated group; the axis travels with the group.</p><p><b>viewBox:</b> none</p></div>
+<div class="panel"><h2>6. Composition order</h2><p>Nested translate(110,110) then rotate(90): rotation acts first on geometry, translation moves the result.</p><p><b>viewBox:</b> none</p></div>
+<div class="panel"><h2>7. Invalid origin isolation</h2><p>transform-origin="garbage" on the red rect is ignored; the blue sibling renders exactly where declared.</p><p><b>viewBox:</b> none</p></div>
+<div class="panel"><h2>8. Reused node keeps position</h2><p>One rotated group is instantiated twice with use; both copies show identical footprints at their own x/y.</p><p><b>viewBox:</b> none</p></div>
+</div>

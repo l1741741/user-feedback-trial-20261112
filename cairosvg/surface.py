@@ -159,6 +159,10 @@ class Surface(object):
         """
         self.cairo = None
         self.context_width, self.context_height = parent_width, parent_height
+        # Origin of the active SVG viewport in local user space, i.e. the
+        # viewBox min-x/min-y (0 when no viewBox is in force). Nested <svg>
+        # elements update it through set_context_size().
+        self.viewport_origin = (0, 0)
         self.cursor_position = [0, 0]
         self.cursor_d_position = [0, 0]
         self.text_path_width = 0
@@ -259,6 +263,9 @@ class Surface(object):
             rect_x, rect_y = 0, 0
             tree.image_width = width
             tree.image_height = height
+        # Track the viewport origin so transform-origin percentages and
+        # keywords can be resolved against the right reference box.
+        self.viewport_origin = (rect_x, rect_y)
 
         scale_x, scale_y, translate_x, translate_y = preserve_ratio(
             self, tree, width, height)
@@ -303,6 +310,7 @@ class Surface(object):
         old_parent_node = self.parent_node
         old_font_size = self.font_size
         old_context_size = self.context_width, self.context_height
+        old_viewport_origin = self.viewport_origin
         self.parent_node = node
 
         if "font" in node:
@@ -317,7 +325,7 @@ class Surface(object):
         # Apply transformations
         transform(
             self, node.get('transform'),
-            transform_origin=node.get('transform-origin'))
+            transform_origin=node.get('transform-origin'), node=node)
 
         # Find and prepare opacity, masks and filters
         mask = parse_url(node.get('mask')).fragment
@@ -498,6 +506,7 @@ class Surface(object):
         self.parent_node = old_parent_node
         self.font_size = old_font_size
         self.context_width, self.context_height = old_context_size
+        self.viewport_origin = old_viewport_origin
 
 
 class PDFSurface(Surface):

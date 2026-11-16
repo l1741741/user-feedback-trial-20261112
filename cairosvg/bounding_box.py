@@ -216,7 +216,27 @@ def bounding_box_path(surface, node):
 
 
 def bounding_box_text(surface, node):
-    """Get the bounding box of a ``text`` node."""
+    """Get the bounding box of a ``text`` node.
+
+    Text extents are only known once the text layout has run, which happens
+    inside :func:`cairosvg.text.text`. When the box is requested before the
+    first draw (for example when resolving a ``fill-box`` transform origin),
+    run the layout in a saved Cairo context with painting disabled so the
+    surface is not modified as a side effect.
+
+    """
+    if node.get('text_bounding_box') is None:
+        from .text import text
+        surface.context.save()
+        surface.context.new_path()
+        old_stroke_and_fill = surface.stroke_and_fill
+        surface.stroke_and_fill = False
+        try:
+            text(surface, node)
+        finally:
+            surface.stroke_and_fill = old_stroke_and_fill
+            surface.context.new_path()
+            surface.context.restore()
     return node.get('text_bounding_box')
 
 

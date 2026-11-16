@@ -40,10 +40,6 @@ def image(surface, node):
         image_bytes.startswith((b'<svg ', b'<?xml', b'<!DOC', b'\x1f\x8b'))
         or b'<svg' in image_bytes
     ):
-        if 'x' in node:
-            del node['x']
-        if 'y' in node:
-            del node['y']
         tree = Tree(
             url=url.geturl(), url_fetcher=node.url_fetcher,
             bytestring=image_bytes, tree_cache=surface.tree_cache,
