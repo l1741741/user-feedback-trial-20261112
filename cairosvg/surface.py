@@ -14,8 +14,8 @@ from .defs import (
     filter_, gradient_or_pattern, linear_gradient, marker, mask, paint_mask,
     parse_all_defs, pattern, prepare_filter, radial_gradient, use)
 from .helpers import (
-    UNITS, PointError, clip_rect, node_format, normalize, paint,
-    preserve_ratio, size, transform)
+    UNITS, PointError, clip_rect, device_path, has_non_scaling_stroke,
+    node_format, normalize, paint, preserve_ratio, size, transform)
 from .image import image, invert_image
 from .parser import Tree
 from .path import draw_markers, path
@@ -283,6 +283,52 @@ class Surface(object):
         rgba = color(string, opacity)
         return self.map_rgba(rgba) if self.map_rgba else rgba
 
+    def _stroke_non_scaling(self, line_width):
+        """Stroke the current path with a non-scaling stroke.
+
+        The path geometry keeps obeying every object, group and viewport
+        transform: it is mapped to device space using the current CTM, then
+        stroked under an identity CTM. The stroke width, dashes, caps and
+        joins are therefore expressed in device units and keep a constant
+        screen thickness, independently of the scales applied to the node.
+        Gradient and pattern paint keeps following the geometry because its
+        pattern matrix is expressed in the node's user space, which is exactly
+        the coordinate system reached by the identity CTM together with the
+        pre-transformed path.
+
+        """
+        context = self.context
+
+        # Full user-to-device matrix (including the root viewport and the
+        # point/unit scaling of vector surfaces) of the coordinate system in
+        # which the path has been built.
+        user_to_device = cairo.Matrix(*context.get_matrix())
+
+        # One user unit maps to that many device units (1 for raster PNG/SVG,
+        # 1/72 inch expressed in points for PDF/PS).
+        unit_scale = self.device_units_per_user_units
+
+        # Flatten and move the path into device space under an identity CTM.
+        # The source's pattern matrix is left untouched: Cairo interprets it
+        # relative to the CTM active at paint time, and the device-space path
+        # combined with the identity CTM reproduces the node's user space in
+        # which the gradient/pattern was defined.
+        flat_device_path = device_path(context, cairo, user_to_device)
+        context.new_path()
+        context.identity_matrix()
+        context.append_path(flat_device_path)
+
+        # Width, dash array and offset are user-space values; convert them once
+        # to device units for the identity CTM.
+        context.set_line_width(line_width * unit_scale)
+        dashes, dash_offset = context.get_dash()
+        if dashes:
+            context.set_dash(
+                [dash * unit_scale for dash in dashes],
+                dash_offset * unit_scale)
+
+        context.stroke()
+
     def draw(self, node):
         """Draw ``node`` and its children."""
 
@@ -456,14 +502,17 @@ class Surface(object):
 
             # Stroke
             self.context.save()
-            self.context.set_line_width(
-                size(self, node.get('stroke-width', '1')))
+            line_width = size(self, node.get('stroke-width', '1'))
+            self.context.set_line_width(line_width)
             paint_source, paint_color = paint(node.get('stroke'))
             if not gradient_or_pattern(
                     self, node, paint_source, stroke_opacity):
                 self.context.set_source_rgba(
                     *self.map_color(paint_color, stroke_opacity))
-            self.context.stroke()
+            if has_non_scaling_stroke(node):
+                self._stroke_non_scaling(line_width)
+            else:
+                self.context.stroke()
             self.context.restore()
         elif not visible:
             self.context.new_path()

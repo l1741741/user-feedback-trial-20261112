@@ -97,6 +97,36 @@ def point_angle(cx, cy, px, py):
     return atan2(py - cy, px - cx)
 
 
+def has_non_scaling_stroke(node):
+    """Check whether ``node`` requests a non-scaling stroke.
+
+    ``vector-effect`` is an inherited presentation attribute in SVG 2, so the
+    value set on an ancestor group applies to the node itself. Only the
+    ``non-scaling-stroke`` keyword is honored; ``none`` (the default) keeps the
+    historical behavior where the stroke width follows the current transform.
+
+    """
+    effects = (node.get('vector-effect') or '').lower().split()
+    return 'non-scaling-stroke' in effects
+
+
+def device_path(context, cairo_module, matrix):
+    """Return the current path flattened and mapped to device space.
+
+    Curves are flattened before the mapping, so every returned point can be
+    transformed with the affine ``matrix`` (the current user-to-device CTM).
+
+    """
+    device_path = []
+    for kind, points in context.copy_path_flat():
+        mapped_points = []
+        for index in range(0, len(points), 2):
+            mapped_points.extend(
+                matrix.transform_point(points[index], points[index + 1]))
+        device_path.append((kind, tuple(mapped_points)))
+    return device_path
+
+
 def preserve_ratio(surface, node, width=None, height=None):
     """Manage the ratio preservation."""
     if node.tag == 'marker':

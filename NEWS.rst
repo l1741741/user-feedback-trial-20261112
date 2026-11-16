@@ -3,6 +3,18 @@
 ======
 
 
+Unreleased
+==========
+
+* Support ``vector-effect="non-scaling-stroke"``: the stroke keeps a constant
+  screen thickness under any (including non-uniform and nested) transform,
+  while the path geometry still follows the object, group and viewport
+  transforms. Caps, joins, dashes, markers and gradient/pattern paint are
+  preserved. Verified on PNG (pixel measurements) and PDF (rasterized with
+  Poppler); the Cairo SVG and PS/PS outputs bake the fixed width into their
+  vector operators. See ``docs/vector-effect``.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 
