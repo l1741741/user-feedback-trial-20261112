@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Marker direction / scaling demo.
+
+  Every line below carries start (green), mid (orange) and end (red) markers
+  so that the travelling direction can be read directly from the picture.
+  Render with:  python work/demo/render_demo.py
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="720"
+     viewBox="0 0 940 720" font-family="sans-serif">
+  <defs>
+    <!-- Directional arrow: tip at (10, 5), i.e. refX/refY. orient="auto". -->
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="10" refY="5"
+            markerUnits="strokeWidth" orient="auto"
+            viewBox="0 0 10 10" overflow="visible">
+      <path d="M0,0 L10,5 L0,10 z" fill="red"/>
+    </marker>
+    <!-- Same geometry with auto-start-reverse. -->
+    <marker id="arrow-reverse" markerWidth="10" markerHeight="10"
+            refX="10" refY="5" orient="auto-start-reverse"
+            viewBox="0 0 10 10" overflow="visible">
+      <path d="M0,0 L10,5 L0,10 z" fill="purple"/>
+    </marker>
+    <!-- Explicit fixed orientation, must never follow the path. -->
+    <marker id="arrow-fixed" markerWidth="10" markerHeight="10"
+            refX="5" refY="5" orient="45"
+            viewBox="0 0 10 10" overflow="visible">
+      <path d="M0,0 L10,5 L0,10 z" fill="teal"/>
+    </marker>
+    <!-- userSpaceOnUse: identical pixel size whatever the stroke width. -->
+    <marker id="arrow-userspace" markerWidth="14" markerHeight="14"
+            refX="14" refY="7" markerUnits="userSpaceOnUse" orient="auto"
+            viewBox="0 0 14 14" overflow="visible">
+      <path d="M0,0 L14,7 L0,14 z" fill="navy"/>
+    </marker>
+  </defs>
+
+  <rect width="940" height="720" fill="white"/>
+  <g font-size="15" fill="#333" text-anchor="middle">
+
+    <!-- 1. Straight line, auto directions + start reverse -->
+    <text x="180" y="40">1. straight line (start reversed)</text>
+    <line x1="60" y1="80" x2="300" y2="80" stroke="#888" stroke-width="2"
+          marker-start="url(#arrow-reverse)"
+          marker-mid="url(#arrow)"
+          marker-end="url(#arrow)"/>
+
+    <!-- 2. Polyline, bisection at every corner -->
+    <text x="180" y="140">2. polyline corners (bisector orientation)</text>
+    <polyline points="60,180 180,180 180,260 300,260" fill="none"
+              stroke="#888" stroke-width="2"
+              marker-start="url(#arrow)"
+              marker-mid="url(#arrow)"
+              marker-end="url(#arrow)"/>
+
+    <!-- 3. Cubic curve -->
+    <text x="180" y="320">3. cubic Bézier (endpoint tangents)</text>
+    <path d="M60,360 C60,300 180,420 300,360" fill="none"
+          stroke="#888" stroke-width="2"
+          marker-start="url(#arrow)"
+          marker-mid="url(#arrow)"
+          marker-end="url(#arrow)"/>
+
+    <!-- 4. Quadratic curve (tangent used to be hard-coded to 0) -->
+    <text x="180" y="430">4. quadratic Bézier (real tangents)</text>
+    <path d="M60,470 Q180,410 300,470" fill="none"
+          stroke="#888" stroke-width="2"
+          marker-start="url(#arrow)"
+          marker-mid="url(#arrow)"
+          marker-end="url(#arrow)"/>
+
+    <!-- 5. Zero-length segments inside a normal path -->
+    <text x="180" y="540">5. zero-length segments (no NaN directions)</text>
+    <path d="M60,580 L60,580 L180,580 L180,580 L180,580 L300,580"
+          fill="none" stroke="#888" stroke-width="2"
+          marker-start="url(#arrow)"
+          marker-mid="url(#arrow)"
+          marker-end="url(#arrow)"/>
+
+    <!-- 6. Closed path: one mid marker per vertex, nothing at the seam -->
+    <text x="560" y="40">6. closed path (4 mid markers only)</text>
+    <path d="M460,70 L660,70 L660,150 L460,150 Z" fill="none"
+          stroke="#888" stroke-width="2"
+          marker-start="url(#arrow)"
+          marker-mid="url(#arrow)"
+          marker-end="url(#arrow)"/>
+
+    <!-- 7. Closed polygon -->
+    <text x="560" y="200">7. closed polygon</text>
+    <polygon points="470,230 650,230 650,310 470,310" fill="none"
+             stroke="#888" stroke-width="2"
+             marker-start="url(#arrow)"
+             marker-mid="url(#arrow)"
+             marker-end="url(#arrow)"/>
+
+    <!-- 8. Explicit orient angle stays fixed -->
+    <text x="560" y="360">8. explicit orient="45" (never auto)</text>
+    <line x1="460" y1="400" x2="660" y2="400" stroke="#888" stroke-width="2"
+          marker-start="url(#arrow-fixed)"
+          marker-end="url(#arrow-fixed)"/>
+
+    <!-- 9. Same marker, different stroke widths: no cross-contamination -->
+    <text x="560" y="450">9. shared marker, stroke-width 1 / 3 / 6</text>
+    <line x1="460" y1="490" x2="660" y2="490" stroke="#888" stroke-width="1"
+          marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <line x1="460" y1="530" x2="660" y2="530" stroke="#888" stroke-width="3"
+          marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <line x1="460" y1="590" x2="660" y2="590" stroke="#888" stroke-width="6"
+          marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+
+    <!-- 10. userSpaceOnUse marker keeps a constant pixel size -->
+    <text x="830" y="450">10. userSpaceOnUse, width 1 / 6</text>
+    <line x1="760" y1="490" x2="900" y2="490" stroke="#888" stroke-width="1"
+          marker-start="url(#arrow-userspace)"
+          marker-end="url(#arrow-userspace)"/>
+    <line x1="760" y1="560" x2="900" y2="560" stroke="#888" stroke-width="6"
+          marker-start="url(#arrow-userspace)"
+          marker-end="url(#arrow-userspace)"/>
+
+    <!-- 11. Closed path with reversed segment (180 deg turn at the seam) -->
+    <text x="830" y="40">11. closed 2-point path (180° seam)</text>
+    <path d="M780,80 L880,80 Z" fill="none" stroke="#888" stroke-width="2"
+          marker-start="url(#arrow)"
+          marker-mid="url(#arrow)"
+          marker-end="url(#arrow)"/>
+
+    <!-- 12. Arc -->
+    <text x="830" y="200">12. arc (tangent follows curvature)</text>
+    <path d="M770,280 A60,60 0 0 1 890,280" fill="none"
+          stroke="#888" stroke-width="2"
+          marker-start="url(#arrow)"
+          marker-mid="url(#arrow)"
+          marker-end="url(#arrow)"/>
+  </g>
+</svg>

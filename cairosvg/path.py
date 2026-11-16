@@ -4,7 +4,7 @@ Paths manager.
 """
 
 from collections import deque
-from math import copysign, hypot, pi, radians
+from math import atan2, copysign, hypot, pi, radians, sin, cos
 from re import finditer
 
 from .bounding_box import calculate_bounding_box
@@ -12,6 +12,206 @@ from .helpers import (
     PATH_LETTERS, clip_marker_box, node_format, normalize, point, point_angle,
     preserve_ratio, quadratic_points, rotate, size)
 from .url import parse_url
+
+# Sentinel appended to ``node.vertices`` by the ``z``/``Z`` close-path command
+# and by ``polygon`` elements. Unlike the ``None`` used between two distinct
+# subpaths, it marks the closing vertex of a *closed* subpath: the marker drawn
+# there behaves like a mid marker joining the last and the first segments.
+CLOSE_PATH = object()
+
+
+def quadratic_angles(x1, y1, x2, y2, x3, y3):
+    """Return the tangent directions of a quadratic Bézier curve.
+
+    The two returned angles are respectively the direction of the tangent at
+    the start point and at the end point of the curve, in radians in the
+    user-space coordinate system (y axis pointing down). The tangent of a
+    quadratic Bézier at its endpoints is aligned with the line joining the
+    endpoint to its control point.
+
+    """
+    return (
+        point_angle(x1, y1, x2, y2),
+        point_angle(x2, y2, x3, y3),
+    )
+
+
+def cubic_angles(x0, y0, x1, y1, x2, y2, x3, y3):
+    """Return the tangent directions of a cubic Bézier curve.
+
+    The tangent at the endpoints of a cubic Bézier is aligned with the line
+    joining the endpoint to its neighboring control point. Degenerate
+    tangents (endpoint and control point at the same location) fall back on
+    the next available derivative direction.
+
+    """
+    start = point_angle(x0, y0, x1, y1)
+    if (x0, y0) == (x1, y1):
+        # First derivative is zero: use the second derivative direction.
+        start = point_angle(x1, y1, x2, y2)
+        if (x1, y1) == (x2, y2):
+            start = point_angle(x2, y2, x3, y3)
+    end = point_angle(x2, y2, x3, y3)
+    if (x2, y2) == (x3, y3):
+        end = point_angle(x1, y1, x2, y2)
+        if (x1, y1) == (x2, y2):
+            end = point_angle(x0, y0, x1, y1)
+    return start, end
+
+
+def marker_mid_angle(incoming, outgoing):
+    """Return the orientation of a mid marker between two segments.
+
+    ``incoming`` is the tangent direction of the segment ending at the
+    vertex, ``outgoing`` the tangent direction of the segment starting at the
+    vertex, both in radians.
+
+    The marker points along the bisector of the angle between the incoming and
+    outgoing directions, as required by the SVG marker algorithm. When the two
+    segments are collinear the bisector is simply the common direction. When
+    they are exactly opposite the bisector is not defined: the incoming
+    tangent is then used, matching the SVG 2 marker algorithm.
+
+    """
+    sum_y = sin(incoming) + sin(outgoing)
+    sum_x = cos(incoming) + cos(outgoing)
+    if hypot(sum_x, sum_y) < 1e-9:
+        return incoming
+    return atan2(sum_y, sum_x)
+
+
+def _parse_marker_vertices(vertices):
+    """Split raw path vertices into structured marker placements.
+
+    The geometry builders store, for every subpath, an alternating sequence of
+    points ``(x, y)`` and segment angle pairs ``(start_angle, end_angle)``:
+    ``point, segment, point, segment, ..., point``. For every segment type
+    (line, arc, cubic or quadratic Bézier) the two values are the tangent
+    direction at the segment start and at its end, expressed as outgoing
+    directions in radians; a straight line stores the same angle twice.
+    A ``None`` entry separates two independent (open) subpaths while the
+    :data:`CLOSE_PATH` sentinel closes the current subpath.
+
+    Points and angle pairs are both float pairs, so they are told apart by
+    their position in the alternating stream rather than by their values.
+
+    Zero-length segments (including runs of consecutive ones) do not define a
+    direction: they are skipped so that the surrounding non-degenerate
+    segments provide the marker orientation, instead of propagating the
+    undefined tangent of an empty segment.
+
+    Return a list of subpaths, each one being a tuple ``(closed, placements)``
+    where ``placements`` is a list of ``(point, angle, position)`` tuples with
+    position in ``('start', 'mid', 'end')``.
+
+    """
+    subpaths = []
+    points = []
+    segments = []
+    closed = False
+
+    def flush():
+        if not points:
+            return
+        # Open subpath: ``segments[i]`` goes from ``points[i]`` to
+        # ``points[i + 1]`` (one fewer segment than points). Closed subpath:
+        # there is one additional segment closing ``points[-1]`` back onto
+        # ``points[0]``. A ``None`` entry marks a zero-length segment.
+        valid = [i for i, segment in enumerate(segments) if segment is not None]
+        placements = []
+        if valid:
+            if closed:
+                # Every vertex of a closed subpath joins two segments and
+                # therefore gets a mid marker only: the closing vertex is not
+                # also a start/end marker position.
+                for i in range(len(points)):
+                    previous = segments[i - 1]
+                    following = segments[i]
+                    if previous is not None and following is not None:
+                        angle = marker_mid_angle(
+                            previous[1], following[0])
+                    elif following is not None:
+                        angle = following[0]
+                    else:
+                        angle = previous[1]
+                    placements.append((points[i], angle, 'mid'))
+            else:
+                first, last = valid[0], valid[-1]
+                # Start marker: outgoing tangent of the first non-degenerate
+                # segment.
+                placements.append(
+                    (points[0], segments[first][0], 'start'))
+                # Mid markers at every interior vertex, using the nearest
+                # defined tangent on each side of the vertex.
+                for i in range(1, len(points) - 1):
+                    previous = next(
+                        (j for j in reversed(valid) if j < i), None)
+                    following = next(
+                        (j for j in valid if j >= i), None)
+                    if previous is None or following is None:
+                        # Interior vertex only reachable through zero-length
+                        # segments at one end: no defined direction.
+                        continue
+                    placements.append((
+                        points[i],
+                        marker_mid_angle(
+                            segments[previous][1], segments[following][0]),
+                        'mid'))
+                # End marker: outgoing tangent of the last non-degenerate
+                # segment.
+                placements.append(
+                    (points[-1], segments[last][1], 'end'))
+        else:
+            # A subpath made only of zero-length segments has no defined
+            # direction. A closed one collapses onto a single vertex, which
+            # is still a mid position; an open one keeps both endpoints.
+            if closed:
+                placements.append((points[0], 0, 'mid'))
+            else:
+                placements.append((points[0], 0, 'start'))
+                if len(points) > 1:
+                    placements.append((points[-1], 0, 'end'))
+        subpaths.append((closed, placements))
+
+    pending_segment = None
+    expect_point = True
+    for item in vertices:
+        if item is None:
+            flush()
+            points, segments, closed = [], [], False
+            pending_segment = None
+            expect_point = True
+        elif item is CLOSE_PATH:
+            # The pending angle pair is the implicit closing segment.
+            if pending_segment is not None:
+                start = points[-1]
+                if points and start == points[0]:
+                    segments.append(None)
+                else:
+                    segments.append(pending_segment)
+                pending_segment = None
+            closed = True
+            flush()
+            points, segments, closed = [], [], False
+            expect_point = True
+        elif expect_point:
+            # Coordinate point ending the pending segment (if any).
+            if pending_segment is not None:
+                start = points[-1] if points else None
+                if start is not None and item == start:
+                    segments.append(None)
+                else:
+                    segments.append(pending_segment)
+                pending_segment = None
+            points.append(item)
+            expect_point = False
+        else:
+            # Angle pair belonging to the segment ending at the next point.
+            pending_segment = item
+            expect_point = True
+
+    flush()
+    return subpaths
 
 
 def draw_markers(surface, node):
@@ -28,96 +228,128 @@ def draw_markers(surface, node):
         else:
             markers[position] = common_marker
 
-    angle1, angle2 = None, None
-    position = 'start'
+    if not any(markers.values()):
+        return
 
-    while node.vertices:
-        # Calculate position and angle
-        point = node.vertices.popleft()
-        angles = node.vertices.popleft() if node.vertices else None
-        if angles:
-            if position == 'start':
-                angle = pi - angles[0]
-            else:
-                angle = (angle2 + pi - angles[0]) / 2
-            angle1, angle2 = angles
-        else:
-            angle = angle2
-            position = 'end'
+    stroke_width = size(surface, node.get('stroke-width', '1'))
 
-        # Draw marker (if a marker exists for 'position')
-        marker = markers[position]
-        if marker:
+    for closed, placements in _parse_marker_vertices(list(node.vertices)):
+        for point, angle, position in placements:
+            marker = markers[position]
+            if not marker:
+                continue
             marker_node = surface.markers.get(marker)
+            if marker_node is None:
+                continue
 
-            # Calculate scale based on current stroke (if requested)
-            if marker_node.get('markerUnits') == 'userSpaceOnUse':
-                scale = 1
-            else:
-                scale = size(
-                    surface, surface.parent_node.get('stroke-width', '1'))
+            _draw_marker(
+                surface, node, marker_node, point, angle, position,
+                stroke_width)
 
-            # Calculate position, (additional) scale and clipping based on
-            # marker properties
-            viewbox = node_format(surface, marker_node)[2]
-            if viewbox:
-                scale_x, scale_y, translate_x, translate_y = preserve_ratio(
-                    surface, marker_node)
-                clip_box = clip_marker_box(
-                    surface, marker_node, scale_x, scale_y)
-            else:
-                # Calculate sizes
-                marker_width = size(surface,
-                                    marker_node.get('markerWidth', '3'), 'x')
-                marker_height = size(surface,
-                                     marker_node.get('markerHeight', '3'), 'y')
-                bounding_box = calculate_bounding_box(surface, marker_node)
 
-                # Calculate position and scale (preserve aspect ratio)
-                translate_x = -size(surface, marker_node.get('refX', '0'), 'x')
-                translate_y = -size(surface, marker_node.get('refY', '0'), 'y')
-                scale_x = scale_y = min(
-                    marker_width / bounding_box[2],
-                    marker_height / bounding_box[3])
+def _marker_geometry(surface, node, marker_node, stroke_width):
+    """Return the local-to-user transform and clip box of a marker.
 
-                # No clipping since viewbox is not present
-                clip_box = None
+    The marker transformation follows the SVG 1.1 marker algorithm:
 
-            # Add extra path for marker
-            temp_path = surface.context.copy_path()
-            surface.context.new_path()
+    1. an additional uniform scale equal to the host stroke width when
+       ``markerUnits`` is the default ``strokeWidth`` (``userSpaceOnUse``
+       markers are not scaled);
+    2. the marker viewport scaling, derived from ``markerWidth`` /
+       ``markerHeight`` and the ``viewBox`` (with ``preserveAspectRatio``);
+    3. a translation placing ``(refX, refY)`` at the reference point.
 
-            # Override angle (if requested)
-            node_angle = marker_node.get('orient', '0')
-            if node_angle not in ('auto', 'auto-start-reverse'):
-                angle = radians(float(node_angle))
-            elif node_angle == 'auto-start-reverse' and position == 'start':
-                angle += radians(180)
+    Every value is computed from the marker node and the *current* host node,
+    so the same marker referenced by paths with different stroke widths is
+    rendered independently and never shares mutated state.
 
-            # Draw marker path
-            # See http://www.w3.org/TR/SVG/painting.html#MarkerAlgorithm
-            for child in marker_node.children:
+    """
+    if marker_node.get('markerUnits') == 'userSpaceOnUse':
+        units_scale = 1
+    else:
+        units_scale = stroke_width
+
+    viewbox = node_format(surface, marker_node)[2]
+    if viewbox:
+        scale_x, scale_y, translate_x, translate_y = preserve_ratio(
+            surface, marker_node)
+        clip_box = clip_marker_box(surface, marker_node, scale_x, scale_y)
+    else:
+        # Without a viewBox the marker content is expressed in the marker's
+        # own user units: only the markerUnits scaling applies, and the
+        # reference point is translated to the origin.
+        marker_width = size(surface,
+                            marker_node.get('markerWidth', '3'), 'x')
+        marker_height = size(surface,
+                             marker_node.get('markerHeight', '3'), 'y')
+        bounding_box = calculate_bounding_box(surface, marker_node)
+
+        translate_x = -size(surface, marker_node.get('refX', '0'), 'x')
+        translate_y = -size(surface, marker_node.get('refY', '0'), 'y')
+        if bounding_box[2] and bounding_box[3]:
+            scale_x = scale_y = min(
+                marker_width / bounding_box[2],
+                marker_height / bounding_box[3])
+        else:
+            scale_x = scale_y = 1
+        clip_box = None
+
+    return units_scale, scale_x, scale_y, translate_x, translate_y, clip_box
+
+
+def _draw_marker(surface, node, marker_node, point, angle, position,
+                 stroke_width):
+    """Draw one marker instance at ``point`` with the given orientation.
+
+    ``angle`` is the true user-space direction in which the marker should
+    point, in radians with the y axis pointing down (0 = east, π/2 = south).
+    A marker geometry pointing toward the local +x axis renders with its tip
+    on the reference point, so a zero rotation points west: turning a travel
+    direction into the matching Cairo rotation therefore requires
+    ``pi - angle``. This single conversion lets every geometry builder keep
+    storing unmodified travel directions regardless of the segment type.
+
+    """
+    (units_scale, scale_x, scale_y, translate_x, translate_y,
+     clip_box) = _marker_geometry(surface, node, marker_node, stroke_width)
+
+    # An explicit numeric orient keeps its fixed angle; "auto" follows the
+    # path direction everywhere, and "auto-start-reverse" additionally flips
+    # the start marker. Mid and end markers behave like "auto" in that case.
+    node_angle = marker_node.get('orient', '0')
+    if node_angle not in ('auto', 'auto-start-reverse'):
+        # Numeric orient values follow the SVG/Cairo clockwise convention.
+        rotation = radians(float(node_angle))
+    else:
+        if node_angle == 'auto-start-reverse' and position == 'start':
+            angle += pi
+        rotation = pi - angle
+
+    # The path being drawn must not be consumed by the marker content.
+    temp_path = surface.context.copy_path()
+    surface.context.new_path()
+
+    try:
+        for child in marker_node.children:
+            surface.context.save()
+            surface.context.translate(*point)
+            surface.context.rotate(rotation)
+            surface.context.scale(units_scale, units_scale)
+            surface.context.scale(scale_x, scale_y)
+            surface.context.translate(translate_x, translate_y)
+
+            # Add clipping (if present and requested)
+            overflow = marker_node.get('overflow', 'hidden')
+            if clip_box and overflow in ('hidden', 'scroll'):
                 surface.context.save()
-                surface.context.translate(*point)
-                surface.context.rotate(angle)
-                surface.context.scale(scale)
-                surface.context.scale(scale_x, scale_y)
-                surface.context.translate(translate_x, translate_y)
-
-                # Add clipping (if present and requested)
-                overflow = marker_node.get('overflow', 'hidden')
-                if clip_box and overflow in ('hidden', 'scroll'):
-                    surface.context.save()
-                    surface.context.rectangle(*clip_box)
-                    surface.context.restore()
-                    surface.context.clip()
-
-                surface.draw(child)
+                surface.context.rectangle(*clip_box)
+                surface.context.clip()
                 surface.context.restore()
 
-            surface.context.append_path(temp_path)
-
-        position = 'mid' if angles else 'start'
+            surface.draw(child)
+            surface.context.restore()
+    finally:
+        surface.context.append_path(temp_path)
 
 
 def path(surface, node):
@@ -188,8 +420,8 @@ def path(surface, node):
             if not rx or not ry:
                 if string := string.strip():
                     # As we replace the current operation by l, we must be sure
-                    # that the next letter is set to the real current letter (a
-                    # or A) in case it’s omitted
+                    # that the next letter is set to the real current letter
+                    # (a or A) in case it’s omitted
                     matches.appendleft((letter, string))
                 matches.appendleft(('l', f'{x3} {y3}'))
                 continue
@@ -230,8 +462,15 @@ def path(surface, node):
             angle1 = point_angle(xc, yc, 0, 0)
             angle2 = point_angle(xc, yc, xe, ye)
 
-            # Store the tangent angles
-            node.vertices.append((-angle1, -angle2))
+            # Store the tangent angles. ``angle1`` / ``angle2`` locate the
+            # endpoints relative to the arc center (the radial direction);
+            # the travel tangent is perpendicular to that radius. A forward
+            # arc (``arc``) turns by +pi/2 from the radial direction, while
+            # a reverse arc (``arc_negative``) turns by -pi/2.
+            tangent_sign = 1 if sweep else -1
+            tangent1 = angle1 + tangent_sign * pi / 2
+            tangent2 = angle2 + tangent_sign * pi / 2
+            node.vertices.append((tangent1, tangent2))
 
             # Draw the arc
             surface.context.save()
@@ -248,8 +487,8 @@ def path(surface, node):
             x1, y1, string = point(surface, string)
             x2, y2, string = point(surface, string)
             x3, y3, string = point(surface, string)
-            node.vertices.append((
-                point_angle(x2, y2, x1, y1), point_angle(x2, y2, x3, y3)))
+            node.vertices.append(cubic_angles(
+                0, 0, x1, y1, x2, y2, x3, y3))
             surface.context.rel_curve_to(x1, y1, x2, y2, x3, y3)
             current_point = current_point[0] + x3, current_point[1] + y3
 
@@ -266,8 +505,8 @@ def path(surface, node):
             x1, y1, string = point(surface, string)
             x2, y2, string = point(surface, string)
             x3, y3, string = point(surface, string)
-            node.vertices.append((
-                point_angle(x2, y2, x1, y1), point_angle(x2, y2, x3, y3)))
+            node.vertices.append(cubic_angles(
+                *current_point, x1, y1, x2, y2, x3, y3))
             surface.context.curve_to(x1, y1, x2, y2, x3, y3)
             current_point = x3, y3
 
@@ -276,7 +515,7 @@ def path(surface, node):
             x, string = (string + ' ').split(' ', 1)
             old_x, old_y = current_point
             angle = 0 if size(surface, x, 'x') > 0 else pi
-            node.vertices.append((pi - angle, angle))
+            node.vertices.append((angle, angle))
             x = size(surface, x, 'x')
             surface.context.rel_line_to(x, 0)
             current_point = current_point[0] + x, current_point[1]
@@ -286,7 +525,7 @@ def path(surface, node):
             x, string = (string + ' ').split(' ', 1)
             old_x, old_y = current_point
             angle = 0 if size(surface, x, 'x') > old_x else pi
-            node.vertices.append((pi - angle, angle))
+            node.vertices.append((angle, angle))
             x = size(surface, x, 'x')
             surface.context.line_to(x, old_y)
             current_point = x, current_point[1]
@@ -295,7 +534,7 @@ def path(surface, node):
             # Relative straight line
             x, y, string = point(surface, string)
             angle = point_angle(0, 0, x, y)
-            node.vertices.append((pi - angle, angle))
+            node.vertices.append((angle, angle))
             surface.context.rel_line_to(x, y)
             current_point = current_point[0] + x, current_point[1] + y
 
@@ -304,7 +543,7 @@ def path(surface, node):
             x, y, string = point(surface, string)
             old_x, old_y = current_point
             angle = point_angle(old_x, old_y, x, y)
-            node.vertices.append((pi - angle, angle))
+            node.vertices.append((angle, angle))
             surface.context.line_to(x, y)
             current_point = x, y
 
@@ -326,14 +565,15 @@ def path(surface, node):
 
         elif letter == 'q':
             # Relative quadratic curve
+            x, y = current_point
             x1, y1 = 0, 0
             x2, y2, string = point(surface, string)
             x3, y3, string = point(surface, string)
             xq1, yq1, xq2, yq2, xq3, yq3 = quadratic_points(
                 x1, y1, x2, y2, x3, y3)
-            surface.context.rel_curve_to(xq1, yq1, xq2, yq2, xq3, yq3)
-            node.vertices.append((0, 0))
-            current_point = current_point[0] + x3, current_point[1] + y3
+            surface.context.rel_curve_to(xq1, yq1, xq2, yq2, xq3, y3)
+            node.vertices.append(quadratic_angles(0, 0, x2, y2, x3, y3))
+            current_point = current_point[0] + x3, current_point[1] + y
 
         elif letter == 'Q':
             # Quadratic curve
@@ -342,8 +582,9 @@ def path(surface, node):
             x3, y3, string = point(surface, string)
             xq1, yq1, xq2, yq2, xq3, yq3 = quadratic_points(
                 x1, y1, x2, y2, x3, y3)
-            surface.context.curve_to(xq1, yq1, xq2, yq2, xq3, yq3)
-            node.vertices.append((0, 0))
+            surface.context.curve_to(xq1, yq1, xq2, yq2, xq3, y3)
+            node.vertices.append(
+                quadratic_angles(x1, y1, x2, y2, x3, y3))
             current_point = x3, y3
 
         elif letter == 's':
@@ -353,8 +594,8 @@ def path(surface, node):
             y1 = y3 - y2 if last_letter in 'csCS' else 0
             x2, y2, string = point(surface, string)
             x3, y3, string = point(surface, string)
-            node.vertices.append((
-                point_angle(x2, y2, x1, y1), point_angle(x2, y2, x3, y3)))
+            node.vertices.append(cubic_angles(
+                0, 0, x1, y1, x2, y2, x3, y3))
             surface.context.rel_curve_to(x1, y1, x2, y2, x3, y3)
             current_point = current_point[0] + x3, current_point[1] + y3
 
@@ -373,8 +614,8 @@ def path(surface, node):
             y1 = y3 + (y3 - y2) if last_letter in 'csCS' else y
             x2, y2, string = point(surface, string)
             x3, y3, string = point(surface, string)
-            node.vertices.append((
-                point_angle(x2, y2, x1, y1), point_angle(x2, y2, x3, y3)))
+            node.vertices.append(cubic_angles(
+                x, y, x1, y1, x2, y2, x3, y3))
             surface.context.curve_to(x1, y1, x2, y2, x3, y3)
             current_point = x3, y3
 
@@ -393,9 +634,9 @@ def path(surface, node):
             x3, y3, string = point(surface, string)
             xq1, yq1, xq2, yq2, xq3, yq3 = quadratic_points(
                 x1, y1, x2, y2, x3, y3)
-            node.vertices.append((0, 0))
+            node.vertices.append(quadratic_angles(0, 0, x2, y2, x3, y3))
             surface.context.rel_curve_to(xq1, yq1, xq2, yq2, xq3, yq3)
-            current_point = current_point[0] + x3, current_point[1] + y3
+            current_point = current_point[0] + x3, current_point[1] + y
 
         elif letter == 'T':
             # Quadratic curve end
@@ -413,7 +654,8 @@ def path(surface, node):
             x3, y3, string = point(surface, string)
             xq1, yq1, xq2, yq2, xq3, yq3 = quadratic_points(
                 x1, y1, x2, y2, x3, y3)
-            node.vertices.append((0, 0))
+            node.vertices.append(
+                quadratic_angles(x1, y1, x2, y2, x3, y3))
             surface.context.curve_to(xq1, yq1, xq2, yq2, xq3, yq3)
             current_point = x3, y3
 
@@ -422,7 +664,7 @@ def path(surface, node):
             y, string = (string + ' ').split(' ', 1)
             old_x, old_y = current_point
             angle = copysign(pi / 2, size(surface, y, 'y'))
-            node.vertices.append((-angle, angle))
+            node.vertices.append((angle, angle))
             y = size(surface, y, 'y')
             surface.context.rel_line_to(0, y)
             current_point = current_point[0], current_point[1] + y
@@ -432,14 +674,19 @@ def path(surface, node):
             y, string = (string + ' ').split(' ', 1)
             old_x, old_y = current_point
             angle = copysign(pi / 2, size(surface, y, 'y') - old_y)
-            node.vertices.append((-angle, angle))
+            node.vertices.append((angle, angle))
             y = size(surface, y, 'y')
             surface.context.line_to(old_x, y)
             current_point = current_point[0], y
 
         elif letter in 'zZ' and first_path_point:
-            # End of path
-            node.vertices.append(None)
+            # End of path. The implicit closing segment joins the current
+            # point back to the first point: store its tangent angles before
+            # the close-path sentinel so that the closing vertex can be
+            # treated like any other mid marker position.
+            closing_angle = point_angle(*current_point, *first_path_point)
+            node.vertices.append((closing_angle, closing_angle))
+            node.vertices.append(CLOSE_PATH)
             surface.context.close_path()
             current_point = first_path_point
 

@@ -3,6 +3,29 @@
 ======
 
 
+Not yet released
+================
+
+* Rework SVG marker (``marker-start``, ``marker-mid`` and ``marker-end``)
+  rendering:
+
+  - Markers now follow the real travel direction of straight lines,
+    polylines, polygons, arcs and cubic/quadratic Bézier curves instead of
+    relying on hard-coded or geometry-independent angles.
+  - ``orient="auto"`` tracks each segment tangent; ``orient="auto-start-
+    reverse"`` reverses only the start marker; explicit numeric ``orient``
+    values keep their fixed angle.
+  - Zero-length segments, including runs of consecutive ones sandwiched
+    between normal segments, no longer produce undefined orientations: the
+    surrounding non-degenerate segments provide the marker direction.
+  - Closed paths and polygons place exactly one mid marker per vertex; the
+    closing seam is neither drawn twice nor skipped.
+  - Marker ``viewBox``, reference point (``refX``/``refY``) and
+    ``markerUnits`` are applied together with the host path transform. The
+    same marker referenced from paths with different stroke widths is
+    rendered independently, without shared or mutated state.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

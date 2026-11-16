@@ -7,6 +7,7 @@ from collections import deque
 from math import pi
 
 from .helpers import normalize, point, point_angle, size
+from .path import CLOSE_PATH
 
 
 def circle(surface, node):
@@ -48,13 +49,23 @@ def line(surface, node):
     surface.context.move_to(x1, y1)
     surface.context.line_to(x2, y2)
     angle = point_angle(x1, y1, x2, y2)
-    node.vertices = deque([(x1, y1), (pi - angle, angle), (x2, y2)])
+    # Both endpoint tangents of a straight line point along its direction.
+    node.vertices = deque([(x1, y1), (angle, angle), (x2, y2)])
 
 
 def polygon(surface, node):
     """Draw a polygon ``node`` on ``surface``."""
     polyline(surface, node)
     surface.context.close_path()
+    # Store the tangent of the implicit closing segment before the
+    # close-path sentinel: the closing vertex is a mid marker position
+    # joining the last segment to the first one.
+    if len(node.vertices) >= 3:
+        first_point = node.vertices[0]
+        last_point = node.vertices[-1]
+        closing_angle = point_angle(*last_point, *first_point)
+        node.vertices.append((closing_angle, closing_angle))
+    node.vertices.append(CLOSE_PATH)
 
 
 def polyline(surface, node):
@@ -68,7 +79,7 @@ def polyline(surface, node):
             x_old, y_old = x, y
             x, y, points = point(surface, points)
             angle = point_angle(x_old, y_old, x, y)
-            node.vertices.append((pi - angle, angle))
+            node.vertices.append((angle, angle))
             surface.context.line_to(x, y)
             node.vertices.append((x, y))
 
