@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Same icons as icons.svg, with the drawing nodes in reverse order.
+
+  This file proves that the rendering of a shared gradient does not depend on
+  the drawing order: every icon keeps exactly the same color distribution as
+  in icons.svg.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="500" height="100" viewBox="0 0 500 100">
+
+  <defs>
+    <linearGradient id="spline" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0" stop-color="#e4002b"/>
+      <stop offset="0.5" stop-color="#7a007a"/>
+      <stop offset="1" stop-color="#0033e4"/>
+    </linearGradient>
+    <linearGradient id="bar" href="#spline"
+                    x1="0%" y1="0%" x2="0%" y2="100%"/>
+    <linearGradient id="bar-2" href="#bar" y1="0%" y2="100%"/>
+    <radialGradient id="dot" href="#spline"
+                    cx="50%" cy="50%" r="50%"/>
+    <linearGradient id="bar-own" href="#bar">
+      <stop offset="0" stop-color="#00b000"/>
+      <stop offset="1" stop-color="#003000"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 5. referrer whose own stops win over the inherited ones -->
+  <rect x="410" y="0" width="90" height="100" fill="url(#bar-own)"/>
+
+  <!-- 4. two-level referrer inside a transformed and scaled group -->
+  <g transform="translate(300, 10) scale(1, 0.8)">
+    <rect width="90" height="100" fill="url(#bar-2)"/>
+  </g>
+
+  <!-- 3. radial gradient inheriting the shared stops, half transparent -->
+  <rect x="200" y="0" width="90" height="100"
+        fill="url(#dot)" opacity="0.5"/>
+
+  <!-- 2. referrer turning the shared gradient vertical -->
+  <rect x="100" y="0" width="90" height="100" fill="url(#bar)"/>
+
+  <!-- 1. direct reference to the shared gradient -->
+  <rect x="0" y="0" width="90" height="100" fill="url(#spline)"/>
+</svg>

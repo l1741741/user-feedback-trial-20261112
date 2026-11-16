@@ -5,6 +5,8 @@ This module handles clips, gradients, masks, patterns and external nodes.
 
 """
 
+import copy
+
 from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
 from .features import match_features
 from .helpers import paint, size, transform
@@ -28,25 +30,65 @@ EXTEND_OPERATORS = {
     'repeat': cairo.EXTEND_REPEAT,
 }
 
+# Attributes that href inheritance must not copy from a referenced definition:
+# they describe the referencing node itself, not a paint server parameter.
+NOT_INHERITED_DEF_ATTRIBUTES = frozenset((
+    'id',
+    'href',
+    '{http://www.w3.org/1999/xlink}href',
+))
 
-def update_def_href(surface, def_name, def_dict, chain=None):
-    """Update the attributes of the def according to its href attribute."""
+
+def resolve_def_href(surface, def_name, def_dict):
+    """Return a copy of a definition with its ``href`` chain applied.
+
+    The copy inherits the attributes and, when the referenced definition
+    provides them, the stops of the definitions it links to. The referencing
+    node keeps its own attributes and stops, so the same shared definition
+    can be reused by any number of elements without any of them changing the
+    others, whatever the drawing order.
+
+    The original definitions stored in ``def_dict`` are never modified.
+    Cycles and missing references are ignored, like CairoSVG used to do.
+
+    """
     def_node = def_dict[def_name]
     href = parse_url(def_node.get_href()).fragment
-    if chain is None:
-        chain = set()
-    if href in def_dict and href not in chain:
-        chain.add(href)
-        update_def_href(surface, href, def_dict, chain)
-        href_node = def_dict[href]
-        def_dict[def_name] = Tree(
-            url=f'#{def_name}', url_fetcher=def_node.url_fetcher,
-            parent=href_node, parent_children=(not def_node.children),
-            tree_cache=surface.tree_cache, unsafe=def_node.unsafe)
-        # Inherit attributes generally not inherited
-        for key, value in href_node.items():
-            if key not in def_dict[def_name]:
-                def_dict[def_name][key] = value
+
+    # Build the chain of definitions to inherit from, nearest first. A
+    # definition already visited is dropped, so that cycles end safely.
+    chain = []
+    visited = {def_name}
+    while href in def_dict and href not in visited:
+        visited.add(href)
+        node = def_dict[href]
+        chain.append(node)
+        href = parse_url(node.get_href()).fragment
+
+    if not chain:
+        return def_node
+
+    # Build a new definition, the most distant ancestor being applied first
+    # so that the nearest one wins over it. Identifiers and href are never
+    # inherited.
+    merged = copy.copy(def_node)
+    dict.clear(merged)
+    for node in reversed(chain):
+        for key, value in node.items():
+            if key not in NOT_INHERITED_DEF_ATTRIBUTES:
+                merged[key] = value
+    for key, value in def_node.items():
+        merged[key] = value
+
+    # Only inherit the referenced stops when the referrer does not define
+    # any stop of its own.
+    if not def_node.children:
+        for node in chain:
+            if node.children:
+                merged.children = node.children
+                break
+
+    return merged
 
 
 def parse_all_defs(surface, node):
@@ -73,10 +115,8 @@ def parse_def(surface, node):
 def gradient_or_pattern(surface, node, name, opacity):
     """Gradient or pattern color."""
     if name in surface.gradients:
-        update_def_href(surface, name, surface.gradients)
         return draw_gradient(surface, node, name, opacity)
     elif name in surface.patterns:
-        update_def_href(surface, name, surface.patterns)
         return draw_pattern(surface, node, name, opacity)
 
 
@@ -157,7 +197,9 @@ def paint_mask(surface, node, name, opacity):
 
 def draw_gradient(surface, node, name, opacity):
     """Gradients colors."""
-    gradient_node = surface.gradients[name]
+    # Resolve the href chain on a copy: the stored definition is shared by
+    # every element using it and must never be modified here.
+    gradient_node = resolve_def_href(surface, name, surface.gradients)
 
     if gradient_node.get('gradientUnits') == 'userSpaceOnUse':
         width_ref, height_ref = 'x', 'y'
@@ -218,7 +260,12 @@ def draw_gradient(surface, node, name, opacity):
 
 def draw_pattern(surface, node, name, opacity):
     """Draw a pattern image."""
-    pattern_node = surface.patterns[name]
+    # Resolve the href chain on a shallow copy: the stored definition is
+    # shared by every element using it and must never be modified here (this
+    # function even pops width and height from it).
+    pattern_node = resolve_def_href(surface, name, surface.patterns)
+    if pattern_node is surface.patterns[name]:
+        pattern_node = copy.copy(pattern_node)
     pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
     pattern_node.tag = 'g'
     transform(surface, pattern_node.get('patternTransform'))

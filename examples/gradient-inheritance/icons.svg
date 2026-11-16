@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Gradient inheritance demo: five icons side by side.
+
+  All icons reference shared gradients through href. Each icon must keep the
+  same color distribution whatever the order of the drawing nodes, and
+  whatever the order in which the shared definitions are used.
+
+  Shared definitions:
+    spline   linear gradient with the common red > blue stops
+    bar      referrer of spline: horizontal gradient turned vertical by its
+             own x1/x2 attributes, inheriting the stops
+    bar-2    second level referrer of bar, inheriting every attribute it does
+             not give itself
+    dot      radial gradient inheriting the spline stops and spread method
+    bar-own  referrer with its own stops overriding the shared ones
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="500" height="100" viewBox="0 0 500 100">
+
+  <defs>
+    <linearGradient id="spline" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0" stop-color="#e4002b"/>
+      <stop offset="0.5" stop-color="#7a007a"/>
+      <stop offset="1" stop-color="#0033e4"/>
+    </linearGradient>
+
+    <linearGradient id="bar" href="#spline"
+                    x1="0%" y1="0%" x2="0%" y2="100%"/>
+
+    <linearGradient id="bar-2" href="#bar" y1="0%" y2="100%"/>
+
+    <radialGradient id="dot" href="#spline"
+                    cx="50%" cy="50%" r="50%"/>
+
+    <linearGradient id="bar-own" href="#bar">
+      <stop offset="0" stop-color="#00b000"/>
+      <stop offset="1" stop-color="#003000"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 1. direct reference to the shared gradient (red on the left) -->
+  <rect x="0" y="0" width="90" height="100" fill="url(#spline)"/>
+
+  <!-- 2. referrer turning the shared gradient vertical (red on top) -->
+  <rect x="100" y="0" width="90" height="100" fill="url(#bar)"/>
+
+  <!-- 3. radial gradient inheriting the shared stops, half transparent -->
+  <rect x="200" y="0" width="90" height="100"
+        fill="url(#dot)" opacity="0.5"/>
+
+  <!-- 4. two-level referrer inside a transformed and scaled group -->
+  <g transform="translate(300, 10) scale(1, 0.8)">
+    <rect width="90" height="100" fill="url(#bar-2)"/>
+  </g>
+
+  <!-- 5. referrer whose own stops win over the inherited ones -->
+  <rect x="410" y="0" width="90" height="100" fill="url(#bar-own)"/>
+</svg>
