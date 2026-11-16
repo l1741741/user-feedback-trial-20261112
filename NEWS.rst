@@ -3,6 +3,18 @@
 ======
 
 
+Unreleased
+==========
+
+* Make the rendered viewport match the rounded PNG surface, so fractional
+  sizes (including sizes coming from physical units and ``scale``) no longer
+  leave a transparent line on the right and bottom edges
+* Honour both ``output_width`` and ``output_height`` even when they change the
+  aspect ratio, and keep the ratio when only one of them is given
+* Reject non-finite and non-positive sizes with ``ValueError`` before creating
+  the output file, instead of writing an empty file or failing in Cairo
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

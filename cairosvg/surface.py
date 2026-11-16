@@ -5,6 +5,7 @@ Cairo surface creators.
 
 import copy
 import io
+from math import isfinite
 
 import cairocffi as cairo
 
@@ -119,6 +120,23 @@ class Surface(object):
                        This does NOT restrict fetching of the main SVG input
                        specified via the ``url`` parameter.
                        Applications should validate input URLs to prevent SSRF.
+        :param output_width: The requested output width, in pixels. When it is
+                             given without ``output_height``, the height is
+                             deduced from the document's aspect ratio.
+        :param output_height: The requested output height, in pixels. When it
+                              is given without ``output_width``, the width is
+                              deduced from the document's aspect ratio. When
+                              both are given they are both honoured, even if
+                              the aspect ratio changes; the document then fits
+                              the requested viewport according to its
+                              ``preserveAspectRatio`` value.
+        :param background_color: The color painted under the document.
+
+        The requested size must be finite and strictly positive, otherwise
+        ``ValueError`` is raised. Raster formats round the surface size to
+        whole pixels; the rendered viewport is stretched to that rounded grid,
+        so the output file never has a transparent edge caused by rounding and
+        percentage lengths always match the actual output size.
 
 
         Specifiy the output with:
@@ -189,21 +207,31 @@ class Surface(object):
         if viewbox is None:
             viewbox = (0, 0, width, height)
 
-        if output_width and output_height:
-            width, height = output_width, output_height
-        elif output_width:
-            if width:
-                # Keep the aspect ratio
-                height *= output_width / width
-            width = output_width
-        elif output_height:
-            if height:
-                # Keep the aspect ratio
-                width *= output_height / height
-            height = output_height
-        else:
+        if output_width is None and output_height is None:
             width *= scale
             height *= scale
+        elif output_height is None:
+            # Keep the aspect ratio
+            height = height * output_width / width if width else height
+            width = output_width
+        elif output_width is None:
+            # Keep the aspect ratio
+            width = width * output_height / height if height else width
+            height = output_height
+        else:
+            # Both sizes are given: they are used as-is, even when the
+            # aspect ratio changes. ``preserveAspectRatio`` then decides how
+            # the document fits in the requested viewport.
+            width, height = output_width, output_height
+
+        # Reject undefined sizes before creating the surface. File-backed
+        # surfaces open (and truncate) their output when they are created, so
+        # checking afterwards would leave an empty file pretending that the
+        # conversion succeeded.
+        if (
+                not isfinite(width) or not isfinite(height) or
+                width <= 0 or height <= 0):
+            raise ValueError('The SVG size is undefined')
 
         # Actual surface dimensions: may be rounded on raster surfaces types
         self.cairo, self.width, self.height = self._create_surface(
@@ -217,7 +245,18 @@ class Surface(object):
         # We must scale the context as the surface size is using physical units
         self.context.scale(
             self.device_units_per_user_units, self.device_units_per_user_units)
-        # Initial, non-rounded dimensions
+        # Raster surfaces round their size to whole device units, so the real
+        # surface can be slightly larger or smaller than the requested size.
+        # Stretch the whole requested viewport onto the real device grid:
+        # laying the document out for the requested size while leaving the
+        # surface at its rounded size would add a transparent row or column on
+        # the right and bottom edges (or clip the content), and percentage
+        # lengths would not match the size of the output file. The factor is
+        # exactly 1 for vector surfaces, which keep their exact size.
+        requested_width = width * self.device_units_per_user_units
+        requested_height = height * self.device_units_per_user_units
+        self.context.scale(
+            self.width / requested_width, self.height / requested_height)
         self.set_context_size(width, height, viewbox, tree)
         self.context.move_to(0, 0)
 
