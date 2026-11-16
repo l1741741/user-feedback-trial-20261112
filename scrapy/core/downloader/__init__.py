@@ -576,6 +576,9 @@ class Downloader:
     async def _download(self, slot: Slot, request: Request) -> Response:
         # The order is very important for the following logic. Do not change!
         try:
+            # 0. Recheck the request now that it has waited for its turn, before
+            # the download handler opens a connection.
+            self.middleware._check_download_deadline(request)
             # 1. Download the response
             response: Response = await self.handlers.download_request_async(request)
             # Counted before _end_transfer() resumes queued requests, so that

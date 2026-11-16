@@ -148,6 +148,17 @@ one per actual value of the placeholder.
 
     Set by :class:`~scrapy.spidermiddlewares.depth.DepthMiddleware`.
 
+.. stat:: download_deadline/exceeded
+
+``download_deadline/exceeded``
+    Number of requests that were not downloaded because the
+    :setting:`DOWNLOAD_DEADLINE` of their chain was exceeded. A request is
+    counted once even though the deadline is checked both when it is queued
+    and right before it is downloaded.
+
+    Set by
+    :class:`~scrapy.downloadermiddlewares.downloadtimeout.DownloadTimeoutMiddleware`.
+
 .. stat:: downloader/exception_count
 
 ``downloader/exception_count``

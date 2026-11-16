@@ -286,6 +286,14 @@ DownloadTimeoutMiddleware
     This middleware sets the download timeout for requests specified in the
     :setting:`DOWNLOAD_TIMEOUT` setting.
 
+    It also enforces :setting:`DOWNLOAD_DEADLINE`, which limits the total
+    download time of a request and of the requests derived from it, e.g.
+    retries and redirects. It is disabled by default. See that setting for
+    details.
+
+    With :setting:`DOWNLOAD_DEADLINE` unset, the middleware behaves as in
+    earlier versions.
+
 .. note::
 
     You can also set download timeout per-request using the

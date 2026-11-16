@@ -135,6 +135,16 @@ class DownloadCancelledError(Exception):
     """Indicates that a request download was cancelled."""
 
 
+class DownloadDeadlineExceededError(Exception):
+    """Indicates that the total download deadline of a request and of the
+    requests derived from it, e.g. retries and redirects, has been exceeded.
+
+    See :setting:`DOWNLOAD_DEADLINE`.
+
+    .. versionadded:: VERSION
+    """
+
+
 class DownloadFailedError(Exception):
     """Indicates that a request download has failed."""
 

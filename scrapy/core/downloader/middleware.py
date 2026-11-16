@@ -108,6 +108,11 @@ class DownloaderMiddlewareManager(MiddlewareManager):  # pylint: disable=abstrac
         if hasattr(mw, "process_request"):
             self.methods["process_request"].append(mw.process_request)
             self._check_mw_method_spider_arg(mw.process_request)
+        # DownloadTimeoutMiddleware defines this hook to recheck a request right
+        # before its download, e.g. to account for the time it spent waiting
+        # for its turn. It is not part of the public middleware interface.
+        if check := getattr(mw, "_check_download_deadline", None):
+            self.methods["_check_download_deadline"].append(check)
         process_response = getattr(mw, "process_response", None)
         self.methods["process_response"].appendleft(process_response)
         if process_response is not None:
@@ -201,6 +206,18 @@ class DownloaderMiddlewareManager(MiddlewareManager):  # pylint: disable=abstrac
             result, _ = await self._process_exception(ex, request)
         return await self._process_response(result, request)
 
+    def _check_download_deadline(self, request: Request) -> None:
+        """Run the pre-download deadline checks of the middlewares.
+
+        _process_request() calls this right before the download function, and
+        the downloader calls it again right before a download handler runs,
+        i.e. after the request may have waited for its slot and its turn, so
+        that the check can account for that time.
+        """
+        for method in self.methods["_check_download_deadline"]:
+            assert method is not None
+            method(request)
+
     def _handle_mw_method(self, method: Callable[..., Any], **kwargs: Any) -> Any:
         if method in self._mw_methods_requiring_spider:
             kwargs["spider"] = self._spider
@@ -227,6 +244,7 @@ class DownloaderMiddlewareManager(MiddlewareManager):  # pylint: disable=abstrac
                 if isinstance(response, Response):
                     self._count_response_size(response, request)
                 return response
+        self._check_download_deadline(request)
         response = await download_func(request)
         if response is not None:
             self._count_response_size(response, request)

@@ -1239,6 +1239,53 @@ key, in which case they keep that slot.
    original request, even when they pointed to a different domain.
 
 
+.. setting:: DOWNLOAD_DEADLINE
+
+DOWNLOAD_DEADLINE
+-----------------
+
+.. versionadded:: VERSION
+
+Default: ``None``
+
+The total amount of time, in seconds, that may be spent downloading a request
+and the requests derived from it, e.g. retries and redirects. Unset, there is
+no total limit and only :setting:`DOWNLOAD_TIMEOUT` applies to each download.
+``0`` lets no download start at all.
+
+The countdown starts when the first request of a chain reaches the downloader,
+and is tracked on a monotonic clock, so system clock changes do not affect it.
+Derived requests keep the deadline of the request they derive from. The
+timeout of each download is the remaining time or the per-download timeout,
+i.e. :setting:`DOWNLOAD_TIMEOUT` or the :reqmeta:`download_timeout` request
+meta key, whichever is lower; this includes time spent waiting for a
+download slot. Once the deadline is up, no new download of the chain is
+started and the request fails with
+:exc:`~scrapy.exceptions.DownloadDeadlineExceededError`.
+
+Downloads that are already in progress are not cut short: the deadline only
+stops new ones from starting.
+
+Requires the :ref:`download timeout middleware
+<topics-downloader-middleware-ref>`. The value must be a finite, non-negative
+number of seconds. Negative values, which do not mean an unlimited deadline,
+wall-clock timestamps, and booleans are rejected when the middleware is
+built, i.e. before the crawl starts.
+
+The middleware keeps the absolute deadline of a chain in the internal
+``_download_deadline`` request meta key. That key and ``download_timeout``,
+which it lowers to the remaining time, are the only request meta keys that it
+writes, and it writes them on the request that it is processing. It changes
+neither the spider settings nor the meta of another request: a request that
+does not inherit the meta of a chain member, e.g. one built with
+:meth:`Response.follow <scrapy.http.Response.follow>`, starts a chain of its
+own.
+
+Since the value is a reading of the monotonic clock of the running process,
+requests restored from a :ref:`disk queue <topics-jobs>` in a later run must
+not carry it. A value in another clock domain, e.g. a wall-clock timestamp, is
+rejected with :exc:`ValueError` when it reaches the middleware.
+
 .. setting:: DOWNLOAD_TIMEOUT
 
 DOWNLOAD_TIMEOUT
