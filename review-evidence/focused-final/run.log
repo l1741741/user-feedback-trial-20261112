@@ -1,0 +1,21 @@
+{
+  "uid": "12584",
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12584-css-visibility/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 3,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "display-none-use-does-not-paint",
+      "passed": true
+    },
+    {
+      "name": "hidden-path-does-not-draw-markers",
+      "passed": true
+    },
+    {
+      "name": "hidden-parent-visible-descendant",
+      "passed": true
+    }
+  ]
+}

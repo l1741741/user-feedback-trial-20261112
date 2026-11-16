@@ -1,0 +1,23 @@
+{
+  "uid": "12584",
+  "source": "/Users/lichao/.local/share/user-feedback/graphics/20261117/seed/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 1,
+  "failed": 2,
+  "checks": [
+    {
+      "name": "display-none-use-does-not-paint",
+      "passed": false,
+      "error": "(50, 50, (255, 0, 0, 255), (0, 0, 0, 0))"
+    },
+    {
+      "name": "hidden-path-does-not-draw-markers",
+      "passed": false,
+      "error": "(40, 60, (255, 0, 0, 255), (0, 0, 0, 0))"
+    },
+    {
+      "name": "hidden-parent-visible-descendant",
+      "passed": true
+    }
+  ]
+}
