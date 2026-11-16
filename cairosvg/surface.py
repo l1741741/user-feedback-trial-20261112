@@ -162,6 +162,13 @@ class Surface(object):
         self.cursor_position = [0, 0]
         self.cursor_d_position = [0, 0]
         self.text_path_width = 0
+        self.text_uses_path_engine = False
+        # root of a text subtree rendered by the legacy on-path engine, whose
+        # own traversal draws the children so surface.draw must not re-draw them
+        self.text_path_root = None
+        # shared chunk layout of the plain-text subtree currently being drawn
+        self.text_layout = None
+        self.text_layout_root = None
         self.tree_cache = {(tree.url, tree.get('id')): tree}
         self.reference_count = 0
         if parent_surface:
@@ -446,10 +453,17 @@ class Surface(object):
                 self.context.set_source_rgba(
                     *self.map_color(paint_color, fill_opacity))
             if TAGS[node.tag] == text:
-                self.cursor_position = save_cursor[0]
-                self.cursor_d_position = save_cursor[1]
-                self.text_path_width = save_cursor[2]
-                text(self, node, draw_as_text=True)
+                if getattr(self, 'text_uses_path_engine', False):
+                    # Legacy on-path engine builds no persistent glyph path:
+                    # redraw the text directly, as the original code did.
+                    self.cursor_position = save_cursor[0]
+                    self.cursor_d_position = save_cursor[1]
+                    self.text_path_width = save_cursor[2]
+                    text(self, node, draw_as_text=True)
+                else:
+                    # The chunk engine appended this node's own glyph paths
+                    # during the first pass; fill them with the node's paint.
+                    self.context.fill_preserve()
             else:
                 self.context.fill_preserve()
             self.context.restore()
@@ -472,7 +486,10 @@ class Surface(object):
         draw_markers(self, node)
 
         # Draw children
-        if display and node.tag not in INVISIBLE_TAGS:
+        # A textPath subtree is traversed and drawn by the legacy text engine
+        # itself; drawing its children again would duplicate the glyphs.
+        if (display and node.tag not in INVISIBLE_TAGS
+                and self.text_path_root is None):
             for child in node.children:
                 self.draw(child)
 
@@ -493,6 +510,17 @@ class Surface(object):
             self.cursor_position = [0, 0]
             self.cursor_d_position = [0, 0]
             self.text_path_width = 0
+        # End of a textPath root's full draw: release the legacy engine state
+        # now that its children and fill/stroke re-entry are done.
+        if self.text_path_root is node:
+            self.text_path_root = None
+            self.text_uses_path_engine = False
+        # End of a plain-text layout root: release the shared layout now that
+        # every descendant node has been drawn and painted, so the tree stays
+        # renderable by a later surface.
+        if getattr(self, 'text_layout_root', None) is node:
+            self.text_layout = None
+            self.text_layout_root = None
 
         self.context.restore()
         self.parent_node = old_parent_node
