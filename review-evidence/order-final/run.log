@@ -1,0 +1,120 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-11715-paint-order/local-frozen-source/cairosvg/__init__.py",
+  "tests": 7,
+  "passed": 7,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "fill-stroke-25-50",
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "fill-stroke-125-50",
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "marker-order-30-40",
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "marker-order-30-90",
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "inherit-and-clip-25-50",
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "passed": true
+    },
+    {
+      "name": "inherit-and-clip-15-50",
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "inherit-and-clip-125-50",
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}

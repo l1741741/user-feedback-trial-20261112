@@ -1,0 +1,26 @@
+{
+  "slug": "paint-order",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-11715-paint-order/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 3,
+  "failures": 0,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "stroke-first-retains-fill-path",
+      "passed": true
+    },
+    {
+      "name": "paint-order-inherited-not-leaked",
+      "passed": true
+    }
+  ],
+  "images": [
+    "ordinary",
+    "paint-order",
+    "inherited-paint"
+  ]
+}

@@ -1,0 +1,12 @@
+from pathlib import Path
+from io import BytesIO
+import json,sys
+import cairosvg
+from PIL import Image
+OUT=Path(sys.argv[1]);OUT.mkdir(parents=True,exist_ok=True);checks=[]
+scenes=[('fill-stroke','<rect x="20" y="20" width="50" height="60" fill="red" stroke="blue" stroke-width="20"/><rect x="120" y="20" width="50" height="60" fill="red" stroke="blue" stroke-width="20" paint-order="stroke"/>',[(25,50,(0,0,255,255)),(125,50,(255,0,0,255))]),('marker-order','<defs><marker id="m" markerWidth="12" markerHeight="12" refX="6" refY="6" markerUnits="userSpaceOnUse"><rect width="12" height="12" fill="red"/></marker></defs><path d="M30 40H170" stroke="blue" stroke-width="20" marker-start="url(#m)"/><path d="M30 90H170" stroke="blue" stroke-width="20" marker-start="url(#m)" paint-order="markers stroke fill"/>',[(30,40,(255,0,0,255)),(30,90,(0,0,255,255))]),('inherit-and-clip','<defs><clipPath id="c"><rect x="20" y="20" width="50" height="60"/></clipPath></defs><g paint-order="stroke" opacity=".5"><rect x="20" y="20" width="50" height="60" fill="red" stroke="blue" stroke-width="20" clip-path="url(#c)"/></g><rect x="120" y="20" width="50" height="60" fill="red" stroke="blue" stroke-width="20"/>',[(25,50,(255,0,0,128)),(15,50,(0,0,0,0)),(125,50,(0,0,255,255))])]
+for name,body,probes in scenes:
+ text=f'<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120">{body}</svg>';(OUT/(name+'.svg')).write_text(text);data=cairosvg.svg2png(bytestring=text.encode());(OUT/(name+'.png')).write_bytes(data);im=Image.open(BytesIO(data)).convert('RGBA')
+ for x,y,wanted in probes:
+  actual=im.getpixel((x,y));checks.append({'name':name+f'-{x}-{y}','expected':wanted,'actual':actual,'passed':max(abs(a-b) for a,b in zip(actual,wanted))<=1})
+r={'source':cairosvg.__file__,'tests':len(checks),'passed':sum(c['passed'] for c in checks),'failed':sum(not c['passed'] for c in checks),'checks':checks};(OUT/'result.json').write_text(json.dumps(r,ensure_ascii=False,indent=2)+'\n');print(json.dumps(r,ensure_ascii=False,indent=2));(OUT/'gallery.html').write_text('<!doctype html><meta charset="utf-8"><title>绘制顺序核验</title><style>body{font:20px system-ui;padding:20px}img{width:600px;border:1px solid #888;background:white;image-rendering:pixelated}</style><h1>填充、描边与标记的前后关系</h1>'+''.join('<h2>'+n+'</h2><p>SVG输入</p><img src="'+n+'.svg"><p>本次PNG</p><img src="'+n+'.png">' for n,_,_ in scenes)+'<pre>'+json.dumps(r,ensure_ascii=False,indent=2)+'</pre>');sys.exit(bool(r['failed']))

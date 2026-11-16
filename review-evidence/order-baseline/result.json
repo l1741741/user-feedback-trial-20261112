@@ -1,0 +1,120 @@
+{
+  "source": "/Users/lichao/.local/share/user-feedback/graphics/20261117/seed/cairosvg/__init__.py",
+  "tests": 7,
+  "passed": 4,
+  "failed": 3,
+  "checks": [
+    {
+      "name": "fill-stroke-25-50",
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "fill-stroke-125-50",
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": false
+    },
+    {
+      "name": "marker-order-30-40",
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "marker-order-30-90",
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": false
+    },
+    {
+      "name": "inherit-and-clip-25-50",
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "passed": false
+    },
+    {
+      "name": "inherit-and-clip-15-50",
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "inherit-and-clip-125-50",
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}

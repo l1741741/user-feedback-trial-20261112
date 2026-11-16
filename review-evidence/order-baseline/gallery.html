@@ -1,0 +1,120 @@
+<!doctype html><meta charset="utf-8"><title>绘制顺序核验</title><style>body{font:20px system-ui;padding:20px}img{width:600px;border:1px solid #888;background:white;image-rendering:pixelated}</style><h1>填充、描边与标记的前后关系</h1><h2>fill-stroke</h2><p>SVG输入</p><img src="fill-stroke.svg"><p>本次PNG</p><img src="fill-stroke.png"><h2>marker-order</h2><p>SVG输入</p><img src="marker-order.svg"><p>本次PNG</p><img src="marker-order.png"><h2>inherit-and-clip</h2><p>SVG输入</p><img src="inherit-and-clip.svg"><p>本次PNG</p><img src="inherit-and-clip.png"><pre>{
+  "source": "/Users/lichao/.local/share/user-feedback/graphics/20261117/seed/cairosvg/__init__.py",
+  "tests": 7,
+  "passed": 4,
+  "failed": 3,
+  "checks": [
+    {
+      "name": "fill-stroke-25-50",
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "fill-stroke-125-50",
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": false
+    },
+    {
+      "name": "marker-order-30-40",
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "marker-order-30-90",
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": false
+    },
+    {
+      "name": "inherit-and-clip-25-50",
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "passed": false
+    },
+    {
+      "name": "inherit-and-clip-15-50",
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "inherit-and-clip-125-50",
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}</pre>
