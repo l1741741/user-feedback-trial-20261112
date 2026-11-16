@@ -1,0 +1,19 @@
+<!doctype html><meta charset="utf-8"><title>SVG渲染核验 12581</title><style>body{font:18px system-ui;background:#ddd;margin:24px}section{display:inline-block;padding:20px;margin:10px;background:white;vertical-align:top}img{width:440px;border:1px solid #888;background:white;image-rendering:pixelated}pre{white-space:pre-wrap}</style><h1>SVG输入与本次PNG输出 12581</h1><pre>{
+  "uid": "12581",
+  "source": "/Users/lichao/.local/share/user-feedback/graphics/20261117/seed/cairosvg/__init__.py",
+  "tests": 2,
+  "passed": 0,
+  "failed": 2,
+  "checks": [
+    {
+      "name": "referenced-viewbox-offset-and-double-scale",
+      "passed": false,
+      "error": "(25, 25, (0, 0, 0, 0), (255, 0, 0, 255))"
+    },
+    {
+      "name": "zero-viewbox-skipped-and-sibling-drawn",
+      "passed": false,
+      "error": "float division by zero"
+    }
+  ]
+}</pre><section><h2>referenced-nonzero-viewbox</h2><p>SVG输入</p><img src="referenced-nonzero-viewbox.svg"><p>PNG输出</p><img src="referenced-nonzero-viewbox.png"></section>

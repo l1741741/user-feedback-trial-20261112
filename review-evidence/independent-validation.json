@@ -1,0 +1,24 @@
+{
+  "task_id": "render-20261117-12581-viewbox-slice",
+  "final_sha": "59f4d5a3dd204f2bb365ffe5cd5164c6cdd102d1",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/render-20261117-12581-viewbox-slice/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12581-viewbox-slice/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_preserve_aspect_ratio.py"
+  ],
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12581-viewbox-slice/local-frozen-source",
+  "log": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12581-viewbox-slice/independent-validation.log",
+  "exit_code": 0,
+  "tests": 33,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0
+}

@@ -1,0 +1,17 @@
+{
+  "uid": "12581",
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-12581-viewbox-slice/local-frozen-source/cairosvg/__init__.py",
+  "tests": 2,
+  "passed": 2,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "referenced-viewbox-offset-and-double-scale",
+      "passed": true
+    },
+    {
+      "name": "zero-viewbox-skipped-and-sibling-drawn",
+      "passed": true
+    }
+  ]
+}
