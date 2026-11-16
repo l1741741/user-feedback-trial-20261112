@@ -1,0 +1,128 @@
+{
+  "source": "/Users/lichao/.local/share/user-feedback/graphics/20261117/seed/cairosvg/__init__.py",
+  "tests": 6,
+  "passed": 5,
+  "failed": 1,
+  "checks": [
+    {
+      "name": "hidden-clip",
+      "point": [
+        50,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "hidden-sibling",
+      "point": [
+        150,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "collapse-clip",
+      "point": [
+        50,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": false
+    },
+    {
+      "name": "collapse-sibling",
+      "point": [
+        150,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "display-none-clip",
+      "point": [
+        50,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "display-none-sibling",
+      "point": [
+        150,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}
