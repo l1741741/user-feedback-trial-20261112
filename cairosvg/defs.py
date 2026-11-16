@@ -7,8 +7,8 @@ This module handles clips, gradients, masks, patterns and external nodes.
 
 from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
 from .features import match_features
-from .helpers import paint, size, transform
-from .parser import Tree
+from .helpers import paint, parse_transform, size, transform
+from .parser import Node, Tree
 from .shapes import rect
 from .surface import cairo
 from .url import parse_url
@@ -219,49 +219,101 @@ def draw_gradient(surface, node, name, opacity):
 def draw_pattern(surface, node, name, opacity):
     """Draw a pattern image."""
     pattern_node = surface.patterns[name]
-    pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
+
+    # Work on a copy: a pattern can be referenced many times, with different
+    # opacities and from shapes with different bounding boxes. The definition
+    # stored in ``surface.patterns`` must never be mutated by a reference.
+    # Children keep the working copy as parent so that attributes set below
+    # (viewport size, content transform, opacity) are inherited as expected.
+    pattern_children = pattern_node.children
+    # Attributes resolved through href inheritance are stored on the wrapper
+    # node rather than on its XML element; snapshot them before rebuilding.
+    pattern_attributes = dict(pattern_node)
+    pattern_node = Node(
+        pattern_node.element, pattern_node.style,
+        pattern_node.url_fetcher, parent=pattern_node.parent,
+        unsafe=pattern_node.unsafe)
+    pattern_node.update(pattern_attributes)
     pattern_node.tag = 'g'
-    transform(surface, pattern_node.get('patternTransform'))
+    pattern_node.children = [
+        Node(child.element, child.style, child.url_fetcher,
+             parent=pattern_node, unsafe=child.unsafe)
+        for child in pattern_children]
 
-    if pattern_node.get('viewBox'):
-        if not (size(surface, pattern_node.get('width', 1), 1) and
-                size(surface, pattern_node.get('height', 1), 1)):
-            return False
-    else:
-        if not (size(surface, pattern_node.get('width', 0), 1) and
-                size(surface, pattern_node.get('height', 0), 1)):
-            return False
-
-    if pattern_node.get('patternUnits') == 'userSpaceOnUse':
+    user_space = pattern_node.get('patternUnits') == 'userSpaceOnUse'
+    box_width = box_height = None
+    if user_space:
         x = size(surface, pattern_node.get('x'), 'x')
         y = size(surface, pattern_node.get('y'), 'y')
         pattern_width = size(surface, pattern_node.get('width', 0), 1)
         pattern_height = size(surface, pattern_node.get('height', 0), 1)
     else:
-        _, _, width, height = calculate_bounding_box(surface, node)
-        x = size(surface, pattern_node.get('x'), 1) * width
-        y = size(surface, pattern_node.get('y'), 1) * height
-        pattern_width = (
-            size(surface, pattern_node.pop('width', '1'), 1) * width)
-        pattern_height = (
-            size(surface, pattern_node.pop('height', '1'), 1) * height)
-        if 'viewBox' not in pattern_node:
-            pattern_node['width'] = pattern_width
-            pattern_node['height'] = pattern_height
-            if pattern_node.get('patternContentUnits') == 'objectBoundingBox':
-                pattern_node['transform'] = f'scale({width}, {height})'
+        # Pattern geometry follows the bounding box of the painted object, so
+        # a given definition adapts to every shape it is referenced from. The
+        # tile origin is the bounding box origin, x/y being offsets from it.
+        bounding_box = calculate_bounding_box(surface, node)
+        if not is_non_empty_bounding_box(bounding_box):
+            return False
+        box_x, box_y, box_width, box_height = bounding_box
+        x = box_x + size(surface, pattern_node.get('x'), 1) * box_width
+        y = box_y + size(surface, pattern_node.get('y'), 1) * box_height
+        pattern_width = size(
+            surface, pattern_node.get('width', 0), 1) * box_width
+        pattern_height = size(
+            surface, pattern_node.get('height', 0), 1) * box_height
 
-    # Fail if pattern has an invalid size
-    if pattern_width == 0.0 or pattern_height == 0.0:
+    # A tile with no usable area disables the paint server instead of leaking
+    # the previous source or asking cairo for a degenerate surface.
+    if pattern_width <= 0.0 or pattern_height <= 0.0:
         return False
+
+    # Pattern contents live in their own coordinate system, independent from
+    # the one used to place and size the tiles.
+    if 'viewBox' not in pattern_node:
+        # Give the nested surface an explicit viewport matching the tile.
+        pattern_node['width'] = pattern_width
+        pattern_node['height'] = pattern_height
+        if (pattern_node.get('patternContentUnits') == 'objectBoundingBox'
+                and box_width is not None):
+            # Contents are expressed in fractions of the object bounding box.
+            pattern_node['transform'] = (
+                f'scale({box_width}, {box_height})')
+    elif not (size(surface, pattern_node.get('width', 1), 1) and
+            size(surface, pattern_node.get('height', 1), 1)):
+        return False
+
+    # Opacity is a property of this reference, not of the definition.
+    pattern_node['opacity'] = (
+        float(pattern_node.get('opacity', 1)) * opacity)
 
     from .surface import SVGSurface  # circular import
     pattern_surface = SVGSurface(pattern_node, None, surface.dpi, surface)
     pattern_pattern = cairo.SurfacePattern(pattern_surface.cairo)
     pattern_pattern.set_extend(cairo.EXTEND_REPEAT)
-    pattern_pattern.set_matrix(cairo.Matrix(
+
+    # Cairo pattern matrices map user space onto pattern space, exactly like
+    # the SVG pattern matrix: translation by the tile origin followed by the
+    # scale between pattern-surface pixels and user-space tile units.
+    pattern_matrix = cairo.Matrix(
         pattern_surface.width / pattern_width, 0, 0,
-        pattern_surface.height / pattern_height, -x, -y))
+        pattern_surface.height / pattern_height, -x, -y)
+
+    # patternTransform applies to the whole tiling system (tiles, origin and
+    # phase), never to the painted geometry itself, so it goes into the
+    # pattern matrix rather than the context's current transformation matrix.
+    # The inverted transform is composed after the base matrix (the same
+    # ordering used for gradientTransform) so the tile origin (x, y) is
+    # transformed together with the tiles, as required by the SVG spec.
+    pattern_transform = parse_transform(
+        surface, pattern_node.get('patternTransform'))
+    if pattern_transform is not None:
+        try:
+            pattern_transform.invert()
+        except cairo.Error:
+            # A non-invertible transform disables the paint server.
+            return False
+        pattern_matrix = pattern_transform.multiply(pattern_matrix)
+    pattern_pattern.set_matrix(pattern_matrix)
     surface.context.set_source(pattern_pattern)
     return True
 

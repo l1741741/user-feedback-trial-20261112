@@ -194,6 +194,49 @@ def rotate(x, y, angle):
     return x * cos(angle) - y * sin(angle), y * cos(angle) + x * sin(angle)
 
 
+def parse_transform(surface, transform_string):
+    """Parse a transform attribute string into a Cairo matrix.
+
+    Unlike :func:`transform`, this does not touch the surface context: the
+    returned matrix can be applied to a paint server (e.g. a pattern) while
+    keeping the current transformation matrix untouched.
+
+    See http://www.w3.org/TR/SVG/coords.html#TransformAttribute
+
+    """
+    if not transform_string:
+        return None
+
+    transformations = re.findall(
+        r'(\w+) ?\( ?(.*?) ?\)', normalize(transform_string))
+    matrix = cairo.Matrix()
+    for transformation_type, transformation in transformations:
+        values = [size(surface, value) for value in transformation.split(' ')]
+        if transformation_type == 'matrix':
+            matrix = cairo.Matrix(*values).multiply(matrix)
+        elif transformation_type == 'rotate':
+            angle = radians(float(values.pop(0)))
+            x, y = values or (0, 0)
+            matrix.translate(x, y)
+            matrix.rotate(angle)
+            matrix.translate(-x, -y)
+        elif transformation_type == 'skewX':
+            tangent = tan(radians(float(values[0])))
+            matrix = cairo.Matrix(1, 0, tangent, 1, 0, 0).multiply(matrix)
+        elif transformation_type == 'skewY':
+            tangent = tan(radians(float(values[0])))
+            matrix = cairo.Matrix(1, tangent, 0, 1, 0, 0).multiply(matrix)
+        elif transformation_type == 'translate':
+            if len(values) == 1:
+                values += (0,)
+            matrix.translate(*values[:2])
+        elif transformation_type == 'scale':
+            if len(values) == 1:
+                values = 2 * values
+            matrix.scale(*values[:2])
+    return matrix
+
+
 def transform(surface, transform_string, gradient=None, transform_origin=None):
     """Transform ``surface`` or ``gradient`` if supplied using ``string``.
 

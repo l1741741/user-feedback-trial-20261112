@@ -3,6 +3,25 @@
 ======
 
 
+Unreleased
+==========
+
+* Fix pattern tiling when units, viewBox and patternTransform interact:
+
+  - referencing a pattern several times no longer accumulates opacity nor
+    consumes the width/height of the definition, which previously made the
+    second outline change tile size and could raise a memory error;
+  - ``userSpaceOnUse`` tiles keep a fixed size whatever the host shape, while
+    ``objectBoundingBox`` tiles follow each shape's bounding box, including
+    its origin;
+  - ``patternTransform`` is applied to the whole tiling system (tiles, origin
+    and phase) through the pattern matrix instead of mutating the drawing
+    context, so rotated patterns keep a stable tiling origin;
+  - patterns with an offset and transparent whitespace tile continuously;
+  - invalid, empty and non-invertible pattern cells disable painting instead
+    of leaking the previous paint source or crashing.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 
