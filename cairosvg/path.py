@@ -158,7 +158,6 @@ def path(surface, node):
 
         if letter in 'aA':
             # Elliptic curve
-            surface.context.set_tolerance(0.00001)
             x1, y1 = current_point
             rx, ry, string = point(surface, string)
             rotation, string = string.split(' ', 1)
@@ -179,6 +178,12 @@ def path(surface, node):
                 continue
             large, sweep = bool(large), bool(sweep)
 
+            # Radii are non-negative numbers: negative values are
+            # replaced by their absolute values (see SVG 1.1 F.6.2).
+            # Not doing so flips the arc through the negative y-scale
+            # used to draw it.
+            rx, ry = abs(rx), abs(ry)
+
             if letter == 'A':
                 # Absolute x3 and y3, convert to relative
                 x3 -= x1
@@ -192,6 +197,14 @@ def path(surface, node):
                     # or A) in case it’s omitted
                     matches.appendleft((letter, string))
                 matches.appendleft(('l', f'{x3} {y3}'))
+                continue
+
+            # Identical start and end points: the arc is omitted entirely
+            # (see SVG 1.1 F.6.2). Don’t draw anything, don’t add vertices,
+            # don’t move the current point, but keep parsing what follows.
+            if not x3 and not y3:
+                if string := string.strip():
+                    matches.appendleft((letter, string))
                 continue
 
             radii_ratio = ry / rx
@@ -230,6 +243,17 @@ def path(surface, node):
             angle1 = point_angle(xc, yc, 0, 0)
             angle2 = point_angle(xc, yc, xe, ye)
 
+            # Normalize the sweep angle ourselves instead of relying on
+            # Cairo’s angle normalization: the arc must always be drawn in
+            # the direction given by the sweep flag, even when floating
+            # point rounding puts angle2 on the wrong side of angle1
+            # (which would turn an almost-null arc into an almost-full
+            # ellipse, or the other way around).
+            delta = (angle2 - angle1) % (2 * pi)
+            if not sweep and delta:
+                delta -= 2 * pi
+            angle2 = angle1 + delta
+
             # Store the tangent angles
             node.vertices.append((-angle1, -angle2))
 
@@ -238,6 +262,7 @@ def path(surface, node):
             surface.context.translate(x1, y1)
             surface.context.rotate(rotation)
             surface.context.scale(1, radii_ratio)
+            surface.context.set_tolerance(0.00001)
             arc(xc, yc, rx, angle1, angle2)
             surface.context.restore()
             current_point = current_point[0] + x3, current_point[1] + y3
