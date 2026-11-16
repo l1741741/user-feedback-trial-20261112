@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="560" viewBox="0 0 640 560">
+  <title>stroke-dasharray / stroke-dashoffset reference sheet</title>
+  <rect width="640" height="560" fill="white"/>
+
+  <!-- One user unit is one pixel, so every run below can be read directly off
+       the image. The lines start at x=340, clear of the labels; the grey
+       rules mark 10-unit steps and the ruler at the bottom is 100 units. -->
+  <g font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#111">
+    <g stroke="#ddd" stroke-width="1">
+      <line x1="400" y1="0" x2="400" y2="520"/>
+      <line x1="450" y1="0" x2="450" y2="520"/>
+      <line x1="500" y1="0" x2="500" y2="520"/>
+      <line x1="550" y1="0" x2="550" y2="520"/>
+      <line x1="600" y1="0" x2="600" y2="520"/>
+    </g>
+
+    <text x="10" y="20">10 5 — even list</text>
+    <line x1="340" y1="16" x2="620" y2="16" stroke="black" stroke-width="3"
+          stroke-dasharray="10 5"/>
+
+    <text x="10" y="52">5 3 2 — odd list</text>
+    <line x1="340" y1="48" x2="620" y2="48" stroke="black" stroke-width="3"
+          stroke-dasharray="5 3 2"/>
+
+    <text x="10" y="84">5 3 2, offset 11</text>
+    <line x1="340" y1="80" x2="620" y2="80" stroke="black" stroke-width="3"
+          stroke-dasharray="5 3 2" stroke-dashoffset="11"/>
+
+    <text x="10" y="116">5 3 2, offset -20</text>
+    <line x1="340" y1="112" x2="620" y2="112" stroke="black" stroke-width="3"
+          stroke-dasharray="5 3 2" stroke-dashoffset="-20"/>
+
+    <text x="10" y="148">10 5, offset -3</text>
+    <line x1="340" y1="144" x2="620" y2="144" stroke="black" stroke-width="3"
+          stroke-dasharray="10 5" stroke-dashoffset="-3"/>
+
+    <text x="10" y="180">0 12, round caps</text>
+    <line x1="340" y1="176" x2="620" y2="176" stroke="black" stroke-width="6"
+          stroke-linecap="round" stroke-dasharray="0 12"/>
+
+    <text x="10" y="212">0 12, butt caps</text>
+    <line x1="340" y1="208" x2="620" y2="208" stroke="black" stroke-width="6"
+          stroke-linecap="butt" stroke-dasharray="0 12"/>
+
+    <text x="10" y="244">10% 5%</text>
+    <line x1="340" y1="240" x2="620" y2="240" stroke="black" stroke-width="3"
+          stroke-dasharray="10% 5%"/>
+
+    <text x="10" y="276">1e1 5e0</text>
+    <line x1="340" y1="272" x2="620" y2="272" stroke="black" stroke-width="3"
+          stroke-dasharray="1e1 5e0"/>
+
+    <text x="10" y="308">4 -2 — invalid, solid</text>
+    <line x1="340" y1="304" x2="620" y2="304" stroke="black" stroke-width="3"
+          stroke-dasharray="4 -2"/>
+
+    <text x="10" y="340">group 10 5, child none</text>
+    <g stroke="black" stroke-width="3" stroke-dasharray="10 5">
+      <line x1="340" y1="336" x2="620" y2="336" stroke-dasharray="none"/>
+    </g>
+
+    <text x="10" y="372">next sibling — solid</text>
+    <line x1="340" y1="368" x2="620" y2="368" stroke="black" stroke-width="3"/>
+
+    <text x="10" y="404">corner keeps the phase</text>
+    <polyline points="340,400 500,400 500,440" fill="none" stroke="black"
+              stroke-width="3" stroke-dasharray="10 5"/>
+
+    <text x="10" y="472">closed path</text>
+    <path d="M330 440 H470 V500 H330 Z" fill="none" stroke="black"
+          stroke-width="3" stroke-dasharray="10 5"/>
+
+    <text x="10" y="540">ruler</text>
+    <line x1="340" y1="536" x2="440" y2="536" stroke="black"
+          stroke-width="3"/>
+    <g stroke="black" stroke-width="1">
+      <line x1="340" y1="528" x2="340" y2="544"/>
+      <line x1="365" y1="530" x2="365" y2="542"/>
+      <line x1="390" y1="530" x2="390" y2="542"/>
+      <line x1="415" y1="530" x2="415" y2="542"/>
+      <line x1="440" y1="528" x2="440" y2="544"/>
+      <line x1="490" y1="530" x2="490" y2="542"/>
+      <line x1="540" y1="530" x2="540" y2="542"/>
+      <line x1="590" y1="530" x2="590" y2="542"/>
+    </g>
+    <text x="450" y="540">100 units</text>
+  </g>
+</svg>

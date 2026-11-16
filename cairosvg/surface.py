@@ -14,8 +14,8 @@ from .defs import (
     filter_, gradient_or_pattern, linear_gradient, marker, mask, paint_mask,
     parse_all_defs, pattern, prepare_filter, radial_gradient, use)
 from .helpers import (
-    UNITS, PointError, clip_rect, node_format, normalize, paint,
-    preserve_ratio, size, transform)
+    UNITS, InvalidDashValue, PointError, clip_rect, dash_array, dash_offset,
+    node_format, paint, preserve_ratio, size, transform)
 from .image import image, invert_image
 from .parser import Tree
 from .path import draw_markers, path
@@ -283,6 +283,54 @@ class Surface(object):
         rgba = color(string, opacity)
         return self.map_rgba(rgba) if self.map_rgba else rgba
 
+    def set_dash(self, node):
+        """Apply ``node``'s stroke dash array and offset to the context.
+
+        The dash state is written on every node, including when the node is
+        solid: cairo keeps a dash state across drawing calls, so a solid shape
+        that only skipped the call would silently inherit the previous
+        shape's dashes. ``node`` has already resolved CSS inheritance (and
+        ``inherit``) in the parser, so the values seen here are the computed
+        ones.
+
+        An invalid ``stroke-dasharray`` is treated as if the property were
+        absent, matching CSS's "invalid at computed-value time" rule: the
+        inherited value is used when there is one, otherwise the stroke stays
+        solid. This is why the value is re-read from the closest ancestor that
+        still has a valid one instead of guessing. Invalid numbers must never
+        reach cairo, where a negative entry raises
+        ``CAIRO_STATUS_INVALID_DASH`` and permanently poisons the context.
+
+        A marker's contents take their paint properties from the marker
+        element, not from the shape that references it, so they are not
+        affected by that shape's dashes; their own dash values still win when
+        they have any.
+
+        """
+        dashes = None
+        candidate = node
+        while candidate is not None:
+            try:
+                dashes = dash_array(
+                    self, candidate.get('stroke-dasharray'))
+                break
+            except InvalidDashValue:
+                candidate = candidate.parent
+        if dashes is None:
+            self.context.set_dash([])
+            return
+        offset = None
+        candidate = node
+        while candidate is not None:
+            try:
+                offset = dash_offset(
+                    self, candidate.get('stroke-dashoffset'))
+                break
+            except InvalidDashValue:
+                candidate = candidate.parent
+        self.context.set_dash(
+            dashes.values, dashes.phase(offset) if offset else 0)
+
     def draw(self, node):
         """Draw ``node`` and its children."""
 
@@ -348,12 +396,7 @@ class Surface(object):
         if join_cap == 'bevel':
             self.context.set_line_join(cairo.LINE_JOIN_BEVEL)
 
-        dash_array = normalize(node.get('stroke-dasharray', '')).split()
-        if dash_array:
-            dashes = [size(self, dash) for dash in dash_array]
-            if sum(dashes):
-                offset = size(self, node.get('stroke-dashoffset'))
-                self.context.set_dash(dashes, offset)
+        self.set_dash(node)
 
         miter_limit = float(node.get('stroke-miterlimit', 4))
         self.context.set_miter_limit(miter_limit)

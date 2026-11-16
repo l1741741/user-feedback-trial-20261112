@@ -4,7 +4,7 @@ Surface helpers.
 """
 
 import re
-from math import atan2, cos, hypot, radians, sin, tan
+from math import atan2, cos, hypot, isfinite, radians, sin, tan
 
 from .surface import cairo
 from .url import parse_url
@@ -22,9 +22,81 @@ PAINT_URL = re.compile(r'(url\(.+\)) *(.*)')
 PATH_LETTERS = 'achlmqstvzACHLMQSTVZ'
 RECT = re.compile(r'rect\( ?(.+?) ?\)')
 
+# One ``<length-percentage>`` or ``<number>`` of a stroke dash array. The
+# leading sign, a fractional part without integer digits (``.5``) and an
+# exponent (``1e1``, ``1E-2``) are all valid, as are the unit suffixes.
+DASH_VALUE = re.compile(
+    r'([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)(%|[a-zA-Z]+)?')
+
+# The beginning of a number, used to tell an adjacent value (``1.2.3`` is
+# ``1.2`` followed by ``.3``) from a syntax error.
+DASH_START = re.compile(r'[+-]?(?:\d|\.)')
+
 
 class PointError(Exception):
     """Exception raised when parsing a point fails."""
+
+
+class InvalidDashValue(ValueError):
+    """Exception raised when a dash value must be ignored and inherited."""
+
+
+class DashArray:
+    """Validated ``stroke-dasharray`` lengths in the current user space.
+
+    ``values`` always has an even length: an odd ``<dasharray>`` is repeated
+    once so that the list describes alternating dash/gap pairs. The
+    ``specified_sum`` is the sum of the lengths exactly as authored, before
+    that repetition; :meth:`phase` needs it to give negative offsets the same
+    meaning as the reference renderers.
+
+    """
+
+    __slots__ = ('values', 'specified_sum')
+
+    def __init__(self, values, specified_sum):
+        self.values = values
+        self.specified_sum = specified_sum
+
+    @property
+    def period(self):
+        """Length of one full repetition of the painted pattern."""
+        return sum(self.values)
+
+    def phase(self, offset):
+        """Return the non-negative distance into ``values`` to start at.
+
+        ``offset`` is a ``stroke-dashoffset`` length. A non-negative offset is
+        simply a position in the repeated pattern. A negative offset starts
+        before the beginning of the list, and the reference renderers count
+        that distance through the list as written (before an odd count is
+        repeated) and then place the result in the repeated pattern. Keeping
+        the two sums separate is what makes the phase reproducible instead of
+        depending on a renderer's internal normalization.
+
+        """
+        period = self.period
+        if period <= 0:
+            return 0
+        if offset >= 0:
+            return offset % period
+        return (self.specified_sum - (-offset % self.specified_sum)) % period
+
+
+# Units accepted in a dash length, on top of the absolute ``UNITS``.
+DASH_UNITS = frozenset(UNITS) | {'%', 'em', 'ex', 'ch'}
+
+
+def _dash_length(surface, number, unit):
+    """Convert a dash number and unit to a user-unit length, or ``None``."""
+    if unit and unit not in DASH_UNITS:
+        # Unknown units are invalid. ``size`` would quietly return 0.
+        return None
+    try:
+        length = size(surface, f'{number}{unit}' if unit else number)
+    except (ValueError, OverflowError):
+        return None
+    return length if isfinite(length) else None
 
 
 def distance(x1, y1, x2, y2):
@@ -388,3 +460,95 @@ def size(surface, string, reference='xy'):
 
     # Unknown size
     return 0
+
+
+def dash_array(surface, value):
+    """Return the dash pattern for a ``stroke-dasharray`` value.
+
+    The result is ``None`` when the property paints a solid stroke: an unset
+    value, ``none``, or a list whose values are all zero. Any other list that
+    is not a valid SVG <dasharray>, including an empty one, raises
+    :class:`InvalidDashValue` so that the caller can apply the CSS "invalid
+    at computed-value time" rule instead of silently turning the bad entry
+    into a dash.
+
+    Valid values follow SVG: a list of <length-percentage> values separated by
+    either a comma with optional surrounding white space or by white space,
+    all non-negative and at least one non-zero. An odd number of values is
+    repeated once to give an even list, so the pattern is always made of
+    alternating dash/gap pairs. Percentages are resolved against the
+    normalized viewport diagonal, like other stroke lengths.
+
+    """
+    if value is None:
+        return None
+    source = value.strip()
+    if not source:
+        # An empty value is not the ``none`` keyword: it is invalid and
+        # therefore ignored, so the inherited pattern applies.
+        raise InvalidDashValue(value)
+    if source.lower() == 'none':
+        return None
+    dashes = []
+    position = 0
+    length = len(source)
+    while True:
+        while position < length and source[position] in ' \t\r\n\f':
+            position += 1
+        match = DASH_VALUE.match(source, position)
+        if match is None:
+            raise InvalidDashValue(value)
+        dash = _dash_length(surface, match.group(1), match.group(2))
+        if dash is None or dash < 0:
+            raise InvalidDashValue(value)
+        dashes.append(dash)
+        position = match.end()
+        if position >= length:
+            break
+        spaced = False
+        while position < length and source[position] in ' \t\r\n\f':
+            position += 1
+            spaced = True
+        if position < length and source[position] == ',':
+            position += 1
+            while position < length and source[position] in ' \t\r\n\f':
+                position += 1
+            if position >= length:
+                # A trailing comma is a syntax error.
+                raise InvalidDashValue(value)
+        elif position < length and not spaced:
+            if match.group(2) or not DASH_START.match(source[position]):
+                # Adjacent values are only allowed as numbers without units,
+                # as in ``1.2.3`` meaning ``1.2`` then ``.3``.
+                raise InvalidDashValue(value)
+    if not dashes:
+        raise InvalidDashValue(value)
+    if not any(dashes):
+        return None
+    specified_sum = sum(dashes)
+    if len(dashes) % 2:
+        dashes *= 2
+    return DashArray(dashes, specified_sum)
+
+
+def dash_offset(surface, value):
+    """Return the dash phase for a ``stroke-dashoffset`` value.
+
+    ``None`` and empty values are zero. A value that cannot be parsed as a
+    finite number raises :class:`InvalidDashValue`, so the caller can treat it
+    as if the property were not specified. Negative offsets are valid and are
+    resolved against the pattern by :meth:`DashArray.phase`.
+
+    """
+    if value is None:
+        return None
+    source = value.strip()
+    if not source:
+        return None
+    match = DASH_VALUE.match(source)
+    if match is None or match.end() != len(source):
+        raise InvalidDashValue(value)
+    offset = _dash_length(surface, match.group(1), match.group(2))
+    if offset is None:
+        raise InvalidDashValue(value)
+    return offset
