@@ -98,22 +98,26 @@ def draw_markers(surface, node):
             # See http://www.w3.org/TR/SVG/painting.html#MarkerAlgorithm
             for child in marker_node.children:
                 surface.context.save()
-                surface.context.translate(*point)
-                surface.context.rotate(angle)
-                surface.context.scale(scale)
-                surface.context.scale(scale_x, scale_y)
-                surface.context.translate(translate_x, translate_y)
+                try:
+                    surface.context.translate(*point)
+                    surface.context.rotate(angle)
+                    surface.context.scale(scale)
+                    surface.context.scale(scale_x, scale_y)
+                    surface.context.translate(translate_x, translate_y)
 
-                # Add clipping (if present and requested)
-                overflow = marker_node.get('overflow', 'hidden')
-                if clip_box and overflow in ('hidden', 'scroll'):
-                    surface.context.save()
-                    surface.context.rectangle(*clip_box)
+                    # Add clipping (if present and requested)
+                    overflow = marker_node.get('overflow', 'hidden')
+                    if clip_box and overflow in ('hidden', 'scroll'):
+                        surface.context.save()
+                        try:
+                            surface.context.rectangle(*clip_box)
+                        finally:
+                            surface.context.restore()
+                        surface.context.clip()
+
+                    surface.draw(child)
+                finally:
                     surface.context.restore()
-                    surface.context.clip()
-
-                surface.draw(child)
-                surface.context.restore()
 
             surface.context.append_path(temp_path)
 
@@ -235,11 +239,13 @@ def path(surface, node):
 
             # Draw the arc
             surface.context.save()
-            surface.context.translate(x1, y1)
-            surface.context.rotate(rotation)
-            surface.context.scale(1, radii_ratio)
-            arc(xc, yc, rx, angle1, angle2)
-            surface.context.restore()
+            try:
+                surface.context.translate(x1, y1)
+                surface.context.rotate(rotation)
+                surface.context.scale(1, radii_ratio)
+                arc(xc, yc, rx, angle1, angle2)
+            finally:
+                surface.context.restore()
             current_point = current_point[0] + x3, current_point[1] + y3
 
         elif letter == 'c':

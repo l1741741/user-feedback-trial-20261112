@@ -40,40 +40,43 @@ def image(surface, node):
         image_bytes.startswith((b'<svg ', b'<?xml', b'<!DOC', b'\x1f\x8b'))
         or b'<svg' in image_bytes
     ):
-        if 'x' in node:
-            del node['x']
-        if 'y' in node:
-            del node['y']
-        tree = Tree(
-            url=url.geturl(), url_fetcher=node.url_fetcher,
-            bytestring=image_bytes, tree_cache=surface.tree_cache,
-            unsafe=node.unsafe)
-        tree_width, tree_height, viewbox = node_format(
-            surface, tree, reference=False)
-        if viewbox:
-            tree_scale_x = tree_width / viewbox[2]
-            tree_scale_y = tree_height / viewbox[3]
-        else:
-            tree_width = tree['width'] = width
-            tree_height = tree['height'] = height
-            tree_scale_x = tree_scale_y = 1
-        node.image_width = tree_width or width
-        node.image_height = tree_height or height
-        scale_x, scale_y, translate_x, translate_y = preserve_ratio(
-            surface, node)
+        removed = {key: node.pop(key) for key in ('x', 'y') if key in node}
+        try:
+            tree = Tree(
+                url=url.geturl(), url_fetcher=node.url_fetcher,
+                bytestring=image_bytes, tree_cache=surface.tree_cache,
+                unsafe=node.unsafe)
+            tree_width, tree_height, viewbox = node_format(
+                surface, tree, reference=False)
+            if viewbox:
+                tree_scale_x = tree_width / viewbox[2]
+                tree_scale_y = tree_height / viewbox[3]
+            else:
+                tree_width = tree['width'] = width
+                tree_height = tree['height'] = height
+                tree_scale_x = tree_scale_y = 1
+            node.image_width = tree_width or width
+            node.image_height = tree_height or height
+            scale_x, scale_y, translate_x, translate_y = preserve_ratio(
+                surface, node)
 
-        # Clip image region
-        surface.context.rectangle(x, y, width, height)
-        surface.context.clip()
+            # Clip image region
+            surface.context.rectangle(x, y, width, height)
+            surface.context.clip()
 
-        # Draw image
-        surface.context.save()
-        surface.context.translate(x, y)
-        surface.context.translate(*surface.context.get_current_point())
-        surface.context.scale(scale_x * tree_scale_x, scale_y * tree_scale_y)
-        surface.context.translate(translate_x, translate_y)
-        surface.draw(tree)
-        surface.context.restore()
+            # Draw image
+            surface.context.save()
+            try:
+                surface.context.translate(x, y)
+                surface.context.translate(*surface.context.get_current_point())
+                surface.context.scale(
+                    scale_x * tree_scale_x, scale_y * tree_scale_y)
+                surface.context.translate(translate_x, translate_y)
+                surface.draw(tree)
+            finally:
+                surface.context.restore()
+        finally:
+            node.update(removed)
         return
     else:
         png_file = BytesIO()
@@ -109,12 +112,14 @@ def image(surface, node):
     # Paint raster image
     opacity = float(node.get('opacity', 1))
     surface.context.save()
-    surface.context.translate(x, y)
-    surface.context.scale(scale_x, scale_y)
-    surface.context.translate(translate_x, translate_y)
-    surface.context.set_source(image_surface.pattern)
-    surface.context.paint_with_alpha(opacity)
-    surface.context.restore()
+    try:
+        surface.context.translate(x, y)
+        surface.context.scale(scale_x, scale_y)
+        surface.context.translate(translate_x, translate_y)
+        surface.context.set_source(image_surface.pattern)
+        surface.context.paint_with_alpha(opacity)
+    finally:
+        surface.context.restore()
 
 
 def invert_image(img):

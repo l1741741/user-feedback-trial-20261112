@@ -34,10 +34,12 @@ def ellipse(surface, node):
     ratio = ry / rx
     surface.context.new_sub_path()
     surface.context.save()
-    surface.context.scale(1, ratio)
-    surface.context.arc(cx, cy / ratio, rx, 0, 2 * pi)
-    surface.context.close_path()
-    surface.context.restore()
+    try:
+        surface.context.scale(1, ratio)
+        surface.context.arc(cx, cy / ratio, rx, 0, 2 * pi)
+        surface.context.close_path()
+    finally:
+        surface.context.restore()
 
 
 def line(surface, node):

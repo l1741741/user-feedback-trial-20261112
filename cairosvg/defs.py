@@ -28,6 +28,23 @@ EXTEND_OPERATORS = {
     'repeat': cairo.EXTEND_REPEAT,
 }
 
+# Marker for "attribute was absent" when snapshotting shared definitions
+_MISSING = object()
+
+
+def _snapshot(node, keys):
+    """Remember the current value (or absence) of ``keys`` on ``node``."""
+    return {key: node.get(key, _MISSING) for key in keys}
+
+
+def _restore(node, snapshot):
+    """Restore attributes saved by ``_snapshot``, removing added ones."""
+    for key, value in snapshot.items():
+        if value is _MISSING:
+            node.pop(key, None)
+        else:
+            node[key] = value
+
 
 def update_def_href(surface, def_name, def_dict, chain=None):
     """Update the attributes of the def according to its href attribute."""
@@ -119,40 +136,61 @@ def clip_path(surface, node):
 def paint_mask(surface, node, name, opacity):
     """Paint the mask of the current surface."""
     mask_node = surface.masks[name]
-    mask_node.tag = 'g'
-    mask_node['opacity'] = opacity
 
-    if mask_node.get('maskUnits') == 'userSpaceOnUse':
-        width_ref, height_ref = 'x', 'y'
-    else:
-        x = size(surface, node.get('x'), 'x')
-        y = size(surface, node.get('y'), 'y')
-        width = size(surface, node.get('width'), 'x')
-        height = size(surface, node.get('height'), 'y')
-        width_ref = width or surface.width
-        height_ref = height or surface.height
+    # The mask definition is shared by every node referencing it: the
+    # mutations below are temporary and are reverted on every exit path, so
+    # that no state leaks to siblings or to later uses of the same mask.
+    saved_attrs = _snapshot(
+        mask_node, ('opacity', 'x', 'y', 'width', 'height', 'viewBox'))
+    saved_tag = mask_node.tag
+    mask_surface = None
+    try:
+        mask_node.tag = 'g'
+        mask_node['opacity'] = opacity
 
-    mask_node['x'] = size(surface, mask_node.get('x', '-10%'), width_ref)
-    mask_node['y'] = size(surface, mask_node.get('y', '-10%'), height_ref)
-    mask_node['height'] = size(
-        surface, mask_node.get('height', '120%'), height_ref)
-    mask_node['width'] = size(
-        surface, mask_node.get('width', '120%'), width_ref)
+        if mask_node.get('maskUnits') == 'userSpaceOnUse':
+            width_ref, height_ref = 'x', 'y'
+        else:
+            x = size(surface, node.get('x'), 'x')
+            y = size(surface, node.get('y'), 'y')
+            width = size(surface, node.get('width'), 'x')
+            height = size(surface, node.get('height'), 'y')
+            width_ref = width or surface.width
+            height_ref = height or surface.height
 
-    if mask_node.get('maskUnits') == 'userSpaceOnUse':
-        x = mask_node['x']
-        y = mask_node['y']
-        mask_node['viewBox'] = '{x} {y} {width} {height}'.format(**mask_node)
+        mask_node['x'] = size(surface, mask_node.get('x', '-10%'), width_ref)
+        mask_node['y'] = size(surface, mask_node.get('y', '-10%'), height_ref)
+        mask_node['height'] = size(
+            surface, mask_node.get('height', '120%'), height_ref)
+        mask_node['width'] = size(
+            surface, mask_node.get('width', '120%'), width_ref)
 
-    from .surface import SVGSurface  # circular import
-    mask_surface = SVGSurface(mask_node, None, surface.dpi, surface)
-    surface.context.save()
-    surface.context.translate(x, y)
-    surface.context.scale(
-        mask_node['width'] / mask_surface.width,
-        mask_node['height'] / mask_surface.height)
-    surface.context.mask_surface(mask_surface.cairo)
-    surface.context.restore()
+        if mask_node.get('maskUnits') == 'userSpaceOnUse':
+            x = mask_node['x']
+            y = mask_node['y']
+            mask_node['viewBox'] = '{x} {y} {width} {height}'.format(
+                **mask_node)
+
+        from .surface import SVGSurface  # circular import
+        mask_surface = SVGSurface(mask_node, None, surface.dpi, surface)
+        surface.context.save()
+        try:
+            surface.context.translate(x, y)
+            surface.context.scale(
+                mask_node['width'] / mask_surface.width,
+                mask_node['height'] / mask_surface.height)
+            surface.context.mask_surface(mask_surface.cairo)
+        finally:
+            surface.context.restore()
+    finally:
+        # Release the temporary canvas and restore the shared definition
+        if mask_surface is not None:
+            try:
+                mask_surface.cairo.finish()
+            except cairo.Error:
+                pass  # Already finished
+        _restore(mask_node, saved_attrs)
+        mask_node.tag = saved_tag
 
 
 def draw_gradient(surface, node, name, opacity):
@@ -219,51 +257,69 @@ def draw_gradient(surface, node, name, opacity):
 def draw_pattern(surface, node, name, opacity):
     """Draw a pattern image."""
     pattern_node = surface.patterns[name]
-    pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
-    pattern_node.tag = 'g'
-    transform(surface, pattern_node.get('patternTransform'))
 
-    if pattern_node.get('viewBox'):
-        if not (size(surface, pattern_node.get('width', 1), 1) and
-                size(surface, pattern_node.get('height', 1), 1)):
+    # The pattern definition is shared by every node referencing it: the
+    # mutations below (including the opacity composition) are temporary and
+    # are reverted on every exit path, so that colors and coordinates cannot
+    # leak to siblings or to later uses of the same pattern.
+    saved_attrs = _snapshot(
+        pattern_node, ('opacity', 'width', 'height', 'transform'))
+    saved_tag = pattern_node.tag
+    try:
+        pattern_node['opacity'] = (
+            float(pattern_node.get('opacity', 1)) * opacity)
+        pattern_node.tag = 'g'
+        transform(surface, pattern_node.get('patternTransform'))
+
+        if pattern_node.get('viewBox'):
+            if not (size(surface, pattern_node.get('width', 1), 1) and
+                    size(surface, pattern_node.get('height', 1), 1)):
+                return False
+        else:
+            if not (size(surface, pattern_node.get('width', 0), 1) and
+                    size(surface, pattern_node.get('height', 0), 1)):
+                return False
+
+        if pattern_node.get('patternUnits') == 'userSpaceOnUse':
+            x = size(surface, pattern_node.get('x'), 'x')
+            y = size(surface, pattern_node.get('y'), 'y')
+            pattern_width = size(surface, pattern_node.get('width', 0), 1)
+            pattern_height = size(surface, pattern_node.get('height', 0), 1)
+        else:
+            _, _, width, height = calculate_bounding_box(surface, node)
+            x = size(surface, pattern_node.get('x'), 1) * width
+            y = size(surface, pattern_node.get('y'), 1) * height
+            pattern_width = (
+                size(surface, pattern_node.pop('width', '1'), 1) * width)
+            pattern_height = (
+                size(surface, pattern_node.pop('height', '1'), 1) * height)
+            if 'viewBox' not in pattern_node:
+                pattern_node['width'] = pattern_width
+                pattern_node['height'] = pattern_height
+                if (pattern_node.get('patternContentUnits')
+                        == 'objectBoundingBox'):
+                    pattern_node['transform'] = (
+                        f'scale({width}, {height})')
+
+        # Fail if pattern has an invalid size
+        if pattern_width == 0.0 or pattern_height == 0.0:
             return False
-    else:
-        if not (size(surface, pattern_node.get('width', 0), 1) and
-                size(surface, pattern_node.get('height', 0), 1)):
-            return False
 
-    if pattern_node.get('patternUnits') == 'userSpaceOnUse':
-        x = size(surface, pattern_node.get('x'), 'x')
-        y = size(surface, pattern_node.get('y'), 'y')
-        pattern_width = size(surface, pattern_node.get('width', 0), 1)
-        pattern_height = size(surface, pattern_node.get('height', 0), 1)
-    else:
-        _, _, width, height = calculate_bounding_box(surface, node)
-        x = size(surface, pattern_node.get('x'), 1) * width
-        y = size(surface, pattern_node.get('y'), 1) * height
-        pattern_width = (
-            size(surface, pattern_node.pop('width', '1'), 1) * width)
-        pattern_height = (
-            size(surface, pattern_node.pop('height', '1'), 1) * height)
-        if 'viewBox' not in pattern_node:
-            pattern_node['width'] = pattern_width
-            pattern_node['height'] = pattern_height
-            if pattern_node.get('patternContentUnits') == 'objectBoundingBox':
-                pattern_node['transform'] = f'scale({width}, {height})'
-
-    # Fail if pattern has an invalid size
-    if pattern_width == 0.0 or pattern_height == 0.0:
-        return False
-
-    from .surface import SVGSurface  # circular import
-    pattern_surface = SVGSurface(pattern_node, None, surface.dpi, surface)
-    pattern_pattern = cairo.SurfacePattern(pattern_surface.cairo)
-    pattern_pattern.set_extend(cairo.EXTEND_REPEAT)
-    pattern_pattern.set_matrix(cairo.Matrix(
-        pattern_surface.width / pattern_width, 0, 0,
-        pattern_surface.height / pattern_height, -x, -y))
-    surface.context.set_source(pattern_pattern)
-    return True
+        from .surface import SVGSurface  # circular import
+        pattern_surface = SVGSurface(pattern_node, None, surface.dpi, surface)
+        # The pattern keeps a reference to the temporary canvas: it is
+        # released when the root surface is finished (or aborted).
+        surface._temp_surfaces.append(pattern_surface)
+        pattern_pattern = cairo.SurfacePattern(pattern_surface.cairo)
+        pattern_pattern.set_extend(cairo.EXTEND_REPEAT)
+        pattern_pattern.set_matrix(cairo.Matrix(
+            pattern_surface.width / pattern_width, 0, 0,
+            pattern_surface.height / pattern_height, -x, -y))
+        surface.context.set_source(pattern_pattern)
+        return True
+    finally:
+        _restore(pattern_node, saved_attrs)
+        pattern_node.tag = saved_tag
 
 
 def prepare_filter(surface, node, name):
@@ -339,37 +395,47 @@ def use(surface, node):
         raise ValueError(
             'Abort rendering: more than 100 000 referenced elements')
     surface.context.save()
-    surface.context.translate(
-        size(surface, node.get('x'), 'x'), size(surface, node.get('y'), 'y'))
-    if 'x' in node:
-        del node['x']
-    if 'y' in node:
-        del node['y']
-    if 'viewBox' in node:
-        del node['viewBox']
-    if 'mask' in node:
-        del node['mask']
-    href = parse_url(node.get_href()).geturl()
+    # The attributes removed from the caller's node and the ones overridden
+    # on the referenced (potentially shared) tree are restored on every exit
+    # path, so that neither the caller's tree nor shared definitions are
+    # left mutated — even when the referenced content fails to draw.
+    removed = _snapshot(node, ('x', 'y', 'viewBox', 'mask'))
+    tree = None
+    tree_tag = None
+    tree_sizes = {}
     try:
-        tree = Tree(
-            url=href, url_fetcher=node.url_fetcher, parent=node,
-            tree_cache=surface.tree_cache, unsafe=node.unsafe)
-    except TypeError:
+        surface.context.translate(
+            size(surface, node.get('x'), 'x'),
+            size(surface, node.get('y'), 'y'))
+        for key in removed:
+            node.pop(key, None)
+        href = parse_url(node.get_href()).geturl()
+        try:
+            tree = Tree(
+                url=href, url_fetcher=node.url_fetcher, parent=node,
+                tree_cache=surface.tree_cache, unsafe=node.unsafe)
+        except TypeError:
+            return
+
+        if not match_features(tree.xml_tree):
+            return
+
+        if tree.tag in ('svg', 'symbol'):
+            # Explicitely specified
+            # http://www.w3.org/TR/SVG11/struct.html#UseElement
+            tree_tag = tree.tag
+            tree.tag = 'svg'
+            if 'width' in node and 'height' in node:
+                tree_sizes = _snapshot(tree, ('width', 'height'))
+                tree['width'], tree['height'] = node['width'], node['height']
+
+        surface.draw(tree)
+        node.get('fill', None)
+        node.get('stroke', None)
+    finally:
+        if tree is not None:
+            if tree_tag is not None:
+                tree.tag = tree_tag
+            _restore(tree, tree_sizes)
+        _restore(node, removed)
         surface.context.restore()
-        return
-
-    if not match_features(tree.xml_tree):
-        surface.context.restore()
-        return
-
-    if tree.tag in ('svg', 'symbol'):
-        # Explicitely specified
-        # http://www.w3.org/TR/SVG11/struct.html#UseElement
-        tree.tag = 'svg'
-        if 'width' in node and 'height' in node:
-            tree['width'], tree['height'] = node['width'], node['height']
-
-    surface.draw(tree)
-    node.get('fill', None)
-    node.get('stroke', None)
-    surface.context.restore()
