@@ -164,6 +164,9 @@ class Surface(object):
         self.text_path_width = 0
         self.tree_cache = {(tree.url, tree.get('id')): tree}
         self.reference_count = 0
+        # Keys of the referenced elements currently being instantiated by
+        # ``use``: used to detect (and skip) reference cycles
+        self.reference_chain = set()
         if parent_surface:
             self.markers = parent_surface.markers
             self.gradients = parent_surface.gradients

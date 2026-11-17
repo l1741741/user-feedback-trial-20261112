@@ -3,6 +3,22 @@
 ======
 
 
+Unreleased
+==========
+
+Improve ``use`` element reference instantiation:
+
+* Each instance now gets its own position, size, transform and style without
+  altering the shared definition, the tree cache, or the ``use`` element
+  itself; re-rendering the same parsed tree gives the same result
+* ``width``/``height`` on ``use`` apply to ``svg``/``symbol`` references even
+  when only one of them is given, the other defaulting to 100% of the viewport
+* Reference cycles (direct or indirect) are detected and skipped like missing
+  references, so later legitimate instances are still rendered instead of
+  crashing with ``RecursionError``; the 100 000 referenced elements
+  ``ValueError`` contract is kept for runaway documents
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

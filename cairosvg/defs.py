@@ -5,6 +5,8 @@ This module handles clips, gradients, masks, patterns and external nodes.
 
 """
 
+import copy
+
 from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
 from .features import match_features
 from .helpers import paint, size, transform
@@ -333,7 +335,27 @@ def apply_filter_after_painting(surface, node, name):
 
 
 def use(surface, node):
-    """Draw the content of another SVG node."""
+    """Draw the content of another SVG node.
+
+    Each ``use`` element instantiates the referenced node with its own
+    position (``x``/``y`` translated on the context, inside the element's
+    own ``transform``), size, and inherited style. Neither the shared
+    definition nor the ``use`` element itself is modified, so instances
+    rendered before or after don't interfere with each other, and
+    re-rendering the same parsed tree gives the same result.
+
+    Error contract:
+
+    - a missing reference (unknown id, unfetchable document) is skipped
+      silently and rendering continues with the next elements;
+    - a reference cycle (an element directly or indirectly referencing
+      itself) is skipped the same way: the cyclic branch is not drawn,
+      but later, legitimate instances are still rendered;
+    - when the total number of instantiated references grows beyond
+      100 000 (and ``unsafe`` is not set), rendering aborts with
+      ``ValueError``.
+
+    """
     surface.reference_count += 1
     if not node.unsafe and surface.reference_count > 100_000:
         raise ValueError(
@@ -341,20 +363,13 @@ def use(surface, node):
     surface.context.save()
     surface.context.translate(
         size(surface, node.get('x'), 'x'), size(surface, node.get('y'), 'y'))
-    if 'x' in node:
-        del node['x']
-    if 'y' in node:
-        del node['y']
-    if 'viewBox' in node:
-        del node['viewBox']
-    if 'mask' in node:
-        del node['mask']
     href = parse_url(node.get_href()).geturl()
     try:
         tree = Tree(
             url=href, url_fetcher=node.url_fetcher, parent=node,
             tree_cache=surface.tree_cache, unsafe=node.unsafe)
     except TypeError:
+        # Missing reference: skip it, keep rendering the other elements
         surface.context.restore()
         return
 
@@ -362,14 +377,29 @@ def use(surface, node):
         surface.context.restore()
         return
 
-    if tree.tag in ('svg', 'symbol'):
-        # Explicitely specified
-        # http://www.w3.org/TR/SVG11/struct.html#UseElement
-        tree.tag = 'svg'
-        if 'width' in node and 'height' in node:
-            tree['width'], tree['height'] = node['width'], node['height']
+    # A reference to an element already being instantiated is a cycle:
+    # skip this branch like a missing reference, so that legitimate
+    # instances drawn afterwards are not mistaken for endless recursion
+    reference_key = (tree.url, tree.get('id'))
+    if reference_key in surface.reference_chain:
+        surface.context.restore()
+        return
 
-    surface.draw(tree)
-    node.get('fill', None)
-    node.get('stroke', None)
+    if tree.tag in ('svg', 'symbol'):
+        # Work on a private copy: the shared definition (also stored in
+        # the tree cache) must not be altered by this instance
+        tree = copy.copy(tree)
+        tree.tag = 'svg'
+        # Explicitly specified attributes win over inherited ones; a
+        # missing dimension defaults to 100% of the current viewport
+        # http://www.w3.org/TR/SVG11/struct.html#UseElement
+        if 'width' in node or 'height' in node:
+            tree['width'] = node.get('width', '100%')
+            tree['height'] = node.get('height', '100%')
+
+    surface.reference_chain.add(reference_key)
+    try:
+        surface.draw(tree)
+    finally:
+        surface.reference_chain.discard(reference_key)
     surface.context.restore()
