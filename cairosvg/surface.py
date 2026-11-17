@@ -119,6 +119,33 @@ class Surface(object):
                        This does NOT restrict fetching of the main SVG input
                        specified via the ``url`` parameter.
                        Applications should validate input URLs to prevent SSRF.
+        :param background_color: A color string used to fill the background
+                                 before drawing. This is an output option, not
+                                 SVG content: it is not modified by
+                                 ``negate_colors``.
+        :param negate_colors: Replace every vector color (fills, strokes,
+                              gradient stops, filter floods, text) with its
+                              complementary color. Opacity and alpha values
+                              are preserved, so transparent areas stay
+                              transparent. Raster images are not affected.
+        :param invert_images: Replace every pixel of embedded raster images
+                              with its complementary color. Alpha channels,
+                              palette transparency, image geometry and EXIF
+                              orientation are preserved: transparent pixels
+                              are not flattened onto a solid background.
+                              Vector images referenced by ``image`` tags are
+                              not affected; their colors follow
+                              ``negate_colors`` instead. Raster images whose
+                              color mode has no 8-bit RGB semantics (16-bit
+                              gray, floating point…) are inverted through an
+                              approximate 8-bit RGBA conversion.
+        :param output_width: The desired output width in pixels.
+        :param output_height: The desired output height in pixels.
+
+        ``negate_colors`` and ``invert_images`` can be combined; each input
+        is inverted at most once per render, embedded images are never
+        modified in place, and leaving both options disabled gives the same
+        output as not passing them at all.
 
 
         Specifiy the output with:

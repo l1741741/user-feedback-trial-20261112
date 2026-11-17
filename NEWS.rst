@@ -3,6 +3,18 @@
 ======
 
 
+Unreleased
+==========
+
+* Improve ``invert_images``: invert paletted images through their palette
+  (keeping the transparency information byte-exact), invert CMYK images in
+  CMYK space, and preserve the alpha channel and geometry of every supported
+  mode without modifying the input image
+* Document the exact semantics of ``negate_colors`` and ``invert_images``
+  in the API docstrings, and cover their combinations with regression tests
+  and a runnable demo (``demo/demo_color_flags.py``)
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

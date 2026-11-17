@@ -118,6 +118,35 @@ def image(surface, node):
 
 
 def invert_image(img):
-    """Invert the colors of an image."""
-    *rgb, a = img.convert('RGBA').split()
-    return Image.merge('RGBA', (*map(ImageOps.invert, rgb), a))
+    """Return a copy of ``img`` with its colors replaced by their complement.
+
+    The alpha channel, palette transparency and image geometry are left
+    untouched, and the input image is never modified: transparent pixels
+    stay transparent instead of being flattened onto a solid color.
+
+    Paletted images (``P``) keep their palette: the palette colors are
+    inverted while color indices and the transparency information stay
+    as-is. CMYK images are inverted channel by channel in CMYK space.
+    Modes without 8-bit color channels (``I``, ``I;16``, ``F``…) are
+    converted through RGBA first, which clips channel values to the
+    0–255 range; inverting them is therefore only approximate.
+
+    """
+    if img.mode in ('1', 'L', 'RGB'):
+        return ImageOps.invert(img)
+    if img.mode == 'P' and img.getpalette() is not None:
+        # Invert palette colors, keep indices and transparency as-is
+        return ImageOps.invert(img)
+    if img.mode == 'CMYK':
+        # Complement each channel in CMYK space
+        return Image.merge(
+            'CMYK', [ImageOps.invert(band) for band in img.split()])
+    if img.mode in ('RGBA', 'LA'):
+        # Invert color channels, keep alpha as-is
+        *color, alpha = img.split()
+        return Image.merge(
+            img.mode, (*[ImageOps.invert(band) for band in color], alpha))
+    # Other modes (I, I;16, F, HSV, YCbCr…): invert through 8-bit RGBA
+    *rgb, alpha = img.convert('RGBA').split()
+    return Image.merge(
+        'RGBA', (*[ImageOps.invert(band) for band in rgb], alpha))
