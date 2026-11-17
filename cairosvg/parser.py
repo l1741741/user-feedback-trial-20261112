@@ -333,7 +333,9 @@ class Tree(Node):
                 cached_tree = tree_cache[(url, element_id)]
                 new_tree = Node(
                     cached_tree.element, cached_tree.style,
-                    cached_tree.url_fetcher, parent, unsafe=unsafe)
+                    cached_tree.url_fetcher, parent,
+                    parent_children=kwargs.get('parent_children'),
+                    unsafe=unsafe)
                 new_tree.xml_tree = cached_tree.xml_tree
                 new_tree.url = url
                 new_tree.tag = cached_tree.tag

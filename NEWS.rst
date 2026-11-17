@@ -3,6 +3,21 @@
 ======
 
 
+Unreleased
+==========
+
+* Fix non-destructive resolution of gradients and patterns referenced with
+  ``href``/``xlink:href``: shared definitions are no longer mutated, so one
+  shape’s overrides cannot leak into other shapes using the same definition
+  and rendering no longer depends on draw order
+* Multi-level ``href`` chains now inherit stops and unspecified attributes
+  transitively; cyclic and missing references end safely without polluting
+  other graphics
+* Fix childless referenced gradients painting nothing when the SVG is
+  rendered from a file URL (the ``tree_cache`` hit path now honors
+  ``parent_children``)
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

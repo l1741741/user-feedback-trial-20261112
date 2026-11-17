@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Same document as icons-order-a.svg: identical defs, identical icon
+  positions and styles. The ONLY difference is the order in which the three
+  icon groups are listed (C, B, A here instead of A, B, C).
+
+  Because href resolution must not mutate the shared gradient registry, the
+  PNG rendered from this file is the exact same image: each icon keeps its
+  own color distribution no matter which shape is painted first.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="240" height="80" viewBox="0 0 240 80" version="1.1">
+  <defs>
+    <linearGradient id="brandLinear" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#d00000"/>
+      <stop offset="1" stop-color="#0033d0"/>
+    </linearGradient>
+    <linearGradient id="iconLinear" href="#brandLinear"
+                    xlink:href="#brandLinear" x2="0" y2="1"/>
+    <linearGradient id="iconChain" href="#iconLinear"
+                    xlink:href="#iconLinear" spreadMethod="repeat"/>
+    <radialGradient id="brandRadial" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#fff2a8"/>
+      <stop offset="1" stop-color="#b3541e"/>
+    </radialGradient>
+    <radialGradient id="iconRadial" href="#brandRadial"
+                    xlink:href="#brandRadial" r="75%"/>
+  </defs>
+
+  <!-- Icon C first. -->
+  <g id="icon-c" transform="translate(196,40) rotate(45)">
+    <path d="M-26,-26 H26 V26 H-26 Z" fill="url(#iconRadial)"/>
+  </g>
+
+  <!-- Icon B second. -->
+  <g id="icon-b" transform="translate(92,12)" opacity="0.85">
+    <circle cx="28" cy="28" r="28" fill="url(#iconChain)"/>
+  </g>
+
+  <!-- Icon A last. -->
+  <g id="icon-a" transform="translate(8,12)">
+    <rect x="0" y="0" width="56" height="56" rx="10"
+          fill="url(#iconLinear)"/>
+  </g>
+</svg>

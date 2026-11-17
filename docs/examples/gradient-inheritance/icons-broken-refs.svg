@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Error-handling examples for href inheritance.
+
+  #cyclic-a / #cyclic-b reference each other: the cycle must be detected and
+  ended safely. #cyclic-a still has its own stop, so the rect is painted with
+  that stop instead of crashing or polluting the other shapes.
+
+  #missing references an unknown identifier: it is used as-is, so its own
+  black stop paints the second rect.
+
+  #healthy is a normal definition and must render exactly the same red->blue
+  gradient here as in any other document, proving the broken references do not
+  leak state into it.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="240" height="80" viewBox="0 0 240 80" version="1.1">
+  <defs>
+    <linearGradient id="cyclic-a" href="#cyclic-b" xlink:href="#cyclic-b">
+      <stop offset="0" stop-color="#7b2cbf"/>
+    </linearGradient>
+    <linearGradient id="cyclic-b" href="#cyclic-a" xlink:href="#cyclic-a">
+      <stop offset="1" stop-color="#ffd60a"/>
+    </linearGradient>
+
+    <linearGradient id="missing" href="#does-not-exist"
+                    xlink:href="#does-not-exist">
+      <stop offset="0" stop-color="#212529"/>
+    </linearGradient>
+
+    <linearGradient id="healthy" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#d00000"/>
+      <stop offset="1" stop-color="#0033d0"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8"   y="12" width="64" height="56" fill="url(#cyclic-a)"/>
+  <rect x="88"  y="12" width="64" height="56" fill="url(#missing)"/>
+  <rect x="168" y="12" width="64" height="56" fill="url(#healthy)"/>
+</svg>

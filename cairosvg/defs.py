@@ -29,24 +29,75 @@ EXTEND_OPERATORS = {
 }
 
 
-def update_def_href(surface, def_name, def_dict, chain=None):
-    """Update the attributes of the def according to its href attribute."""
-    def_node = def_dict[def_name]
-    href = parse_url(def_node.get_href()).fragment
+def resolve_def_href(surface, def_name, def_dict, chain=None):
+    """Return a node resolving the ``href`` chain of ``def_name``.
+
+    The referenced definition is never modified: a new merged node is
+    returned, combining the node’s own attributes, children and overrides
+    with the ones inherited from the referenced definition. This keeps the
+    shared definition registry intact, so the same definition can be
+    referenced by any number of shapes with different attributes, opacities
+    or transforms without results depending on draw order.
+
+    A fresh merged node is built on every call. Definitions that mutate the
+    node while drawing (patterns pop their width/height attributes) therefore
+    never leak their changes back into the shared registry or into a later
+    reference.
+
+    Multi-level chains (``a -> b -> c``) are resolved transitively: nodes
+    without their own children inherit the referenced stops, and attributes
+    not given on a node are inherited from the effective definition.
+
+    Cycles and references to unknown identifiers end the chain safely: the
+    node usable so far (or the untouched original node) is returned, matching
+    the previous error handling, without raising or polluting other nodes.
+
+    """
     if chain is None:
-        chain = set()
-    if href in def_dict and href not in chain:
-        chain.add(href)
-        update_def_href(surface, href, def_dict, chain)
-        href_node = def_dict[href]
-        def_dict[def_name] = Tree(
-            url=f'#{def_name}', url_fetcher=def_node.url_fetcher,
-            parent=href_node, parent_children=(not def_node.children),
-            tree_cache=surface.tree_cache, unsafe=def_node.unsafe)
-        # Inherit attributes generally not inherited
-        for key, value in href_node.items():
-            if key not in def_dict[def_name]:
-                def_dict[def_name][key] = value
+        chain = []
+
+    def_node = def_dict.get(def_name)
+    if def_node is None or def_name in chain:
+        # Unknown identifier or cyclic reference: stop here and use what is
+        # already known instead of looping forever.
+        return def_node
+
+    href = parse_url(def_node.get_href()).fragment
+    if not href or href not in def_dict:
+        # Nothing to inherit from: use the node as-is, untouched.
+        return def_node
+
+    href_node = resolve_def_href(
+        surface, href, def_dict, chain + [def_name])
+    if href_node is None:
+        return def_node
+
+    # Per the SVG specification, a gradient with child elements keeps its
+    # own children (its stops replace the referenced ones); a childless
+    # gradient inherits the referenced gradient’s effective children. The
+    # parent_children flag applies this transitively, so stops defined many
+    # levels up the href chain are still found.
+    result = Tree(
+        url=f'#{def_name}', url_fetcher=def_node.url_fetcher,
+        parent=href_node, parent_children=(not def_node.children),
+        tree_cache=surface.tree_cache, unsafe=def_node.unsafe)
+    # Inherit attributes generally not inherited
+    for key, value in href_node.items():
+        if key not in result:
+            result[key] = value
+    return result
+
+
+def update_def_href(surface, def_name, def_dict):
+    """Compatibility wrapper kept for external callers.
+
+    Resolution used to mutate the shared definition registry in place. It
+    now delegates to the non-destructive :func:`resolve_def_href`; the
+    registry itself is no longer modified, so a shared definition stays
+    available unchanged for every later reference.
+
+    """
+    return resolve_def_href(surface, def_name, def_dict)
 
 
 def parse_all_defs(surface, node):
@@ -73,11 +124,13 @@ def parse_def(surface, node):
 def gradient_or_pattern(surface, node, name, opacity):
     """Gradient or pattern color."""
     if name in surface.gradients:
-        update_def_href(surface, name, surface.gradients)
-        return draw_gradient(surface, node, name, opacity)
+        gradient_node = resolve_def_href(surface, name, surface.gradients)
+        if gradient_node is not None:
+            return draw_gradient(surface, node, gradient_node, opacity)
     elif name in surface.patterns:
-        update_def_href(surface, name, surface.patterns)
-        return draw_pattern(surface, node, name, opacity)
+        pattern_node = resolve_def_href(surface, name, surface.patterns)
+        if pattern_node is not None:
+            return draw_pattern(surface, node, pattern_node, opacity)
 
 
 def marker(surface, node):
@@ -155,9 +208,13 @@ def paint_mask(surface, node, name, opacity):
     surface.context.restore()
 
 
-def draw_gradient(surface, node, name, opacity):
-    """Gradients colors."""
-    gradient_node = surface.gradients[name]
+def draw_gradient(surface, node, gradient_node, opacity):
+    """Gradients colors.
+
+    ``gradient_node`` is the non-destructively resolved definition returned
+    by :func:`resolve_def_href`. The shared registry is never modified.
+
+    """
 
     if gradient_node.get('gradientUnits') == 'userSpaceOnUse':
         width_ref, height_ref = 'x', 'y'
@@ -216,9 +273,13 @@ def draw_gradient(surface, node, name, opacity):
     return True
 
 
-def draw_pattern(surface, node, name, opacity):
-    """Draw a pattern image."""
-    pattern_node = surface.patterns[name]
+def draw_pattern(surface, node, pattern_node, opacity):
+    """Draw a pattern image.
+
+    ``pattern_node`` is the non-destructively resolved definition returned
+    by :func:`resolve_def_href`. The shared registry is never modified.
+
+    """
     pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
     pattern_node.tag = 'g'
     transform(surface, pattern_node.get('patternTransform'))

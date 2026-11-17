@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Shared-gradient brand icons demo.
+
+  Three brand-style icons are drawn side by side. Every icon reuses the same
+  public gradient definitions through href:
+
+    #brandLinear   common linear gradient with two stops
+      #iconLinear  overrides the gradient vector (x2/y2) only, keeps the stops
+        #iconChain childless gradient: inherits stops AND geometry through
+                   two levels of href, only adds spreadMethod="repeat"
+    #brandRadial   common radial gradient with two stops
+      #iconRadial  overrides the radius r only, keeps center and stops
+
+  The same definitions are referenced from different shapes (rect, circle,
+  path), with different opacities and transforms. Rendering this document
+  must give each icon its own colors regardless of the order the shapes are
+  listed in: see icons-order-b.svg which only swaps the shape order.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="240" height="80" viewBox="0 0 240 80" version="1.1">
+  <defs>
+    <!-- Public color stops shared by every linear-gradient icon. -->
+    <linearGradient id="brandLinear" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#d00000"/>
+      <stop offset="1" stop-color="#0033d0"/>
+    </linearGradient>
+
+    <!-- Same stops, own geometry: a vertical instead of horizontal vector. -->
+    <linearGradient id="iconLinear" href="#brandLinear"
+                    xlink:href="#brandLinear" x2="0" y2="1"/>
+
+    <!-- Two levels of href: no own stops, no own geometry, own spread. -->
+    <linearGradient id="iconChain" href="#iconLinear"
+                    xlink:href="#iconLinear" spreadMethod="repeat"/>
+
+    <!-- Public radial color stops shared by radial-gradient icons. -->
+    <radialGradient id="brandRadial" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#fff2a8"/>
+      <stop offset="1" stop-color="#b3541e"/>
+    </radialGradient>
+
+    <!-- Same center and stops, own radius. -->
+    <radialGradient id="iconRadial" href="#brandRadial"
+                    xlink:href="#brandRadial" r="75%"/>
+  </defs>
+
+  <!-- Icon A: rounded square painted with the geometry override. -->
+  <g id="icon-a" transform="translate(8,12)">
+    <rect x="0" y="0" width="56" height="56" rx="10"
+          fill="url(#iconLinear)"/>
+  </g>
+
+  <!-- Icon B: circle with the transitive, repeating gradient, half opaque. -->
+  <g id="icon-b" transform="translate(92,12)" opacity="0.85">
+    <circle cx="28" cy="28" r="28" fill="url(#iconChain)"/>
+  </g>
+
+  <!-- Icon C: diamond path painted with the radial override, rotated. -->
+  <g id="icon-c" transform="translate(196,40) rotate(45)">
+    <path d="M-26,-26 H26 V26 H-26 Z" fill="url(#iconRadial)"/>
+  </g>
+</svg>
