@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48"
+    viewBox="0 0 48 48">
+  <rect width="48" height="48" rx="10"
+        style="fill: rgb(51 102 255 / 50%)"/>
+  <circle cx="24" cy="24" r="12"
+          style="fill: rgba(100%, 20%, 40%, 53.3%)"/>
+</svg>

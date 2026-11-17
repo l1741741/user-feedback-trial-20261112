@@ -187,16 +187,118 @@ COLORS = {
     'transparent': (0, 0, 0, 0),
 }
 
-RGBA = re.compile(r'rgba\((.+?)\)')
-RGB = re.compile(r'rgb\((.+?)\)')
-HEX_RRGGBB = re.compile('#[0-9a-f]{6}')
-HEX_RGB = re.compile('#[0-9a-f]{3}')
+# Fallback returned for invalid colors, kept for backward compatibility:
+# unrecognized values paint as opaque black instead of aborting the document.
+INVALID_COLOR = (0, 0, 0, 1)
+
+# CSS Color 4 "none" keyword is not supported, it falls back to INVALID_COLOR.
+# Hex colors: #RGB, #RGBA, #RRGGBB and #RRGGBBAA, full match only.
+HEX_COLOR = re.compile(r'#([0-9a-f]{3,8})\Z')
+
+# rgb()/rgba() functional notation. The body grammar is checked explicitly
+# below, this regex only isolates the argument list.
+RGB_FUNCTION = re.compile(r'rgba?\((.*)\)\Z', re.DOTALL)
+
+_NUMBER = r'[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?'
+_NUMBER_TOKEN = re.compile(rf'({_NUMBER})(%?)\Z', re.IGNORECASE)
+
+
+def _parse_channel(token):
+    """Parse one RGB channel token, returning ``(value, is_percentage)``.
+
+    ``value`` is normalized to the [0, 1] range (clamped). Number channels
+    are divided by 255, percentage channels by 100.
+
+    """
+    match = _NUMBER_TOKEN.match(token.strip())
+    if not match:
+        raise ValueError(f'invalid channel: {token!r}')
+    number = float(match.group(1))
+    if match.group(2):
+        value = number / 100
+    else:
+        value = number / 255
+    return min(1, max(0, value)), bool(match.group(2))
+
+
+def _parse_alpha(token):
+    """Parse an alpha channel token into a clamped [0, 1] value."""
+    match = _NUMBER_TOKEN.match(token.strip())
+    if not match:
+        raise ValueError(f'invalid alpha: {token!r}')
+    number = float(match.group(1))
+    # Alpha percentages are divided by 100; bare numbers are already factors.
+    value = number / 100 if match.group(2) else number
+    return min(1, max(0, value))
+
+
+def _parse_rgb_function(body):
+    """Parse the body of an ``rgb()`` / ``rgba()`` function.
+
+    Supports both the legacy comma-separated syntax and the CSS Color 4
+    space-separated syntax with a slash introducing the alpha value.
+
+    """
+    body = body.strip()
+    if not body:
+        raise ValueError('empty rgb function')
+
+    if ',' in body:
+        # Legacy syntax: channels and alpha separated by commas. A slash is
+        # not allowed in legacy syntax, and every separator must be a comma.
+        if '/' in body:
+            raise ValueError('slash is invalid in comma-separated rgb()')
+        tokens = [token.strip() for token in body.split(',')]
+        if not 3 <= len(tokens) <= 4:
+            raise ValueError(
+                f'rgb() expects 3 or 4 components, got {len(tokens)}')
+        channels = [_parse_channel(token) for token in tokens[:3]]
+        alpha = _parse_alpha(tokens[3]) if len(tokens) == 4 else 1
+    else:
+        # Modern syntax: channels separated by whitespace, optional
+        # " / <alpha>" suffix.
+        if '/' in body:
+            rgb_part, alpha_part = body.split('/', 1)
+            alpha = _parse_alpha(alpha_part)
+        else:
+            rgb_part, alpha = body, 1
+        tokens = rgb_part.split()
+        if len(tokens) != 3:
+            raise ValueError(
+                f'rgb() expects 3 channels, got {len(tokens)}')
+        channels = [_parse_channel(token) for token in tokens]
+
+    # Mixing number and percentage channels is invalid (CSS Color 4 §4.5).
+    is_percentage = channels[0][1]
+    if any(flag != is_percentage for _, flag in channels):
+        raise ValueError('number and percentage channels cannot be mixed')
+
+    r, g, b = (value for value, _ in channels)
+    return r, g, b, alpha
 
 
 def color(string, opacity=1):
     """Replace ``string`` representing a color by a RGBA tuple.
 
-    See http://www.w3.org/TR/SVG/types.html#DataTypeColor
+    Supported notations:
+      - SVG/CSS named colors, ``none`` and ``transparent``;
+      - ``#RGB``, ``#RGBA``, ``#RRGGBB`` and ``#RRGGBBAA`` hex colors, the
+        extra hex digits encoding the color alpha channel;
+      - ``rgb()`` and ``rgba()`` in the legacy comma-separated syntax, with
+        number or percentage channels and a number/percentage alpha;
+      - the CSS Color 4 space-separated syntax, including
+        ``rgb(R G B / A)`` and percentage alpha values.
+
+    The color's own alpha channel is combined with the external ``opacity``
+    by multiplication: callers pass fill-opacity, stroke-opacity,
+    stop-opacity or group opacity here, so it must not be applied again.
+
+    Invalid colors return :data:`INVALID_COLOR` (opaque black), matching the
+    project's historical behavior: one bad value never prevents the rest of
+    the document from rendering.
+
+    See http://www.w3.org/TR/SVG/types.html#DataTypeColor and
+    https://www.w3.org/TR/css-color-4/#rgb-functions
 
     """
     if not string:
@@ -205,38 +307,46 @@ def color(string, opacity=1):
     string = string.strip().lower()
 
     if string in COLORS:
-        r, g, b, a = COLORS[string]
-        return (r, g, b, a * opacity)
+        r, g, b, alpha = COLORS[string]
+        return (r, g, b, alpha * opacity)
 
-    match = RGBA.search(string)
-    if match:
-        r, g, b, a = tuple(
-            float(i.strip(' %')) / 100 if '%' in i else float(i) / 255
-            for i in match.group(1).strip().split(','))
-        return (r, g, b, a * 255 * opacity)
+    try:
+        match = HEX_COLOR.match(string)
+        if match:
+            digits = match.group(1)
+            if len(digits) == 3:
+                r = int(digits[0] * 2, 16) / 255
+                g = int(digits[1] * 2, 16) / 255
+                b = int(digits[2] * 2, 16) / 255
+                alpha = 1
+            elif len(digits) == 4:
+                r = int(digits[0] * 2, 16) / 255
+                g = int(digits[1] * 2, 16) / 255
+                b = int(digits[2] * 2, 16) / 255
+                alpha = int(digits[3] * 2, 16) / 255
+            elif len(digits) == 6:
+                r = int(digits[0:2], 16) / 255
+                g = int(digits[2:4], 16) / 255
+                b = int(digits[4:6], 16) / 255
+                alpha = 1
+            elif len(digits) == 8:
+                r = int(digits[0:2], 16) / 255
+                g = int(digits[2:4], 16) / 255
+                b = int(digits[4:6], 16) / 255
+                alpha = int(digits[6:8], 16) / 255
+            else:  # pragma: no cover - excluded by the regex
+                raise ValueError(f'invalid hex color: {string!r}')
+            return (r, g, b, alpha * opacity)
 
-    match = RGB.search(string)
-    if match:
-        r, g, b = tuple(
-            float(i.strip(' %')) / 100 if '%' in i else float(i) / 255
-            for i in match.group(1).strip().split(','))
-        return (r, g, b, opacity)
+        match = RGB_FUNCTION.match(string)
+        if match:
+            r, g, b, alpha = _parse_rgb_function(match.group(1))
+            return (r, g, b, alpha * opacity)
+    except (ValueError, OverflowError):
+        # Malformed color: keep the historical fallback instead of raising.
+        return INVALID_COLOR
 
-    match = HEX_RRGGBB.search(string)
-    if match:
-        plain_color = tuple(
-            int(value, 16) / 255 for value in (
-                string[1:3], string[3:5], string[5:7]))
-        return plain_color + (opacity,)
-
-    match = HEX_RGB.search(string)
-    if match:
-        plain_color = tuple(
-            int(value, 16) / 15 for value in (
-                string[1], string[2], string[3]))
-        return plain_color + (opacity,)
-
-    return (0, 0, 0, 1)
+    return INVALID_COLOR
 
 
 def negate_color(rgba_tuple):

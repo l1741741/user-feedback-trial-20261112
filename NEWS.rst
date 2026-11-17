@@ -3,6 +3,21 @@
 ======
 
 
+Unreleased
+==========
+
+* Parse alpha-bearing hex colors (``#RGBA`` and ``#RRGGBBAA``)
+* Support the CSS Color 4 space-separated ``rgb()``/``rgba()`` syntax with
+  slash alpha, including percentage alpha values
+* Fix percentage alpha in legacy ``rgba()`` (it was multiplied by 255)
+* Clamp out-of-range RGB channels and alpha values instead of passing them
+  straight to Cairo
+* The color alpha channel is combined exactly once with fill-opacity,
+  stroke-opacity, stop-opacity, flood-opacity and group opacity
+* Invalid colors keep the historical opaque-black fallback and no longer
+  raise on space-separated or otherwise malformed functional notations
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

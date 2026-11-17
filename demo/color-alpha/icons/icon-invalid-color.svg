@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+    width="48" height="48" viewBox="0 0 48 48">
+  <!-- hsl() is outside the supported subset: it must not break the batch -->
+  <rect width="48" height="48" rx="10" fill="hsl(220 80% 60%)"/>
+  <circle cx="24" cy="24" r="12" fill="rgb(255 0 0 / 75%)"/>
+</svg>
