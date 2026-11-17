@@ -54,6 +54,9 @@ COLOR_ATTRIBUTES = frozenset((
 ))
 
 
+XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
+
+
 def handle_white_spaces(string, preserve):
     """Handle white spaces in text nodes.
 
@@ -68,6 +71,27 @@ def handle_white_spaces(string, preserve):
         string = re.sub('[\n\r]', '', string)
         string = re.sub('\t', ' ', string)
         return re.sub(' +', ' ', string)
+
+
+def rstrip_last_text(node, children):
+    """Rstrip the last non-empty text of ``node`` and its descendants.
+
+    ``children`` is the node's ordered list of children (it is passed
+    explicitly because it may not be stored on the node yet). Used to apply
+    the default ``xml:space`` rule stripping the trailing spaces of a whole
+    ``text`` element, wherever its last character data chunk lives: element
+    text, ``tspan`` text or tail text. Text chunks rendered with
+    ``xml:space="preserve"`` are left untouched.
+
+    """
+    for child in reversed(children):
+        if rstrip_last_text(child, child.children):
+            return True
+    if node.text:
+        if node.get(XML_SPACE) != 'preserve':
+            node.text = node.text.rstrip(' ')
+        return True
+    return False
 
 
 def normalize_style_declaration(name, value):
@@ -246,8 +270,7 @@ class Node(dict):
     def text_children(self, element, trailing_space, text_root=False):
         """Create children and return them."""
         children = []
-        space = '{http://www.w3.org/XML/1998/namespace}space'
-        preserve = self.get(space) == 'preserve'
+        preserve = self.get(XML_SPACE) == 'preserve'
         self.text = handle_white_spaces(element.etree_element.text, preserve)
         if trailing_space and not preserve:
             self.text = self.text.lstrip(' ')
@@ -282,11 +305,8 @@ class Node(dict):
                 child_node = Node(
                     child_element, self.style, self.url_fetcher, parent=self,
                     unsafe=self.unsafe)
-            child_preserve = child_node.get(space) == 'preserve'
-            child_node.text = handle_white_spaces(child.text, child_preserve)
             child_node.children, trailing_space = child_node.text_children(
                 child_element, trailing_space)
-            trailing_space = child_node.text.endswith(' ')
             if original_rotate and 'rotate' not in child_node:
                 pop_rotation(child_node, original_rotate, rotate)
             children.append(child_node)
@@ -305,8 +325,12 @@ class Node(dict):
                     trailing_space = anonymous.text.endswith(' ')
                 children.append(anonymous)
 
-        if text_root and not children and not preserve:
-            self.text = self.text.rstrip(' ')
+        if text_root and not preserve:
+            # Strip the trailing spaces of the last character data chunk of
+            # the whole text element, as required by the default xml:space
+            # rules, whether it lives in the element text, a tspan text or
+            # a tail text.
+            rstrip_last_text(self, children)
 
         return children, trailing_space
 

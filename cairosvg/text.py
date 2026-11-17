@@ -75,7 +75,7 @@ def text(surface, node, draw_as_text=False):
         text_path = None
     letter_spacing = size(surface, node.get('letter-spacing'))
     x_bearing, y_bearing, width, height = (
-        surface.context.text_extents(node.text)[:4])
+        surface.context.text_extents(node.text or '')[:4])
 
     x, y, dx, dy, rotate = [], [], [], [], [0]
     if 'x' in node:
