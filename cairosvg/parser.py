@@ -41,6 +41,8 @@ NOT_INHERITED_ATTRIBUTES = frozenset((
     'y',
     'dx',
     'dy',
+    'textLength',
+    'lengthAdjust',
     '{http://www.w3.org/1999/xlink}href',
     'href',
 ))

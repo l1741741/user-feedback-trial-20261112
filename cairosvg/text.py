@@ -1,6 +1,53 @@
 """
 Text drawers.
 
+Text is normally drawn one ``text``/``tspan`` node at a time, advancing the
+surface cursor as glyphs are emitted.  When an author asks for a specific
+width with ``textLength`` (or when ``letter-spacing`` has to stay continuous
+across ``tspan`` boundaries), the whole text run is laid out first by
+:mod:`cairosvg.text_layout` and each node then paints its share of that
+layout.
+
+Supported scope
+---------------
+
+* ``textLength`` on ``text`` and ``tspan`` elements, with ``lengthAdjust``
+  ``spacing`` (default) and ``spacingAndGlyphs``.
+* Lengths with units (``px``, ``pt``, ``mm``, …), ``em``/``ex``/``ch`` and
+  percentages of the viewport width.  Zero, negative and invalid values are
+  ignored, matching the "negative value is an error" rule of SVG 1.1.
+* Nested ``tspan``/``a`` elements, whose text shares a single layout with
+  its ancestors, so ``letter-spacing`` and calibration are continuous.
+* A nested ``tspan`` with its own ``textLength`` is calibrated first and
+  then treated as one indivisible block by its ancestors.
+* Explicit ``x``/``y`` lists (which pin characters and start a new anchored
+  chunk), ``dx``/``dy`` and ``rotate`` lists.
+* ``text-anchor`` (``start``/``middle``/``end``) applied per anchored chunk
+  to the calibrated width, and the vertical ``display-anchor`` /
+  ``dominant-baseline`` handling that already existed.
+
+Out of scope: ``textPath`` (it keeps the historical layout), automatic
+wrapping, bidirectional reordering, and kerning/ligature substitution.
+
+Known error sources and browser differences
+-------------------------------------------
+
+* Glyph advances are read from Cairo's toy text API, which applies no
+  kerning across characters.  A browser with kerning enabled can therefore
+  differ by a small fraction of an em on kerned pairs.
+* The *ink* box measured in a PNG is narrower than the calibrated advance
+  box by the first glyph's left side bearing and the last glyph's right side
+  bearing, plus, with ``letter-spacing``, the trailing spacing after the last
+  character.  Tests derive those values from the same font instead of
+  hard-coding pixels.
+* Chrome and WebKit disagree on a nested ``tspan`` with ``textLength``:
+  Chrome shifts the content after the block, WebKit ignores the nested
+  attribute.  This implementation follows the SVG 2 procedure (calibrate the
+  block, then continue after its calibrated width), which matches Chrome for
+  the start of the following characters.
+* Hinting can make Cairo's reported advance differ from the hinted glyph
+  outline by a fraction of a pixel; the PNG edge is therefore allowed a
+  small tolerance in tests.
 """
 
 from math import cos, radians, sin
@@ -9,6 +56,9 @@ from .bounding_box import (
     EMPTY_BOUNDING_BOX, extend_bounding_box, is_valid_bounding_box)
 from .helpers import distance, normalize, point_angle, size, zip_letters
 from .surface import cairo
+from .text_layout import (
+    build_layout, cached_font_size, cached_layout, is_text_root,
+    needs_layout)
 from .url import parse_url
 
 
@@ -51,6 +101,15 @@ def point_following_path(path, width):
 
 def text(surface, node, draw_as_text=False):
     """Draw a text ``node``."""
+    if not draw_as_text and is_text_root(node) and needs_layout(surface, node):
+        # Build the layout once, when the shape pass starts; the fill pass
+        # and the descendant ``tspan`` nodes reuse it.
+        build_layout(surface, node)
+    layout = cached_layout(surface, node)
+    if layout is not None:
+        _draw_layout(surface, node, layout, draw_as_text)
+        return
+
     font_family = (
         (node.get('font-family') or 'sans-serif').split(',')[0].strip('"\' '))
     font_style = getattr(
@@ -230,3 +289,67 @@ def text(surface, node, draw_as_text=False):
     # If a valid bounding box is calculated store it in the node
     if is_valid_bounding_box(bounding_box):
         node['text_bounding_box'] = bounding_box
+
+
+def _draw_layout(surface, node, characters, draw_as_text):
+    """Paint characters previously laid out by :mod:`cairosvg.text_layout`."""
+    from .text_layout import select_font
+
+    font_size = _layout_font_size(surface, node)
+    select_font(surface, node, font_size)
+    old_font_size = surface.font_size
+    surface.font_size = font_size
+    try:
+        bounding_box = EMPTY_BOUNDING_BOX
+        for character in characters:
+            if character.char.isspace():
+                continue
+            extents = character.extents
+            x_bearing, y_bearing, width, height = extents[:4]
+            scale = character.scale
+            surface.context.save()
+            surface.context.translate(character.x, character.y)
+            surface.context.rotate(radians(character.rotate or 0))
+            if scale != 1:
+                surface.context.scale(scale, 1)
+            surface.context.move_to(0, 0)
+            if draw_as_text:
+                surface.context.show_text(character.char)
+            else:
+                surface.context.text_path(character.char)
+            surface.context.restore()
+            left = character.x + x_bearing * scale
+            right = character.x + (x_bearing + width) * scale
+            top = character.y + y_bearing
+            bottom = top + height
+            if character.rotate:
+                left, top, right, bottom = _rotated_box(
+                    character.x, character.y, left, top, right, bottom,
+                    character.rotate)
+            bounding_box = extend_bounding_box(
+                bounding_box, ((left, top), (right, bottom)))
+        if is_valid_bounding_box(bounding_box):
+            node['text_bounding_box'] = bounding_box
+        if characters:
+            last = characters[-1]
+            surface.cursor_position = [last.end, last.y]
+    finally:
+        surface.font_size = old_font_size
+
+
+def _rotated_box(cx, cy, left, top, right, bottom, angle):
+    """Return the axis-aligned box of a rectangle rotated about a point."""
+    angle = radians(angle)
+    cosinus, sinus = cos(angle), sin(angle)
+    xs, ys = [], []
+    for x, y in ((left, top), (right, top), (left, bottom), (right, bottom)):
+        dx, dy = x - cx, y - cy
+        xs.append(cx + dx * cosinus - dy * sinus)
+        ys.append(cy + dx * sinus + dy * cosinus)
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _layout_font_size(surface, node):
+    """Return the font size used when ``node`` was laid out."""
+    font_size = cached_font_size(surface, node)
+    return surface.font_size if font_size is None else font_size
