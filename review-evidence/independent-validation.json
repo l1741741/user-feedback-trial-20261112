@@ -1,0 +1,22 @@
+{
+  "task_id": "recover-20261118-12592-path-smooth",
+  "final_sha": "9c9c91df1265dc05eacf4dfe3c6bffa41b14df74",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/recover-20261118-12592-path-smooth/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12592-path-smooth/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_path_smooth.py"
+  ],
+  "exit_code": 0,
+  "tests": 22,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-18T03:36:33.832296+08:00"
+}

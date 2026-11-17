@@ -1,0 +1,72 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12592-path-smooth/local-frozen-source/cairosvg/__init__.py",
+  "tests": 13,
+  "passed": 13,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "cubic-reflection",
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "relative-cubic",
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "mixed-quadratic",
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "repeated-cubic-groups",
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "line-reset",
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "arc-reset",
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "move-reset",
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "close-reset",
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "cubic-to-quadratic-default",
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "quadratic-to-cubic-default",
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "zero-length-line-reset",
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "quadratic-close-reset",
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "independent-paths-reset",
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,84 @@
+<!doctype html><meta charset="utf-8"><title>平滑曲线控制点对照</title><style>body{font:19px system-ui;margin:24px}img{width:360px;max-width:100%;border:1px solid #aaa}section{display:inline-block;margin:12px}pre{white-space:pre-wrap}</style><h1>平滑命令与显式控制点应画出相同曲线</h1><h2>cubic-reflection</h2><section><h3>本次平滑写法PNG</h3><img src="cubic-reflection-smooth.png"></section><section><h3>本次显式控制点PNG</h3><img src="cubic-reflection-explicit.png"></section><details><summary>两份实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 S120 140 140 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;
+&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 C100 140 120 140 140 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;</pre></details><h2>relative-cubic</h2><section><h3>本次平滑写法PNG</h3><img src="relative-cubic-smooth.png"></section><section><h3>本次显式控制点PNG</h3><img src="relative-cubic-explicit.png"></section><details><summary>两份实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 c20 -60 40 -60 60 0 s40 60 60 0&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;
+&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 C100 140 120 140 140 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;</pre></details><h2>mixed-quadratic</h2><section><h3>本次平滑写法PNG</h3><img src="mixed-quadratic-smooth.png"></section><section><h3>本次显式控制点PNG</h3><img src="mixed-quadratic-explicit.png"></section><details><summary>两份实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 q30 -40 60 0 t60 0 T200 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;
+&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 Q50 40 80 80 Q110 120 140 80 Q170 40 200 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;</pre></details><h2>repeated-cubic-groups</h2><section><h3>本次平滑写法PNG</h3><img src="repeated-cubic-groups-smooth.png"></section><section><h3>本次显式控制点PNG</h3><img src="repeated-cubic-groups-explicit.png"></section><details><summary>两份实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 S120 140 140 80 180 20 200 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;
+&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 C100 140 120 140 140 80 C160 20 180 20 200 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;</pre></details><h2>line-reset</h2><section><h3>本次平滑写法PNG</h3><img src="line-reset-smooth.png"></section><section><h3>本次显式控制点PNG</h3><img src="line-reset-explicit.png"></section><details><summary>两份实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 L100 100 S150 20 200 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;
+&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 L100 100 C100 100 150 20 200 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;</pre></details><h2>arc-reset</h2><section><h3>本次平滑写法PNG</h3><img src="arc-reset-smooth.png"></section><section><h3>本次显式控制点PNG</h3><img src="arc-reset-explicit.png"></section><details><summary>两份实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 A20 20 0 0 1 120 80 S180 140 200 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;
+&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 A20 20 0 0 1 120 80 C120 80 180 140 200 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;</pre></details><h2>move-reset</h2><section><h3>本次平滑写法PNG</h3><img src="move-reset-smooth.png"></section><section><h3>本次显式控制点PNG</h3><img src="move-reset-explicit.png"></section><details><summary>两份实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 M100 100 S150 20 200 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;
+&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 M100 100 C100 100 150 20 200 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;</pre></details><h2>close-reset</h2><section><h3>本次平滑写法PNG</h3><img src="close-reset-smooth.png"></section><section><h3>本次显式控制点PNG</h3><img src="close-reset-explicit.png"></section><details><summary>两份实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 Z S140 140 200 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;
+&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 Z C20 80 140 140 200 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;</pre></details><h2>cubic-to-quadratic-default</h2><section><h3>本次平滑写法PNG</h3><img src="cubic-to-quadratic-default-smooth.png"></section><section><h3>本次显式控制点PNG</h3><img src="cubic-to-quadratic-default-explicit.png"></section><details><summary>两份实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 T140 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;
+&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 C40 20 60 20 80 80 Q80 80 140 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;</pre></details><h2>quadratic-to-cubic-default</h2><section><h3>本次平滑写法PNG</h3><img src="quadratic-to-cubic-default-smooth.png"></section><section><h3>本次显式控制点PNG</h3><img src="quadratic-to-cubic-default-explicit.png"></section><details><summary>两份实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 Q50 20 80 80 S140 140 200 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;
+&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 Q50 20 80 80 C80 80 140 140 200 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;</pre></details><h2>zero-length-line-reset</h2><section><h3>本次平滑写法PNG</h3><img src="zero-length-line-reset-smooth.png"></section><section><h3>本次显式控制点PNG</h3><img src="zero-length-line-reset-explicit.png"></section><details><summary>两份实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 Q50 20 80 80 l0 0 t60 0&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;
+&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 Q50 20 80 80 l0 0 q0 0 60 0&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;</pre></details><h2>quadratic-close-reset</h2><section><h3>本次平滑写法PNG</h3><img src="quadratic-close-reset-smooth.png"></section><section><h3>本次显式控制点PNG</h3><img src="quadratic-close-reset-explicit.png"></section><details><summary>两份实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 Q50 20 80 80 Z T140 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;
+&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;path d=&quot;M20 80 Q50 20 80 80 Z Q20 80 140 80&quot; fill=&quot;none&quot; stroke=&quot;#d21f35&quot; stroke-width=&quot;3&quot;/&gt;&lt;/svg&gt;</pre></details><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12592-path-smooth/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 13,
+  &quot;passed&quot;: 13,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;cubic-reflection&quot;,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;relative-cubic&quot;,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;mixed-quadratic&quot;,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;repeated-cubic-groups&quot;,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;line-reset&quot;,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;arc-reset&quot;,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;move-reset&quot;,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;close-reset&quot;,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;cubic-to-quadratic-default&quot;,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;quadratic-to-cubic-default&quot;,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;zero-length-line-reset&quot;,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;quadratic-close-reset&quot;,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;independent-paths-reset&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>
