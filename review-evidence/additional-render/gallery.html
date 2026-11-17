@@ -1,0 +1,224 @@
+<!doctype html><meta charset="utf-8"><title>视口百分比核验</title><style>body{font:18px system-ui;margin:25px}img{width:900px;max-width:100%;border:1px solid #aaa;image-rendering:pixelated}pre{white-space:pre-wrap}</style><h1>同一图标的三种嵌套入口</h1><p>实际SVG输入</p><img src="panel.svg"><p>本次PNG</p><img src="panel.png"><h2>独立非零原点与外层兄弟</h2><p>输入SVG</p><img src="independent-image.svg"><p>本次PNG</p><img src="independent-image.png"><pre>{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12580-viewport-percent/local-frozen-source/cairosvg/__init__.py",
+  "tests": 15,
+  "passed": 15,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "panel-40-red",
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-40-blue",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-40-clear",
+      "actual": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-380-red",
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-380-blue",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-380-clear",
+      "actual": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-720-red",
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-720-blue",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-720-clear",
+      "actual": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "equivalent-cell-380",
+      "passed": true
+    },
+    {
+      "name": "equivalent-cell-720",
+      "passed": true
+    },
+    {
+      "name": "inner-left",
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "inner-right",
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "outer-sibling",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "outside-image",
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    }
+  ]
+}</pre>

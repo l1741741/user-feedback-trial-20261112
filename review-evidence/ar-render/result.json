@@ -1,0 +1,137 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12580-viewport-percent/local-frozen-source/cairosvg/__init__.py",
+  "tests": 8,
+  "passed": 4,
+  "failed": 4,
+  "checks": [
+    {
+      "name": "nested-inside",
+      "point": [
+        80,
+        30
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "nested-outside",
+      "point": [
+        140,
+        30
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "passed": false
+    },
+    {
+      "name": "symbol-inside",
+      "point": [
+        300,
+        30
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "symbol-outside",
+      "point": [
+        360,
+        30
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "passed": false
+    },
+    {
+      "name": "image-inside",
+      "point": [
+        520,
+        30
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "image-outside",
+      "point": [
+        580,
+        30
+      ],
+      "actual": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "nested-equivalent-to-image",
+      "passed": false
+    },
+    {
+      "name": "symbol-equivalent-to-image",
+      "passed": false
+    }
+  ],
+  "expected_semantics": "50% of viewBox width 100 is 50 user units; meet scale is one, with 50px horizontal offset"
+}

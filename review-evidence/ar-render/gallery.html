@@ -1,0 +1,137 @@
+<!doctype html><meta charset="utf-8"><title>非方形视口百分比核验</title><style>body{font:20px system-ui;margin:24px}img{width:1000px;max-width:100%;image-rendering:pixelated;border:1px solid #aaa}pre{white-space:pre-wrap}</style><h1>三种同等场景应得到相同的50px红色矩形</h1><p>从左到右：直接嵌套、symbol/use、image嵌入。非零viewBox原点，200×100视口使用meet。</p><h2>SVG输入</h2><img src="letterbox.svg"><h2>本次PNG</h2><img src="letterbox.png"><pre>{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12580-viewport-percent/local-frozen-source/cairosvg/__init__.py",
+  "tests": 8,
+  "passed": 4,
+  "failed": 4,
+  "checks": [
+    {
+      "name": "nested-inside",
+      "point": [
+        80,
+        30
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "nested-outside",
+      "point": [
+        140,
+        30
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "passed": false
+    },
+    {
+      "name": "symbol-inside",
+      "point": [
+        300,
+        30
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "symbol-outside",
+      "point": [
+        360,
+        30
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "passed": false
+    },
+    {
+      "name": "image-inside",
+      "point": [
+        520,
+        30
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "image-outside",
+      "point": [
+        580,
+        30
+      ],
+      "actual": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "nested-equivalent-to-image",
+      "passed": false
+    },
+    {
+      "name": "symbol-equivalent-to-image",
+      "passed": false
+    }
+  ],
+  "expected_semantics": "50% of viewBox width 100 is 50 user units; meet scale is one, with 50px horizontal offset"
+}</pre>

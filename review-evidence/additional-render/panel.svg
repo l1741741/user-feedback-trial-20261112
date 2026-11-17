@@ -1,0 +1,43 @@
+<svg width="1060" height="460"
+  xmlns="http://www.w3.org/2000/svg"
+  xmlns:xlink="http://www.w3.org/1999/xlink">
+  <rect width="1060" height="460" fill="white"/>
+  <defs>
+    <symbol id="icon" viewBox="10 10 80 80">
+    <rect x="14%" y="14%" width="72%" height="72%"
+          fill="none" stroke="black" stroke-width="2"/>
+    <rect x="15%" y="15%" width="25%" height="25%" fill="red"/>
+    <circle cx="62.5%" cy="62.5%" r="12.5%" fill="blue"/>
+    <line x1="0%" y1="50%" x2="100%" y2="50%"
+          stroke="green" stroke-width="1"/>
+    <line x1="25%" y1="45%" x2="25%" y2="55%"
+          stroke="green" stroke-width="1"/>
+    <line x1="50%" y1="45%" x2="50%" y2="55%"
+          stroke="green" stroke-width="1"/>
+    <line x1="75%" y1="45%" x2="75%" y2="55%"
+          stroke="green" stroke-width="1"/>
+    </symbol>
+  </defs>
+  <!-- 单元格 1：直接嵌套 svg -->
+  <svg x="40" y="100" width="300" height="300"
+       viewBox="10 10 80 80">
+    <rect x="14%" y="14%" width="72%" height="72%"
+          fill="none" stroke="black" stroke-width="2"/>
+    <rect x="15%" y="15%" width="25%" height="25%" fill="red"/>
+    <circle cx="62.5%" cy="62.5%" r="12.5%" fill="blue"/>
+    <line x1="0%" y1="50%" x2="100%" y2="50%"
+          stroke="green" stroke-width="1"/>
+    <line x1="25%" y1="45%" x2="25%" y2="55%"
+          stroke="green" stroke-width="1"/>
+    <line x1="50%" y1="45%" x2="50%" y2="55%"
+          stroke="green" stroke-width="1"/>
+    <line x1="75%" y1="45%" x2="75%" y2="55%"
+          stroke="green" stroke-width="1"/>
+  </svg>
+  <!-- 单元格 2：symbol + use -->
+  <use xlink:href="#icon" x="380" y="100"
+       width="300" height="300"/>
+  <!-- 单元格 3：image 嵌入独立 SVG 文档 -->
+  <image x="720" y="100" width="300" height="300"
+         xlink:href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMDAiIGhlaWdodD0iMzAwIiB2aWV3Qm94PSIxMCAxMCA4MCA4MCI+CiAgICA8cmVjdCB4PSIxNCUiIHk9IjE0JSIgd2lkdGg9IjcyJSIgaGVpZ2h0PSI3MiUiCiAgICAgICAgICBmaWxsPSJub25lIiBzdHJva2U9ImJsYWNrIiBzdHJva2Utd2lkdGg9IjIiLz4KICAgIDxyZWN0IHg9IjE1JSIgeT0iMTUlIiB3aWR0aD0iMjUlIiBoZWlnaHQ9IjI1JSIgZmlsbD0icmVkIi8+CiAgICA8Y2lyY2xlIGN4PSI2Mi41JSIgY3k9IjYyLjUlIiByPSIxMi41JSIgZmlsbD0iYmx1ZSIvPgogICAgPGxpbmUgeDE9IjAlIiB5MT0iNTAlIiB4Mj0iMTAwJSIgeTI9IjUwJSIKICAgICAgICAgIHN0cm9rZT0iZ3JlZW4iIHN0cm9rZS13aWR0aD0iMSIvPgogICAgPGxpbmUgeDE9IjI1JSIgeTE9IjQ1JSIgeDI9IjI1JSIgeTI9IjU1JSIKICAgICAgICAgIHN0cm9rZT0iZ3JlZW4iIHN0cm9rZS13aWR0aD0iMSIvPgogICAgPGxpbmUgeDE9IjUwJSIgeTE9IjQ1JSIgeDI9IjUwJSIgeTI9IjU1JSIKICAgICAgICAgIHN0cm9rZT0iZ3JlZW4iIHN0cm9rZS13aWR0aD0iMSIvPgogICAgPGxpbmUgeDE9Ijc1JSIgeTE9IjQ1JSIgeDI9Ijc1JSIgeTI9IjU1JSIKICAgICAgICAgIHN0cm9rZT0iZ3JlZW4iIHN0cm9rZS13aWR0aD0iMSIvPjwvc3ZnPg=="/>
+</svg>
