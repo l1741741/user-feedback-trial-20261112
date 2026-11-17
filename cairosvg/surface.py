@@ -15,7 +15,7 @@ from .defs import (
     parse_all_defs, pattern, prepare_filter, radial_gradient, use)
 from .helpers import (
     UNITS, PointError, clip_rect, node_format, normalize, paint,
-    preserve_ratio, size, transform)
+    parse_transform_origin, preserve_ratio, size, transform)
 from .image import image, invert_image
 from .parser import Tree
 from .path import draw_markers, path
@@ -314,10 +314,13 @@ class Surface(object):
         self.font_size = size(self, node.get('font-size', '12pt'))
         self.context.save()
 
-        # Apply transformations
+        # Apply transformations. The origin is resolved against the node's
+        # reference box (see transform-box) in its own local coordinate
+        # system, then combined with the parent group's current matrix so
+        # that nested transforms compose in the same order as in a browser.
+        origin_xy = parse_transform_origin(self, node)
         transform(
-            self, node.get('transform'),
-            transform_origin=node.get('transform-origin'))
+            self, node.get('transform'), origin_xy=origin_xy)
 
         # Find and prepare opacity, masks and filters
         mask = parse_url(node.get('mask')).fragment

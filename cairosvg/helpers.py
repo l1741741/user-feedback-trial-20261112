@@ -4,7 +4,7 @@ Surface helpers.
 """
 
 import re
-from math import atan2, cos, hypot, radians, sin, tan
+from math import atan2, cos, hypot, isfinite, radians, sin, tan
 
 from .surface import cairo
 from .url import parse_url
@@ -194,84 +194,267 @@ def rotate(x, y, angle):
     return x * cos(angle) - y * sin(angle), y * cos(angle) + x * sin(angle)
 
 
-def transform(surface, transform_string, gradient=None, transform_origin=None):
+# CSS keyword offsets for the two transform-origin axes. Each value is the
+# fraction of the reference box dimension added to its origin.
+_ORIGIN_X_KEYWORDS = {'left': 0, 'center': .5, 'right': 1}
+_ORIGIN_Y_KEYWORDS = {'top': 0, 'center': .5, 'bottom': 1}
+
+
+def _origin_coordinate(surface, token, reference_box, axis):
+    """Resolve one transform-origin component to user-space coordinates.
+
+    ``axis`` is ``'x'`` or ``'y'``. ``reference_box`` is the
+    ``(x, y, width, height)`` tuple used to resolve percentages and CSS
+    keywords. An invalid or unparsable token resolves to the center of the
+    reference box instead of raising, so a malformed component can never
+    poison the rendering of the node or of any following sibling.
+
+    """
+    box_x, box_y, box_width, box_height = reference_box
+    keywords = _ORIGIN_X_KEYWORDS if axis == 'x' else _ORIGIN_Y_KEYWORDS
+    box_origin = box_x if axis == 'x' else box_y
+    box_size = box_width if axis == 'x' else box_height
+    token = (token or '').strip().lower()
+
+    if token in keywords:
+        return box_origin + keywords[token] * box_size
+
+    try:
+        if token.endswith('%'):
+            percentage = float(token[:-1])
+            return box_origin + percentage * box_size / 100
+        # Explicit lengths (px, pt, em, unitless user units, ...). The
+        # bare ``size()`` helper returns 0 on unparsable input, so validate
+        # the token first: an illegal coordinate then falls back to the
+        # box center instead of the box origin.
+        if not _is_length_token(token):
+            return box_origin + box_size / 2
+        return box_origin + size(surface, token, axis)
+    except (TypeError, ValueError):
+        return box_origin + box_size / 2
+
+
+def _is_length_token(token):
+    """Return whether ``token`` is a parseable SVG length or percentage."""
+    if not token:
+        return False
+    if token.endswith('%'):
+        token = token[:-1]
+    else:
+        for unit in ('em', 'ex', 'ch', *UNITS):
+            if token.endswith(unit):
+                token = token[:-len(unit)]
+                break
+    try:
+        float(token)
+    except ValueError:
+        return False
+    return True
+
+
+def get_transform_reference_box(surface, node):
+    """Return the reference box used to resolve ``transform-origin``.
+
+    See https://www.w3.org/TR/css-transforms-1/#transform-box
+
+    The box is returned as an ``(x, y, width, height)`` tuple in the local
+    coordinate system of ``node`` (i.e. before the node's own transform is
+    applied).
+
+    Supported ``transform-box`` values:
+
+    * ``view-box`` (the default kept for backwards compatibility, matching
+      the SVG 1.1 behaviour of resolving origins against the nearest SVG
+      viewport): the nearest SVG viewport, positioned at its origin.
+    * ``fill-box``: the object bounding box of the element, computed from
+      its geometry. When the box is missing or degenerate (zero width or
+      height), resolution falls back to the viewport box.
+    * ``content-box`` and ``border-box``: SVG geometry has no CSS padding or
+      border, so they are treated as ``fill-box``.
+    * ``stroke-box``: CairoSVG does not compute stroke extents, so it is
+      treated as ``fill-box``.
+
+    Any unknown or invalid value falls back to ``view-box``.
+
+    """
+    # Imported here to avoid a circular import at module load time.
+    from .bounding_box import (
+        calculate_bounding_box, is_non_empty_bounding_box)
+
+    viewport_box = (
+        0, 0, surface.context_width or 0, surface.context_height or 0)
+
+    transform_box = (node.get('transform-box') or 'view-box').strip().lower()
+
+    if transform_box in ('fill-box', 'stroke-box',
+                         'content-box', 'border-box'):
+        try:
+            bounding_box = calculate_bounding_box(surface, node)
+        except Exception:
+            bounding_box = None
+        if is_non_empty_bounding_box(bounding_box):
+            return tuple(float(value) for value in bounding_box)
+        # Degenerate (zero-width/height) or unavailable object box: the
+        # specification leaves origins on an empty box undefined; use the
+        # viewport instead of producing NaN coordinates.
+        return viewport_box
+
+    # 'view-box' and any unrecognized value use the nearest SVG viewport.
+    return viewport_box
+
+
+def parse_transform_origin(surface, node):
+    """Resolve ``node``'s ``transform-origin`` to an ``(x, y)`` tuple.
+
+    See https://www.w3.org/TR/css-transforms-1/#transform-origin-property
+
+    Returns ``None`` when no usable origin is declared, in which case the
+    transform is applied about the local coordinate origin ``(0, 0)`` as in
+    SVG 1.1. One or two components are accepted; a missing second component
+    defaults to ``center``. Percentage components are fractions of the
+    reference box dimensions, keyword and explicit-length components are
+    supported as well.
+
+    The function never raises: an illegal declaration is ignored (the node
+    is transformed as if the property were absent) and cannot leak any
+    state to other nodes.
+
+    """
+    value = node.get('transform-origin')
+    if not value:
+        return None
+
+    tokens = normalize(value).split(' ')
+    # A legal declaration has one or two components.
+    if not 1 <= len(tokens) <= 2:
+        return None
+
+    x_token, y_token = tokens[0], None
+    if len(tokens) == 2:
+        y_token = tokens[1]
+
+    # A vertical keyword given alone applies to the y axis; the missing
+    # horizontal component defaults to center.
+    if x_token in _ORIGIN_Y_KEYWORDS:
+        y_token, x_token = x_token, 'center'
+    if y_token is None:
+        y_token = 'center'
+
+    try:
+        reference_box = get_transform_reference_box(surface, node)
+        origin_x = _origin_coordinate(
+            surface, x_token, reference_box, 'x')
+        origin_y = _origin_coordinate(
+            surface, y_token, reference_box, 'y')
+    except Exception:
+        return None
+
+    if not all(isfinite(value) for value in (origin_x, origin_y)):
+        return None
+    return origin_x, origin_y
+
+
+def _legacy_transform_origin(surface, transform_origin):
+    """Resolve a raw transform-origin string for direct ``transform()`` calls.
+
+    This mirrors the historical keyword/length resolution (against the
+    current viewport) and is only used when ``transform()`` is invoked
+    directly with a string rather than through a rendered node, which goes
+    through :func:`parse_transform_origin`. Percentages and illegal tokens
+    are handled defensively: a failure returns ``None`` so the node is
+    transformed about ``(0, 0)`` instead of raising.
+
+    """
+    try:
+        tokens = normalize(transform_origin).split(' ')
+        if not 1 <= len(tokens) <= 2:
+            return None
+        if len(tokens) == 1:
+            x_token, y_token = tokens[0], 'center'
+        else:
+            x_token, y_token = tokens
+        if x_token in _ORIGIN_Y_KEYWORDS:
+            x_token = 'center'
+
+        width = surface.context_width or 0
+        height = surface.context_height or 0
+        if x_token in _ORIGIN_X_KEYWORDS:
+            origin_x = _ORIGIN_X_KEYWORDS[x_token] * width
+        else:
+            origin_x = size(surface, x_token, 'x')
+        if y_token in _ORIGIN_Y_KEYWORDS:
+            origin_y = _ORIGIN_Y_KEYWORDS[y_token] * height
+        else:
+            origin_y = size(surface, y_token, 'y')
+        if all(isfinite(value) for value in (origin_x, origin_y)):
+            return origin_x, origin_y
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return None
+
+
+def transform(surface, transform_string, gradient=None,
+              transform_origin=None, origin_xy=None):
     """Transform ``surface`` or ``gradient`` if supplied using ``string``.
 
     See http://www.w3.org/TR/SVG/coords.html#TransformAttribute
 
+    The rotation center can be supplied either as a raw
+    ``transform_origin`` CSS string (kept for backwards compatibility with
+    direct callers) or as a pre-resolved ``origin_xy`` ``(x, y)`` tuple in
+    local user units. When both are given, ``origin_xy`` wins.
+
     """
-    if not transform_string:
+    if not transform_string and not (transform_origin or origin_xy):
         return
 
     transformations = re.findall(
-        r'(\w+) ?\( ?(.*?) ?\)', normalize(transform_string))
+        r'(\w+) ?\( ?(.*?) ?\)', normalize(transform_string or ''))
     matrix = cairo.Matrix()
 
-    if transform_origin:
-        origin = transform_origin.split(' ')
-        origin_x = origin[0]
-        if len(origin) == 1:
-            if origin_x in ('top', 'bottom'):
-                origin_y = origin_x
-                origin_x = surface.width / 2
-            else:
-                origin_y = surface.height / 2
-        elif len(origin) > 1:
-            if origin_x in ('top', 'bottom'):
-                origin_y = origin_x
-                origin_x = origin[1]
-            else:
-                origin_y = origin[1]
-        else:
-            return
+    # Resolve the origin once, outside the matrix bookkeeping, so that a
+    # malformed value can never leave a half-applied translate behind.
+    if origin_xy is None and transform_origin:
+        origin_xy = _legacy_transform_origin(surface, transform_origin)
 
-        if origin_x == 'center':
-            origin_x = surface.width / 2
-        elif origin_x == 'left':
-            origin_x = 0
-        elif origin_x == 'right':
-            origin_x = surface.width
-        else:
-            origin_x = size(surface, origin_x, 'x')
-
-        if origin_y == 'center':
-            origin_y = surface.height / 2
-        elif origin_y == 'top':
-            origin_y = 0
-        elif origin_y == 'bottom':
-            origin_y = surface.height
-        else:
-            origin_y = size(surface, origin_y, 'y')
-
-        matrix.translate(float(origin_x), float(origin_y))
+    if origin_xy is not None:
+        origin_x, origin_y = origin_xy
+        matrix.translate(origin_x, origin_y)
 
     for transformation_type, transformation in transformations:
-        values = [size(surface, value) for value in transformation.split(' ')]
-        if transformation_type == 'matrix':
+        try:
+            values = [
+                size(surface, value)
+                for value in transformation.split(' ')]
+        except (TypeError, ValueError):
+            # Skip this malformed transform operation but keep processing
+            # the remaining ones instead of aborting the whole node.
+            continue
+        if transformation_type == 'matrix' and len(values) == 6:
             matrix = cairo.Matrix(*values).multiply(matrix)
-        elif transformation_type == 'rotate':
+        elif transformation_type == 'rotate' and values:
             angle = radians(float(values.pop(0)))
-            x, y = values or (0, 0)
+            x, y = values[:2] if len(values) >= 2 else (0, 0)
             matrix.translate(x, y)
             matrix.rotate(angle)
             matrix.translate(-x, -y)
-        elif transformation_type == 'skewX':
+        elif transformation_type == 'skewX' and values:
             tangent = tan(radians(float(values[0])))
             matrix = cairo.Matrix(1, 0, tangent, 1, 0, 0).multiply(matrix)
-        elif transformation_type == 'skewY':
+        elif transformation_type == 'skewY' and values:
             tangent = tan(radians(float(values[0])))
             matrix = cairo.Matrix(1, tangent, 0, 1, 0, 0).multiply(matrix)
-        elif transformation_type == 'translate':
+        elif transformation_type == 'translate' and values:
             if len(values) == 1:
                 values += (0,)
             matrix.translate(*values[:2])
-        elif transformation_type == 'scale':
+        elif transformation_type == 'scale' and values:
             if len(values) == 1:
                 values = 2 * values
             matrix.scale(*values[:2])
 
-    if transform_origin:
-        matrix.translate(-float(origin_x), -float(origin_y))
+    if origin_xy is not None:
+        matrix.translate(-origin_x, -origin_y)
 
     try:
         matrix.invert()
