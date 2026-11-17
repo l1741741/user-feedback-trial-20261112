@@ -1,0 +1,24 @@
+{
+  "task_id": "render-20261117-10357-gradient-inheritance",
+  "final_sha": "7a208afcdcb1242c4c758e8e6688897516fb6bac",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/render-20261117-10357-gradient-inheritance/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-10357-gradient-inheritance/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_gradient_inheritance.py"
+  ],
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-10357-gradient-inheritance/local-frozen-source",
+  "log": "/Users/lichao/Desktop/xpert/user-feedback/runs/graphics-20261117/render-20261117-10357-gradient-inheritance/independent-validation.log",
+  "exit_code": 0,
+  "tests": 18,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0
+}
