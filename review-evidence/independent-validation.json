@@ -1,0 +1,22 @@
+{
+  "task_id": "recover-20261118-10357-gradient-inheritance",
+  "final_sha": "7b0dcfbbd26702f20fd200fd6989e92940720cdd",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/recover-20261118-10357-gradient-inheritance/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-10357-gradient-inheritance/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_gradient_href.py"
+  ],
+  "exit_code": 0,
+  "tests": 32,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-18T03:14:13.799984+08:00"
+}
