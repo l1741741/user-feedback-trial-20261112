@@ -1,0 +1,65 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12584-css-visibility/local-frozen-source/cairosvg/__init__.py",
+  "tests": 8,
+  "passed": 5,
+  "failed": 3,
+  "checks": [
+    {
+      "name": "display-does-not-remove-gradient-stop",
+      "passed": false
+    },
+    {
+      "name": "left-stop-retains-red-contribution",
+      "passed": false,
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "reference": [
+        248,
+        0,
+        7,
+        255
+      ]
+    },
+    {
+      "name": "hidden-image-cannot-be-overridden-by-resource-child",
+      "passed": false,
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "hidden-image-keeps-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "visible-image-renders-child",
+      "passed": true
+    },
+    {
+      "name": "group-visibility-allows-explicit-visible-child",
+      "passed": true
+    },
+    {
+      "name": "display-none-branch-remains-absent",
+      "passed": true
+    },
+    {
+      "name": "display-none-keeps-next-sibling",
+      "passed": true
+    }
+  ],
+  "reference_notes": "Display does not remove gradient color stops. Visibility on an image suppresses that image as a whole; visibility on a group permits visible descendants. Browser pixel readbacks are saved separately."
+}

@@ -1,0 +1,26 @@
+{
+  "slug": "css-visibility",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12584-css-visibility/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 3,
+  "failures": 0,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "visibility-visible-descendant",
+      "passed": true
+    },
+    {
+      "name": "display-none-subtree-and-sibling",
+      "passed": true
+    }
+  ],
+  "images": [
+    "ordinary",
+    "visible-descendant",
+    "display-none"
+  ]
+}

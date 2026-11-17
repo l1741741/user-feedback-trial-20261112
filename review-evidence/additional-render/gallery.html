@@ -1,0 +1,128 @@
+<!doctype html><meta charset="utf-8"><title>裁剪可见性复核</title><style>body{font:20px system-ui;padding:20px}img{width:600px;border:1px solid #888;background:white;image-rendering:pixelated}</style><h1>隐藏裁剪子元素不应留下红色，蓝色兄弟应完整</h1><h2>hidden</h2><p>SVG输入</p><img src="hidden.svg"><p>本次PNG</p><img src="hidden.png"><h2>collapse</h2><p>SVG输入</p><img src="collapse.svg"><p>本次PNG</p><img src="collapse.png"><h2>display-none</h2><p>SVG输入</p><img src="display-none.svg"><p>本次PNG</p><img src="display-none.png"><pre>{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12584-css-visibility/local-frozen-source/cairosvg/__init__.py",
+  "tests": 6,
+  "passed": 6,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "hidden-clip",
+      "point": [
+        50,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "hidden-sibling",
+      "point": [
+        150,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "collapse-clip",
+      "point": [
+        50,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "collapse-sibling",
+      "point": [
+        150,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "display-none-clip",
+      "point": [
+        50,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "display-none-sibling",
+      "point": [
+        150,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}</pre>
