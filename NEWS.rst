@@ -3,6 +3,32 @@
 ======
 
 
+Next version
+============
+
+* Fix the handling of ``display`` and ``visibility`` so that the two
+  properties follow their distinct CSS/SVG semantics:
+
+  - ``display: none`` now disables the rendering of the whole subtree: the
+    node and all of its descendants are excluded from the output, including
+    when a descendant sets ``visibility: visible``. The hidden branch no
+    longer contributes geometry, clips, masks, patterns, gradient stops,
+    markers or opacity/filter groups, and can no longer affect later
+    siblings through Cairo context state.
+  - ``visibility`` remains inherited: a node with ``visibility: hidden`` is
+    not painted, but a descendant can set ``visibility: visible`` to paint
+    itself. ``visibility: collapse`` is handled like ``hidden``. Hidden
+    elements keep their layout influence.
+  - Markers of a hidden or non-displayed path are no longer painted.
+  - Raster and nested-SVG ``image`` elements now honor ``visibility`` (the
+    nested document inherits the image element's visibility, which its own
+    descendants may still override).
+  - These rules apply consistently to presentation attributes, inline
+    ``style`` and stylesheets, and to reused content (``use``), nested text
+    (``tspan``/``textPath``) and clipping/masking references. The input tree
+    is not mutated, so repeated renders and later references are unaffected.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

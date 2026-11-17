@@ -23,6 +23,10 @@ def calculate_bounding_box(surface, node):
     See https://www.w3.org/TR/SVG/coords.html#ObjectBoundingBox
 
     """
+    # A node with ``display: none`` and its whole subtree take no part in
+    # the layout, so they contribute no bounding box.
+    if node.get('display', 'inline') == 'none':
+        return None
     if 'bounding_box' not in node and node.tag in BOUNDING_BOX_METHODS:
         bounding_box = BOUNDING_BOX_METHODS[node.tag](surface, node)
         if is_non_empty_bounding_box(bounding_box):

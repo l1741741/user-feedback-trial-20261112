@@ -202,6 +202,9 @@ def draw_gradient(surface, node, name, opacity):
     # Apply gradient (<stop> by <stop>)
     offset = 0
     for child in gradient_node.children:
+        # A ``display: none`` stop does not define a color stop.
+        if child.get('display', 'inline') == 'none':
+            continue
         offset = max(offset, size(surface, child.get('offset'), 1))
         stop_color = surface.map_color(
             child.get('stop-color', 'black'),

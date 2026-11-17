@@ -47,7 +47,7 @@ def image(surface, node):
         tree = Tree(
             url=url.geturl(), url_fetcher=node.url_fetcher,
             bytestring=image_bytes, tree_cache=surface.tree_cache,
-            unsafe=node.unsafe)
+            parent=node, unsafe=node.unsafe)
         tree_width, tree_height, viewbox = node_format(
             surface, tree, reference=False)
         if viewbox:
@@ -106,7 +106,10 @@ def image(surface, node):
         surface.context.rectangle(x, y, width, height)
         surface.context.clip()
 
-    # Paint raster image
+    # Paint raster image. A hidden image keeps its geometry but is not
+    # painted; ``display: none`` was already handled before reaching here.
+    if node.get('visibility', 'visible') in ('hidden', 'collapse'):
+        return
     opacity = float(node.get('opacity', 1))
     surface.context.save()
     surface.context.translate(x, y)

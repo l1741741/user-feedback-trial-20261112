@@ -79,6 +79,31 @@ INVISIBLE_TAGS = frozenset((
     'radialGradient', 'symbol'))
 
 
+def node_display(node):
+    """Return ``True`` unless ``node`` has ``display: none``.
+
+    ``display`` is not inherited: every node computes its own value (the
+    default is ``inline``). A node with ``display: none`` and its whole
+    subtree are excluded from rendering, including markers and other
+    references.
+
+    """
+    return node.get('display', 'inline') != 'none'
+
+
+def node_visible(node):
+    """Return whether ``node`` is painted according to ``visibility``.
+
+    Unlike ``display``, ``visibility`` is inherited: a node without an
+    explicit declaration inherits the value computed for its parent, and a
+    descendant can set ``visibility: visible`` to paint itself inside a
+    ``visibility: hidden`` ancestor. In SVG, ``collapse`` behaves exactly like
+    ``hidden``.
+
+    """
+    return node.get('visibility', 'visible') not in ('hidden', 'collapse')
+
+
 class Surface(object):
     """Abstract base class for CairoSVG surfaces.
 
@@ -299,6 +324,13 @@ class Surface(object):
                 ('height' in node and size(self, node['height']) == 0)):
             return
 
+        # ``display: none`` disables rendering of the whole subtree: the node
+        # and its descendants neither paint nor affect the context (clips,
+        # filters, opacity groups, markers...). Return before touching the
+        # Cairo context so later siblings cannot be impacted.
+        if not node_display(node):
+            return
+
         # Save context and related attributes
         old_parent_node = self.parent_node
         old_font_size = self.font_size
@@ -418,9 +450,11 @@ class Surface(object):
             stroke_opacity *= opacity
             fill_opacity *= opacity
 
-        # Manage display and visibility
-        display = node.get('display', 'inline') != 'none'
-        visible = display and (node.get('visibility', 'visible') != 'hidden')
+        # Manage display and visibility. ``display: none`` was already
+        # handled before any context change; ``visibility`` only suppresses
+        # painting (the node and its hidden descendants still take part in
+        # the layout, and descendants may override it to ``visible``).
+        visible = node_visible(node)
 
         # Set font rendering properties
         self.context.set_antialias(SHAPE_ANTIALIAS.get(
@@ -468,11 +502,17 @@ class Surface(object):
         elif not visible:
             self.context.new_path()
 
-        # Draw path markers
-        draw_markers(self, node)
+        # Draw path markers. Markers are part of the node's own painting, so
+        # a ``visibility: hidden`` path does not paint them either (children
+        # overriding ``visibility`` are still drawn below).
+        if visible:
+            draw_markers(self, node)
 
-        # Draw children
-        if display and node.tag not in INVISIBLE_TAGS:
+        # Draw children. A ``display: none`` node returned before reaching
+        # this point, so only invisible definition tags are skipped here.
+        # Children of a ``visibility: hidden`` node are still visited: they
+        # may declare ``visibility: visible`` to paint themselves.
+        if node.tag not in INVISIBLE_TAGS:
             for child in node.children:
                 self.draw(child)
 
