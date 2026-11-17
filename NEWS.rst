@@ -3,6 +3,18 @@
 ======
 
 
+Version 2.9.2 (unreleased)
+==========================
+
+* Resolve percentage lengths in SVG documents embedded with ``image`` tags and
+  in ``marker`` content against the viewport these elements establish, instead
+  of the outer viewport, and restore the outer viewport after leaving them
+* Map non-zero ``viewBox`` origins and ``preserveAspectRatio`` alignments
+  correctly for SVG documents embedded with ``image`` tags
+* Don't crash when an SVG document embedded with an ``image`` tag has an empty
+  ``viewBox``
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

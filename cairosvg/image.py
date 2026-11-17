@@ -51,6 +51,9 @@ def image(surface, node):
         tree_width, tree_height, viewbox = node_format(
             surface, tree, reference=False)
         if viewbox:
+            if not (viewbox[2] and viewbox[3]):
+                # An empty viewBox disables rendering of the document
+                return
             tree_scale_x = tree_width / viewbox[2]
             tree_scale_y = tree_height / viewbox[3]
         else:
@@ -71,8 +74,24 @@ def image(surface, node):
         surface.context.translate(x, y)
         surface.context.translate(*surface.context.get_current_point())
         surface.context.scale(scale_x * tree_scale_x, scale_y * tree_scale_y)
-        surface.context.translate(translate_x, translate_y)
+        # The alignment computed by preserve_ratio is given in tree units,
+        # it has to be converted to the tree's user units; the viewBox
+        # origin is already given in these user units
+        surface.context.translate(
+            translate_x / tree_scale_x, translate_y / tree_scale_y)
+        if viewbox:
+            surface.context.translate(-viewbox[0], -viewbox[1])
+        # The embedded document establishes a new viewport: resolve its
+        # percentage lengths against this viewport, not against the outer
+        # one, and restore the outer viewport once it is drawn
+        old_context_size = surface.context_width, surface.context_height
+        if viewbox:
+            surface.context_width, surface.context_height = viewbox[2:4]
+        else:
+            surface.context_width, surface.context_height = (
+                tree_width, tree_height)
         surface.draw(tree)
+        surface.context_width, surface.context_height = old_context_size
         surface.context.restore()
         return
     else:

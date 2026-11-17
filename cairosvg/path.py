@@ -83,6 +83,20 @@ def draw_markers(surface, node):
                 # No clipping since viewbox is not present
                 clip_box = None
 
+            # The marker establishes a new viewport for its content:
+            # resolve its percentage lengths against this viewport, not
+            # against the outer one, and restore the outer viewport once
+            # the marker is drawn
+            old_context_size = surface.context_width, surface.context_height
+            marker_width = size(
+                surface, marker_node.get('markerWidth', '3'), 'x')
+            marker_height = size(
+                surface, marker_node.get('markerHeight', '3'), 'y')
+            surface.context_width = (
+                marker_width / scale_x if scale_x else 0)
+            surface.context_height = (
+                marker_height / scale_y if scale_y else 0)
+
             # Add extra path for marker
             temp_path = surface.context.copy_path()
             surface.context.new_path()
@@ -115,6 +129,7 @@ def draw_markers(surface, node):
                 surface.draw(child)
                 surface.context.restore()
 
+            surface.context_width, surface.context_height = old_context_size
             surface.context.append_path(temp_path)
 
         position = 'mid' if angles else 'start'
