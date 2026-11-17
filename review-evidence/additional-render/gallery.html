@@ -1,0 +1,53 @@
+<!doctype html><meta charset="utf-8"><title>变换原点参考</title><style>body{font:19px system-ui;margin:24px}section{display:inline-block;margin:10px}img{width:480px;max-width:100%;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>原点声明与显式平移旋转对照</h1><p>左为transform-origin实际PNG，右为等价translate/rotate/translate参考。</p><h2>center-bottom</h2><section><h3>实际PNG</h3><img src="center-bottom-actual.png"></section><section><h3>显式参考PNG</h3><img src="center-bottom-reference.png"></section><details><summary>SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;200&quot; viewBox=&quot;0 0 240 200&quot;&gt;&lt;rect x=&quot;110&quot; y=&quot;160&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;red&quot; transform-origin=&quot;center bottom&quot; transform=&quot;rotate(90)&quot;/&gt;&lt;rect x=&quot;5&quot; y=&quot;5&quot; width=&quot;5&quot; height=&quot;5&quot; fill=&quot;blue&quot;/&gt;&lt;/svg&gt;</pre></details><h2>nonzero-viewbox-percent</h2><section><h3>实际PNG</h3><img src="nonzero-viewbox-percent-actual.png"></section><section><h3>显式参考PNG</h3><img src="nonzero-viewbox-percent-reference.png"></section><details><summary>SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;160&quot; viewBox=&quot;10 20 120 80&quot;&gt;&lt;rect x=&quot;30&quot; y=&quot;40&quot; width=&quot;20&quot; height=&quot;10&quot; fill=&quot;red&quot; transform-origin=&quot;50% 50%&quot; transform=&quot;rotate(180)&quot;/&gt;&lt;rect x=&quot;5&quot; y=&quot;5&quot; width=&quot;5&quot; height=&quot;5&quot; fill=&quot;blue&quot;/&gt;&lt;/svg&gt;</pre></details><h2>fillbox-center</h2><section><h3>实际PNG</h3><img src="fillbox-center-actual.png"></section><section><h3>显式参考PNG</h3><img src="fillbox-center-reference.png"></section><details><summary>SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;200&quot; viewBox=&quot;0 0 240 200&quot;&gt;&lt;rect x=&quot;40&quot; y=&quot;40&quot; width=&quot;60&quot; height=&quot;20&quot; fill=&quot;red&quot; transform-origin=&quot;50% 50%&quot; transform-box=&quot;fill-box&quot; transform=&quot;rotate(90)&quot;/&gt;&lt;rect x=&quot;5&quot; y=&quot;5&quot; width=&quot;5&quot; height=&quot;5&quot; fill=&quot;blue&quot;/&gt;&lt;/svg&gt;</pre></details><h2>explicit-length</h2><section><h3>实际PNG</h3><img src="explicit-length-actual.png"></section><section><h3>显式参考PNG</h3><img src="explicit-length-reference.png"></section><details><summary>SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;200&quot; viewBox=&quot;0 0 240 200&quot;&gt;&lt;rect x=&quot;40&quot; y=&quot;40&quot; width=&quot;60&quot; height=&quot;20&quot; fill=&quot;red&quot; transform-origin=&quot;70 50&quot; transform=&quot;rotate(90)&quot;/&gt;&lt;rect x=&quot;5&quot; y=&quot;5&quot; width=&quot;5&quot; height=&quot;5&quot; fill=&quot;blue&quot;/&gt;&lt;/svg&gt;</pre></details><h2>zero-viewbox-percent</h2><section><h3>实际PNG</h3><img src="zero-viewbox-percent-actual.png"></section><section><h3>显式参考PNG</h3><img src="zero-viewbox-percent-reference.png"></section><details><summary>SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;160&quot; viewBox=&quot;0 0 120 80&quot;&gt;&lt;rect x=&quot;30&quot; y=&quot;20&quot; width=&quot;20&quot; height=&quot;10&quot; fill=&quot;red&quot; transform-origin=&quot;50% 50%&quot; transform=&quot;rotate(180)&quot;/&gt;&lt;rect x=&quot;5&quot; y=&quot;5&quot; width=&quot;5&quot; height=&quot;5&quot; fill=&quot;blue&quot;/&gt;&lt;/svg&gt;</pre></details><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12582-transform-origin/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 5,
+  &quot;passed&quot;: 3,
+  &quot;failed&quot;: 2,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;center-bottom&quot;,
+      &quot;expected_origin&quot;: [
+        120,
+        200
+      ],
+      &quot;changed_pixels&quot;: 600,
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;nonzero-viewbox-percent&quot;,
+      &quot;expected_origin&quot;: [
+        70,
+        60
+      ],
+      &quot;changed_pixels&quot;: 1600,
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;fillbox-center&quot;,
+      &quot;expected_origin&quot;: [
+        70,
+        50
+      ],
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;explicit-length&quot;,
+      &quot;expected_origin&quot;: [
+        70,
+        50
+      ],
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;zero-viewbox-percent&quot;,
+      &quot;expected_origin&quot;: [
+        60,
+        40
+      ],
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>

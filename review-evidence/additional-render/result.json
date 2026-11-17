@@ -1,0 +1,53 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12582-transform-origin/local-frozen-source/cairosvg/__init__.py",
+  "tests": 5,
+  "passed": 3,
+  "failed": 2,
+  "checks": [
+    {
+      "name": "center-bottom",
+      "expected_origin": [
+        120,
+        200
+      ],
+      "changed_pixels": 600,
+      "passed": false
+    },
+    {
+      "name": "nonzero-viewbox-percent",
+      "expected_origin": [
+        70,
+        60
+      ],
+      "changed_pixels": 1600,
+      "passed": false
+    },
+    {
+      "name": "fillbox-center",
+      "expected_origin": [
+        70,
+        50
+      ],
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "explicit-length",
+      "expected_origin": [
+        70,
+        50
+      ],
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "zero-viewbox-percent",
+      "expected_origin": [
+        60,
+        40
+      ],
+      "changed_pixels": 0,
+      "passed": true
+    }
+  ]
+}
