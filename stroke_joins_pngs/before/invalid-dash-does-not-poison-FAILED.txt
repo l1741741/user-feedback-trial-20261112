@@ -1,0 +1,1 @@
+CairoError: cairo returned CAIRO_STATUS_INVALID_DASH: b'invalid value for a dash setting'

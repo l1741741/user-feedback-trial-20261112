@@ -5,6 +5,8 @@ This module handles clips, gradients, masks, patterns and external nodes.
 
 """
 
+import copy
+
 from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
 from .features import match_features
 from .helpers import paint, size, transform
@@ -118,7 +120,10 @@ def clip_path(surface, node):
 
 def paint_mask(surface, node, name, opacity):
     """Paint the mask of the current surface."""
-    mask_node = surface.masks[name]
+    # Coordinates and opacity depend on the masked element: keep them on a
+    # shallow copy so that reusing the same mask twice, or rendering the tree
+    # again, starts from the definition instead of the previous use.
+    mask_node = copy.copy(surface.masks[name])
     mask_node.tag = 'g'
     mask_node['opacity'] = opacity
 
@@ -217,34 +222,50 @@ def draw_gradient(surface, node, name, opacity):
 
 
 def draw_pattern(surface, node, name, opacity):
-    """Draw a pattern image."""
-    pattern_node = surface.patterns[name]
-    pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
-    pattern_node.tag = 'g'
-    transform(surface, pattern_node.get('patternTransform'))
+    """Draw a pattern image.
 
-    if pattern_node.get('viewBox'):
-        if not (size(surface, pattern_node.get('width', 1), 1) and
-                size(surface, pattern_node.get('height', 1), 1)):
+    The pattern definition is never written to: its attributes depend on the
+    element using it (object bounding box units) and on the paint opacity, so
+    a shallow copy is resolved for each use. Sharing one definition would make
+    a second reference, or a second conversion of the same tree, render
+    differently from the first one.
+
+    """
+    stored_node = surface.patterns[name]
+    transform(surface, stored_node.get('patternTransform'))
+
+    if stored_node.get('viewBox'):
+        if not (size(surface, stored_node.get('width', 1), 1) and
+                size(surface, stored_node.get('height', 1), 1)):
             return False
     else:
-        if not (size(surface, pattern_node.get('width', 0), 1) and
-                size(surface, pattern_node.get('height', 0), 1)):
+        if not (size(surface, stored_node.get('width', 0), 1) and
+                size(surface, stored_node.get('height', 0), 1)):
             return False
 
+    pattern_node = copy.copy(stored_node)
+    pattern_node['opacity'] = float(stored_node.get('opacity', 1)) * opacity
+    pattern_node.tag = 'g'
+
+    # Object bounding box units are resolved against the target element. When
+    # that box has no area (a horizontal line, a single point…), the pattern
+    # cannot be scaled and paints nothing; it must not crash either.
     if pattern_node.get('patternUnits') == 'userSpaceOnUse':
         x = size(surface, pattern_node.get('x'), 'x')
         y = size(surface, pattern_node.get('y'), 'y')
         pattern_width = size(surface, pattern_node.get('width', 0), 1)
         pattern_height = size(surface, pattern_node.get('height', 0), 1)
     else:
-        _, _, width, height = calculate_bounding_box(surface, node)
+        bounding_box = calculate_bounding_box(surface, node)
+        if not is_non_empty_bounding_box(bounding_box):
+            return False
+        _, _, width, height = bounding_box
         x = size(surface, pattern_node.get('x'), 1) * width
         y = size(surface, pattern_node.get('y'), 1) * height
         pattern_width = (
-            size(surface, pattern_node.pop('width', '1'), 1) * width)
+            size(surface, pattern_node.get('width', 1), 1) * width)
         pattern_height = (
-            size(surface, pattern_node.pop('height', '1'), 1) * height)
+            size(surface, pattern_node.get('height', 1), 1) * height)
         if 'viewBox' not in pattern_node:
             pattern_node['width'] = pattern_width
             pattern_node['height'] = pattern_height
@@ -339,37 +360,38 @@ def use(surface, node):
         raise ValueError(
             'Abort rendering: more than 100 000 referenced elements')
     surface.context.save()
-    surface.context.translate(
-        size(surface, node.get('x'), 'x'), size(surface, node.get('y'), 'y'))
-    if 'x' in node:
-        del node['x']
-    if 'y' in node:
-        del node['y']
-    if 'viewBox' in node:
-        del node['viewBox']
-    if 'mask' in node:
-        del node['mask']
-    href = parse_url(node.get_href()).geturl()
+    # ``x`` and ``y`` are translated here, and ``viewBox``/``mask`` must not be
+    # inherited by the referenced content. They are hidden from the reference
+    # resolution instead of being deleted, so that reusing the same tree (two
+    # ``use`` elements, a second conversion) always renders the same image and
+    # the source node is left untouched.
+    hidden = {}
     try:
-        tree = Tree(
-            url=href, url_fetcher=node.url_fetcher, parent=node,
-            tree_cache=surface.tree_cache, unsafe=node.unsafe)
-    except TypeError:
+        for attribute in ('x', 'y', 'viewBox', 'mask'):
+            if attribute in node:
+                hidden[attribute] = node.pop(attribute)
+        surface.context.translate(
+            size(surface, hidden.get('x'), 'x'),
+            size(surface, hidden.get('y'), 'y'))
+        href = parse_url(node.get_href()).geturl()
+        try:
+            tree = Tree(
+                url=href, url_fetcher=node.url_fetcher, parent=node,
+                tree_cache=surface.tree_cache, unsafe=node.unsafe)
+        except TypeError:
+            return
+
+        if not match_features(tree.xml_tree):
+            return
+
+        if tree.tag in ('svg', 'symbol'):
+            # Explicitely specified
+            # http://www.w3.org/TR/SVG11/struct.html#UseElement
+            tree.tag = 'svg'
+            if 'width' in node and 'height' in node:
+                tree['width'], tree['height'] = node['width'], node['height']
+
+        surface.draw(tree)
+    finally:
+        node.update(hidden)
         surface.context.restore()
-        return
-
-    if not match_features(tree.xml_tree):
-        surface.context.restore()
-        return
-
-    if tree.tag in ('svg', 'symbol'):
-        # Explicitely specified
-        # http://www.w3.org/TR/SVG11/struct.html#UseElement
-        tree.tag = 'svg'
-        if 'width' in node and 'height' in node:
-            tree['width'], tree['height'] = node['width'], node['height']
-
-    surface.draw(tree)
-    node.get('fill', None)
-    node.get('stroke', None)
-    surface.context.restore()

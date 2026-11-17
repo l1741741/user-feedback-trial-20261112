@@ -5,9 +5,12 @@ Cairo surface creators.
 
 import copy
 import io
+import math
 
 import cairocffi as cairo
 
+from .bounding_box import (
+    calculate_bounding_box, is_non_empty_bounding_box)
 from .colors import color, negate_color
 from .defs import (
     apply_filter_after_painting, apply_filter_before_painting, clip_path,
@@ -77,6 +80,253 @@ PATH_TAGS = frozenset((
 INVISIBLE_TAGS = frozenset((
     'clipPath', 'filter', 'linearGradient', 'marker', 'mask', 'pattern',
     'radialGradient', 'symbol'))
+
+# SVG keyword values for stroke-linejoin / stroke-linecap. SVG 1.1 only knows
+# miter, round and bevel (plus butt, round and square for caps); newer
+# specifications add miter-clip and arcs, which Cairo has no equivalent for and
+# that are drawn as miter here. Values are matched case-insensitively, like any
+# other paint keyword.
+LINE_JOINS = {
+    'miter': cairo.LINE_JOIN_MITER,
+    'miter-clip': cairo.LINE_JOIN_MITER,
+    'arcs': cairo.LINE_JOIN_MITER,
+    'round': cairo.LINE_JOIN_ROUND,
+    'bevel': cairo.LINE_JOIN_BEVEL,
+}
+LINE_CAPS = {
+    'butt': cairo.LINE_CAP_BUTT,
+    'round': cairo.LINE_CAP_ROUND,
+    'square': cairo.LINE_CAP_SQUARE,
+}
+
+# ``stroke-miterlimit`` defaults to 4 and is only accepted as a number. Values
+# that cannot be used (garbage, units, NaN, infinities, huge numbers that make
+# Cairo drop the stroke) are ignored, so the inherited value keeps applying.
+# Negative and sub-1 numbers are still forwarded to Cairo: that is the
+# behaviour existing documents rely on.
+DEFAULT_MITER_LIMIT = 4
+MAX_MITER_LIMIT = 1e10
+
+# Cairo silently draws nothing when a subpath is made of exactly one point, so
+# the end caps of that subpath disappear. SVG requires zero-length subpaths
+# with ``round`` or ``square`` caps to be painted as a dot or a square. A
+# subpath point is therefore moved by a tiny amount along the x axis, in device
+# space, to give Cairo a direction to stroke. The offset is far below one
+# device pixel (hence invisible) but large enough for Cairo to keep the
+# segment.
+CAP_EPSILON = 1e-2
+
+
+def parse_number(string, minimum=None, maximum=None):
+    """Parse an SVG number, returning ``None`` when it is invalid.
+
+    ``minimum`` and ``maximum`` also reject NaN and infinities, which Cairo
+    accepts but which can make the whole stroke disappear.
+
+    """
+    try:
+        value = float(string)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    if minimum is not None and value < minimum:
+        return None
+    if maximum is not None and value > maximum:
+        return maximum
+    return value
+
+
+def parse_keyword(string):
+    """Normalize an SVG keyword: surrounding spaces removed, lowercased."""
+    if string is None:
+        return None
+    return ' '.join(str(string).split()).lower()
+
+
+def parse_line_join(string):
+    """Parse a ``stroke-linejoin`` value, returning ``None`` if invalid."""
+    return LINE_JOINS.get(parse_keyword(string))
+
+
+def parse_line_cap(string):
+    """Parse a ``stroke-linecap`` value, returning ``None`` if invalid."""
+    return LINE_CAPS.get(parse_keyword(string))
+
+
+def parse_miter_limit(string):
+    """Parse a ``stroke-miterlimit`` value, returning ``None`` if invalid.
+
+    A numeric value keeps the behaviour it always had: finite values are given
+    to Cairo as is, including the ones below 1, so existing documents keep
+    rendering the same. Only values that cannot be used are rejected: garbage,
+    units, NaN, infinities (Cairo draws *nothing* when the limit is infinite)
+    and negative numbers (Cairo then paints a round join). Huge finite values
+    are bounded, because Cairo silently drops the stroke around ``1e14``.
+
+    """
+    value = parse_number(string)
+    if value is None or value < 0:
+        return None
+    return min(value, MAX_MITER_LIMIT)
+
+
+def inherited_value(node, attribute, parse, initial):
+    """Resolve an inherited paint property for ``node``.
+
+    The parser already copies inherited attributes onto every node, so the
+    attribute of ``node`` normally holds the value that applies. When it holds
+    an invalid value, SVG ignores that declaration and the value inherited from
+    the ancestors keeps applying, which ``node.parent`` provides. The walk
+    stops at the first valid value, so the initial value of the property is
+    only used when nothing valid can be found up to the root.
+
+    """
+    current = node
+    while current is not None:
+        value = parse(current.get(attribute))
+        if value is not None:
+            return value
+        current = getattr(current, 'parent', None)
+    return initial
+
+
+def line_join(node):
+    """Return the Cairo line join applying to ``node``."""
+    return inherited_value(
+        node, 'stroke-linejoin', parse_line_join, cairo.LINE_JOIN_MITER)
+
+
+def line_cap(node):
+    """Return the Cairo line cap applying to ``node``."""
+    return inherited_value(
+        node, 'stroke-linecap', parse_line_cap, cairo.LINE_CAP_BUTT)
+
+
+def miter_limit(node):
+    """Return the ``stroke-miterlimit`` applying to ``node``."""
+    return inherited_value(
+        node, 'stroke-miterlimit', parse_miter_limit, DEFAULT_MITER_LIMIT)
+
+
+def has_visible_stroke(surface, node):
+    """Know whether ``node`` is painted with a visible stroke."""
+    if not surface.stroke_and_fill or node.get('stroke') in (None, 'none'):
+        return False
+    width = size(surface, node.get('stroke-width', '1'))
+    return bool(width and math.isfinite(width) and width > 0)
+
+
+def split_subpaths(path):
+    """Split a Cairo path (as returned by ``copy_path``) into subpaths.
+
+    Each subpath is a ``(items, closed)`` tuple. When a path ends with
+    ``CLOSE_PATH``, Cairo appends a ``MOVE_TO`` back to the subpath's start
+    point; that repeated move belongs to the closed subpath and is absorbed
+    here so that ``is_zero_length`` only sees the operations that were
+    actually specified.
+
+    """
+    path = list(path)
+    if (len(path) > 1 and path[-1][0] == cairo.PATH_MOVE_TO and
+            path[-2][0] == cairo.PATH_CLOSE_PATH):
+        path.pop()
+
+    subpaths = []
+    items = []
+    for operation, arguments in path:
+        if operation == cairo.PATH_MOVE_TO and items:
+            subpaths.append((items, False))
+            items = []
+        items.append((operation, arguments))
+        if operation == cairo.PATH_CLOSE_PATH:
+            subpaths.append((items, True))
+            items = []
+    if items:
+        subpaths.append((items, False))
+    return subpaths
+
+
+def is_zero_length(subpath):
+    """Know whether a subpath only draws a single point.
+
+    Such a subpath is a ``MOVE_TO`` followed by nothing but ``LINE_TO`` to the
+    same coordinates and/or ``CLOSE_PATH``. A lone ``MOVE_TO`` is not a
+    zero-length subpath: SVG only asks for caps once the path actually starts
+    drawing, and Cairo ignores it too.
+
+    """
+    items, _ = subpath
+    if len(items) < 2 or items[0][0] != cairo.PATH_MOVE_TO:
+        return False
+    start_x, start_y = items[0][1]
+    for operation, arguments in items[1:]:
+        if operation == cairo.PATH_CLOSE_PATH:
+            continue
+        if operation != cairo.PATH_LINE_TO:
+            return False
+        if arguments[0] != start_x or arguments[1] != start_y:
+            return False
+    return True
+
+
+def draw_zero_length_caps(surface, node):
+    """Draw caps for the zero-length subpaths of the current context path.
+
+    Cairo only strokes subpaths that have a direction: ``M20,20 L20,20`` is
+    dropped, while SVG asks for a round dot or a square. Each single-point
+    subpath is removed from the current path and stroked separately as a tiny
+    horizontal segment whose caps paint exactly the required shape. The offset
+    is far below a device pixel, so it is invisible and does not change the
+    painted area; it only gives Cairo the direction it needs.
+
+    The stroke style (colour, source, width, dashes, transform) is the one set
+    up for the element, so the dots and squares match the rest of the stroke,
+    including the dash phase. Paths are left untouched when the stroke is not
+    painted (no stroke, zero width, clip paths, masks, markers), so fill-only
+    usages keep an exact geometry.
+
+    """
+    if not has_visible_stroke(surface, node):
+        return
+    if line_cap(node) == cairo.LINE_CAP_BUTT:
+        # Cairo already paints no cap for a single-point subpath.
+        return
+
+    subpaths = split_subpaths(surface.context.copy_path())
+    degenerate = [
+        subpath for subpath in subpaths if is_zero_length(subpath)]
+    if not degenerate:
+        return
+
+    # Remove the single-point subpaths from the current path: they are drawn
+    # below, and Cairo would ignore them anyway.
+    kept = [
+        item for subpath in subpaths if not is_zero_length(subpath)
+        for item in subpath[0]]
+    surface.context.new_path()
+    surface.context.append_path(kept)
+
+    # A hundredth of a device pixel is invisible but long enough for Cairo to
+    # keep the segment at any scale. The CTM x scale converts it to user space.
+    matrix = surface.context.get_matrix()
+    scale_x = math.hypot(matrix.xx, matrix.yx)
+    distance = CAP_EPSILON / scale_x if scale_x else CAP_EPSILON
+
+    # Draw the caps now, then restore the element path so that the caller
+    # strokes exactly the geometry it built (the path is not part of the saved
+    # graphics state, so it has to be saved and put back explicitly).
+    surface.context.save()
+    try:
+        for subpath in degenerate:
+            x, y = subpath[0][0][1]
+            surface.context.move_to(x, y)
+            surface.context.line_to(x + distance, y)
+        surface.context.stroke()
+    finally:
+        surface.context.restore()
+        surface.context.new_path()
+        surface.context.append_path(kept)
 
 
 class Surface(object):
@@ -335,28 +585,26 @@ class Surface(object):
             size(self, node.get('x'), 'x'),
             size(self, node.get('y'), 'y'))
 
-        # Set node's drawing informations if the ``node.tag`` method exists
-        line_cap = node.get('stroke-linecap')
-        if line_cap == 'square':
-            self.context.set_line_cap(cairo.LINE_CAP_SQUARE)
-        if line_cap == 'round':
-            self.context.set_line_cap(cairo.LINE_CAP_ROUND)
-
-        join_cap = node.get('stroke-linejoin')
-        if join_cap == 'round':
-            self.context.set_line_join(cairo.LINE_JOIN_ROUND)
-        if join_cap == 'bevel':
-            self.context.set_line_join(cairo.LINE_JOIN_BEVEL)
+        # Set the stroke style. Explicit SVG keywords always win over the
+        # inherited state, so that a child asking for « miter » or « butt »
+        # inside a « round » group gets it; unknown values fall back to the
+        # default of the property rather than to the parent's state.
+        self.context.set_line_cap(line_cap(node))
+        self.context.set_line_join(line_join(node))
+        self.context.set_miter_limit(miter_limit(node))
 
         dash_array = normalize(node.get('stroke-dasharray', '')).split()
         if dash_array:
             dashes = [size(self, dash) for dash in dash_array]
-            if sum(dashes):
+            # Cairo refuses a dash list made of zeros or containing negative
+            # values, and the whole context then enters
+            # CAIRO_STATUS_INVALID_DASH (every later drawing call raises).
+            # SVG treats such a list as invalid, which just means "no dash":
+            # keep the plain stroke and leave the context alone.
+            if (sum(dashes) and all(
+                    math.isfinite(dash) and dash >= 0 for dash in dashes)):
                 offset = size(self, node.get('stroke-dashoffset'))
                 self.context.set_dash(dashes, offset)
-
-        miter_limit = float(node.get('stroke-miterlimit', 4))
-        self.context.set_miter_limit(miter_limit)
 
         # Clip
         rect_values = clip_rect(node.get('clip'))
@@ -379,19 +627,30 @@ class Surface(object):
         if clip_path:
             path = self.paths.get(clip_path)
             if path:
+                empty_box = False
                 self.context.save()
                 if path.get('clipPathUnits') == 'objectBoundingBox':
-                    x = size(self, node.get('x'), 'x')
-                    y = size(self, node.get('y'), 'y')
-                    width = size(self, node.get('width'), 'x')
-                    height = size(self, node.get('height'), 'y')
-                    self.context.translate(x, y)
-                    self.context.scale(width, height)
-                path.tag = 'g'
-                self.stroke_and_fill = False
-                self.draw(path)
-                self.stroke_and_fill = True
-                path.tag = 'clipPath'
+                    # The box is the node's own geometry box, not its x/y/width
+                    # attributes: a path, circle or polygon has no such
+                    # attributes and used to scale the clip path by zero, which
+                    # makes the matrix singular and poisons the context.
+                    box = calculate_bounding_box(self, node)
+                    if is_non_empty_bounding_box(box):
+                        x, y, width, height = box
+                        self.context.translate(x, y)
+                        self.context.scale(width, height)
+                    else:
+                        # A box without area clips everything out. Drawing the
+                        # clip path here would use the unscaled coordinates.
+                        empty_box = True
+                if empty_box:
+                    self.context.new_path()
+                else:
+                    path.tag = 'g'
+                    self.stroke_and_fill = False
+                    self.draw(path)
+                    self.stroke_and_fill = True
+                    path.tag = 'clipPath'
                 self.context.restore()
                 # TODO: fill rules are not handled by cairo for clips
                 # if node.get('clip-rule') == 'evenodd':
@@ -463,6 +722,8 @@ class Surface(object):
                     self, node, paint_source, stroke_opacity):
                 self.context.set_source_rgba(
                     *self.map_color(paint_color, stroke_opacity))
+            # Cairo drops single-point subpaths; SVG paints their caps.
+            draw_zero_length_caps(self, node)
             self.context.stroke()
             self.context.restore()
         elif not visible:

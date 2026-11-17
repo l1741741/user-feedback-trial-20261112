@@ -3,6 +3,25 @@
 ======
 
 
+Unreleased
+==========
+
+* Apply ``stroke-linejoin`` and ``stroke-linecap`` set on an element even when
+  it repeats an inherited value, instead of keeping the parent's join or cap
+* Paint the caps of zero-length subpaths (``round`` dots and ``square``
+  markers), including subpaths made of a single point by curves or ``Z``
+* Ignore invalid ``stroke-miterlimit``, ``stroke-dasharray``, arc flags and
+  ``clipPathUnits="objectBoundingBox"`` values instead of aborting the
+  rendering or leaving the Cairo context in an error state
+* Compute object bounding boxes from curve extrema, and from ``T``/``S``
+  reflected control points, instead of their control polygon
+* Use the target element's geometry box for ``clipPathUnits``
+  ``"objectBoundingBox"`` on paths, circles, ellipses, lines and polylines
+* Don't modify source nodes when rendering ``use``, masks and patterns, so
+  that reusing a tree renders the same image every time
+* Don't crash on marker content that has no area
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

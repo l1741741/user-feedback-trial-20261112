@@ -88,6 +88,8 @@ def bounding_box_path(surface, node):
     bounding_box = EMPTY_BOUNDING_BOX
     previous_x = 0
     previous_y = 0
+    previous_cubic_control = None
+    previous_quadratic_control = None
     letter = 'M'    # Move as default
     while path_data:
         path_data = path_data.strip()
@@ -144,11 +146,16 @@ def bounding_box_path(surface, node):
                 x += previous_x
                 y += previous_y
 
-            # Extend bounding box with all coordinates
+            # Extend bounding box with the true extrema of the curve, not just
+            # its control points (which can lie far outside the drawn curve).
+            minx, miny, maxx, maxy = curve_bounding_box(
+                previous_x, previous_y, x1, y1, x2, y2, x, y)
             bounding_box = extend_bounding_box(
-                bounding_box, ((x1, y1), (x2, y2), (x, y)))
+                bounding_box, ((minx, miny), (maxx, maxy)))
             previous_x = x
             previous_y = y
+            previous_cubic_control = (x2, y2)
+            previous_quadratic_control = None
 
         elif letter in 'hH':
             # Horizontal line
@@ -163,13 +170,14 @@ def bounding_box_path(surface, node):
             bounding_box = extend_bounding_box(
                 bounding_box, ((x, previous_y),))
             previous_x = x
+            previous_cubic_control = previous_quadratic_control = None
 
-        elif letter in 'lLmMtT':
-            # Line/Move/Smooth quadratic curve
+        elif letter in 'lL':
+            # Line
             x, y, path_data = point(None, path_data)
 
             # Relative coordinate, convert to absolute
-            if letter in 'lmt':
+            if letter == 'l':
                 x += previous_x
                 y += previous_y
 
@@ -177,24 +185,103 @@ def bounding_box_path(surface, node):
             bounding_box = extend_bounding_box(bounding_box, ((x, y),))
             previous_x = x
             previous_y = y
+            previous_cubic_control = previous_quadratic_control = None
 
-        elif letter in 'qQsS':
-            # Quadratic curve/Smooth curve
+        elif letter in 'mM':
+            # Move, starting a new subpath
+            x, y, path_data = point(None, path_data)
+
+            # Relative coordinate, convert to absolute
+            if letter == 'm':
+                x += previous_x
+                y += previous_y
+
+            bounding_box = extend_bounding_box(bounding_box, ((x, y),))
+            previous_x = x
+            previous_y = y
+            previous_cubic_control = previous_quadratic_control = None
+
+        elif letter in 'qQ':
+            # Quadratic curve, expressed as an equivalent cubic one
             x1, y1, path_data = point(None, path_data)
             x, y, path_data = point(None, path_data)
 
             # Relative coordinates, convert to absolute
-            if letter in 'qs':
+            if letter == 'q':
                 x1 += previous_x
                 y1 += previous_y
                 x += previous_x
                 y += previous_y
 
-            # Extend bounding box with coordinates
+            minx, miny, maxx, maxy = quadratic_bounding_box(
+                previous_x, previous_y, x1, y1, x, y)
             bounding_box = extend_bounding_box(
-                bounding_box, ((x1, y1), (x, y)))
+                bounding_box, ((minx, miny), (maxx, maxy)))
             previous_x = x
             previous_y = y
+            previous_quadratic_control = (x1, y1)
+            previous_cubic_control = None
+
+        elif letter in 'sS':
+            # Smooth cubic curve: the first control point is the reflection of
+            # the previous one about the current point.
+            start = previous_x, previous_y
+            if letter == 's':
+                # The first control point is relative to the current point,
+                # where it is expressed as the reflection as well.
+                x1 = (previous_x - previous_cubic_control[0]
+                      if previous_cubic_control else 0)
+                y1 = (previous_y - previous_cubic_control[1]
+                      if previous_cubic_control else 0)
+            else:
+                x1 = (2 * previous_x - previous_cubic_control[0]
+                      if previous_cubic_control else previous_x)
+                y1 = (2 * previous_y - previous_cubic_control[1]
+                      if previous_cubic_control else previous_y)
+            x2, y2, path_data = point(None, path_data)
+            x, y, path_data = point(None, path_data)
+
+            if letter == 's':
+                x1 += previous_x
+                y1 += previous_y
+                x2 += previous_x
+                y2 += previous_y
+                x += previous_x
+                y += previous_y
+
+            minx, miny, maxx, maxy = curve_bounding_box(
+                start[0], start[1], x1, y1, x2, y2, x, y)
+            bounding_box = extend_bounding_box(
+                bounding_box, ((minx, miny), (maxx, maxy)))
+            previous_x = x
+            previous_y = y
+            previous_cubic_control = (x2, y2)
+            previous_quadratic_control = None
+
+        elif letter in 'tT':
+            # Smooth quadratic curve: the control point is the reflection of
+            # the previous one about the current point. It used to be ignored,
+            # which clipped the bounding box on curved paths.
+            start = previous_x, previous_y
+            if previous_quadratic_control:
+                x1 = 2 * previous_x - previous_quadratic_control[0]
+                y1 = 2 * previous_y - previous_quadratic_control[1]
+            else:
+                x1, y1 = previous_x, previous_y
+            x, y, path_data = point(None, path_data)
+
+            if letter == 't':
+                x += previous_x
+                y += previous_y
+
+            minx, miny, maxx, maxy = quadratic_bounding_box(
+                start[0], start[1], x1, y1, x, y)
+            bounding_box = extend_bounding_box(
+                bounding_box, ((minx, miny), (maxx, maxy)))
+            previous_x = x
+            previous_y = y
+            previous_quadratic_control = (x1, y1)
+            previous_cubic_control = None
 
         elif letter in 'vV':
             # Vertical line
@@ -209,6 +296,7 @@ def bounding_box_path(surface, node):
             bounding_box = extend_bounding_box(
                 bounding_box, ((previous_x, y),))
             previous_y = y
+            previous_cubic_control = previous_quadratic_control = None
 
         path_data = path_data.strip()
 
@@ -218,6 +306,78 @@ def bounding_box_path(surface, node):
 def bounding_box_text(surface, node):
     """Get the bounding box of a ``text`` node."""
     return node.get('text_bounding_box')
+
+
+def _bezier_extrema(points):
+    """Return the parameter values where a Bézier curve reaches an extremum.
+
+    ``points`` are the 1-D coordinates of the control points, from the start
+    point to the end point. The derivative of a cubic Bézier is a quadratic
+    polynomial and that of a quadratic Bézier is linear, so the roots can be
+    written directly. Only roots strictly inside ``]0, 1[`` are returned: the
+    end points are always part of the bounding box anyway.
+
+    """
+    if len(points) == 4:
+        # Derivative of a cubic Bézier, in Bernstein form.
+        p0, p1, p2, p3 = points
+        a = -p0 + 3 * p1 - 3 * p2 + p3
+        b = 2 * (p0 - 2 * p1 + p2)
+        c = p1 - p0
+        if abs(a) < 1e-12:
+            if abs(b) < 1e-12:
+                return []
+            return [-c / b]
+        discriminant = b * b - 4 * a * c
+        if discriminant < 0:
+            return []
+        root = sqrt(discriminant)
+        return [t for t in ((-b - root) / (2 * a), (-b + root) / (2 * a))
+                if 0 < t < 1]
+    else:
+        # Derivative of a quadratic Bézier: 2 * ((p1 - p0) * (1 - t)
+        # + (p2 - p1) * t).
+        p0, p1, p2 = points
+        denominator = p0 - 2 * p1 + p2
+        if abs(denominator) < 1e-12:
+            return []
+        return [t for t in ((p0 - p1) / denominator,) if 0 < t < 1]
+
+
+def _bezier_value(points, t):
+    """Return the coordinate of a Bézier curve at parameter ``t``."""
+    if len(points) == 4:
+        p0, p1, p2, p3 = points
+        u = 1 - t
+        return (
+            u ** 3 * p0 + 3 * u ** 2 * t * p1 + 3 * u * t ** 2 * p2 +
+            t ** 3 * p3)
+    else:
+        p0, p1, p2 = points
+        u = 1 - t
+        return u ** 2 * p0 + 2 * u * t * p1 + t ** 2 * p2
+
+
+def curve_bounding_box(x1, y1, x2, y2, x3, y3, x4, y4):
+    """Get the tight bounding box of a cubic Bézier curve."""
+    xs = [x1, x4] + [
+        _bezier_value((x1, x2, x3, x4), t) for t in
+        _bezier_extrema((x1, x2, x3, x4))]
+    ys = [y1, y4] + [
+        _bezier_value((y1, y2, y3, y4), t) for t in
+        _bezier_extrema((y1, y2, y3, y4))]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def quadratic_bounding_box(x1, y1, x2, y2, x3, y3):
+    """Get the tight bounding box of a quadratic Bézier curve."""
+    xs = [x1, x3] + [
+        _bezier_value((x1, x2, x3), t) for t in
+        _bezier_extrema((x1, x2, x3))]
+    ys = [y1, y3] + [
+        _bezier_value((y1, y2, y3), t) for t in
+        _bezier_extrema((y1, y2, y3))]
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 def angle(bx, by):

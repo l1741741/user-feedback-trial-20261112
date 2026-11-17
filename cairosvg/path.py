@@ -76,46 +76,54 @@ def draw_markers(surface, node):
                 # Calculate position and scale (preserve aspect ratio)
                 translate_x = -size(surface, marker_node.get('refX', '0'), 'x')
                 translate_y = -size(surface, marker_node.get('refY', '0'), 'y')
-                scale_x = scale_y = min(
-                    marker_width / bounding_box[2],
-                    marker_height / bounding_box[3])
+                if bounding_box:
+                    scale_x = scale_y = min(
+                        marker_width / bounding_box[2],
+                        marker_height / bounding_box[3])
+                else:
+                    # Marker content without an area (a straight line, a
+                    # single point…): there is no box to fit into, so nothing
+                    # can be scaled and nothing can be painted.
+                    marker_node = None
 
                 # No clipping since viewbox is not present
                 clip_box = None
 
-            # Add extra path for marker
-            temp_path = surface.context.copy_path()
-            surface.context.new_path()
+            if marker_node is not None:
+                # Add extra path for marker
+                temp_path = surface.context.copy_path()
+                surface.context.new_path()
 
-            # Override angle (if requested)
-            node_angle = marker_node.get('orient', '0')
-            if node_angle not in ('auto', 'auto-start-reverse'):
-                angle = radians(float(node_angle))
-            elif node_angle == 'auto-start-reverse' and position == 'start':
-                angle += radians(180)
+                # Override angle (if requested)
+                node_angle = marker_node.get('orient', '0')
+                if node_angle not in ('auto', 'auto-start-reverse'):
+                    angle = radians(float(node_angle))
+                elif (node_angle == 'auto-start-reverse' and
+                        position == 'start'):
+                    angle += radians(180)
 
-            # Draw marker path
-            # See http://www.w3.org/TR/SVG/painting.html#MarkerAlgorithm
-            for child in marker_node.children:
-                surface.context.save()
-                surface.context.translate(*point)
-                surface.context.rotate(angle)
-                surface.context.scale(scale)
-                surface.context.scale(scale_x, scale_y)
-                surface.context.translate(translate_x, translate_y)
-
-                # Add clipping (if present and requested)
-                overflow = marker_node.get('overflow', 'hidden')
-                if clip_box and overflow in ('hidden', 'scroll'):
+                # Draw marker path
+                # See http://www.w3.org/TR/SVG/painting.html#MarkerAlgorithm
+                for child in marker_node.children:
                     surface.context.save()
-                    surface.context.rectangle(*clip_box)
+                    surface.context.translate(*point)
+                    surface.context.rotate(angle)
+                    surface.context.scale(scale)
+                    surface.context.scale(scale_x, scale_y)
+                    surface.context.translate(translate_x, translate_y)
+
+                    # Add clipping (if present and requested)
+                    overflow = marker_node.get('overflow', 'hidden')
+                    if clip_box and overflow in ('hidden', 'scroll'):
+                        surface.context.save()
+                        surface.context.rectangle(*clip_box)
+                        surface.context.restore()
+                        surface.context.clip()
+
+                    surface.draw(child)
                     surface.context.restore()
-                    surface.context.clip()
 
-                surface.draw(child)
-                surface.context.restore()
-
-            surface.context.append_path(temp_path)
+                surface.context.append_path(temp_path)
 
         position = 'mid' if angles else 'start'
 
@@ -173,11 +181,11 @@ def path(surface, node):
             # Retrieve end point and set remainder (before checking flags)
             x3, y3, string = point(surface, string)
 
-            # Only allow 0 or 1 for flags
-            large, sweep = int(large), int(sweep)
-            if large not in (0, 1) or sweep not in (0, 1):
+            # Only allow 0 or 1 for flags. Anything else is invalid path data:
+            # SVG asks to stop drawing that path, not to crash.
+            if large not in '01' or sweep not in '01':
                 continue
-            large, sweep = bool(large), bool(sweep)
+            large, sweep = bool(int(large)), bool(int(sweep))
 
             if letter == 'A':
                 # Absolute x3 and y3, convert to relative
@@ -437,11 +445,15 @@ def path(surface, node):
             surface.context.line_to(old_x, y)
             current_point = current_point[0], y
 
-        elif letter in 'zZ' and first_path_point:
-            # End of path
+        elif letter in 'zZ' and (
+                first_path_point or last_letter in ('m', 'M')):
+            # End of path. A close right after a move-to also closes the
+            # subpath: it then contains a single point, whose caps SVG paints
+            # (nothing for butt, a dot or a square otherwise). A close without
+            # any current subpath is ignored, as SVG requires.
             node.vertices.append(None)
             surface.context.close_path()
-            current_point = first_path_point
+            current_point = first_path_point or current_point
 
         if letter not in 'zZ':
             node.vertices.append(current_point)
