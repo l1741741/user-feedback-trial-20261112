@@ -1,0 +1,22 @@
+{
+  "task_id": "recover-20261118-12580-viewport-percent",
+  "final_sha": "eecccfeacd2ffea7b73f9f592b9be6394ff9bafa",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/recover-20261118-12580-viewport-percent/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12580-viewport-percent/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_nested_viewport.py"
+  ],
+  "exit_code": 0,
+  "tests": 20,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-18T02:45:07.157437+08:00"
+}

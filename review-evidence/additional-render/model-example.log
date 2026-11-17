@@ -1,0 +1,4 @@
+面板已渲染到 /Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12580-viewport-percent/additional-render/panel.png (1060x460)
+symbol + use 与 直接嵌套 svg 渲染结果一致 ✓
+image 嵌入 SVG 与 直接嵌套 svg 渲染结果一致 ✓
+全部探针通过：中心、边界和比例在三种组合方式下一致 ✓

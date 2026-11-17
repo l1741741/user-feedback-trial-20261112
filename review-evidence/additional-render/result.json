@@ -1,0 +1,224 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12580-viewport-percent/local-frozen-source/cairosvg/__init__.py",
+  "tests": 15,
+  "passed": 15,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "panel-40-red",
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-40-blue",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-40-clear",
+      "actual": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-380-red",
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-380-blue",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-380-clear",
+      "actual": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-720-red",
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-720-blue",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "panel-720-clear",
+      "actual": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "expected": [
+        255,
+        255,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "equivalent-cell-380",
+      "passed": true
+    },
+    {
+      "name": "equivalent-cell-720",
+      "passed": true
+    },
+    {
+      "name": "inner-left",
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "inner-right",
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "outer-sibling",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "outside-image",
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    }
+  ]
+}
