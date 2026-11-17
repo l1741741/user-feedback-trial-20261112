@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="970" viewBox="0 0 900 970" font-family="Helvetica, Arial, sans-serif">
+<rect width="100%" height="100%" fill="white"/>
+<text x="20" y="32" font-size="21" font-weight="bold">Smooth path commands: explicit control points vs S/T writing</text>
+<text x="20" y="54" font-size="13" fill="#555">red solid = explicit C/Q reference · blue dashed = S/T equivalent (overlap means identical) · dots = reference control points</text>
+<rect x="8" y="68" width="284" height="168" fill="none" stroke="#e0e0e0"/>
+<text x="16" y="86" font-size="12.5" fill="#222">1. C then S: eligible reflection</text>
+<path d="M 20.0 174.0 C 50.0 104.0 75.0 104.0 105.0 174.0 C 135.0 244.0 160.0 244.0 190.0 174.0" fill="none" stroke="#d62728" stroke-width="3" stroke-linecap="round" opacity="0.45"/>
+<path d="M 20.0 174.0 C 50.0 104.0 75.0 104.0 105.0 174.0 S 160.0 244.0 190.0 174.0" fill="none" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>
+<circle cx="50" cy="104" r="3" fill="#d62728"/>
+<circle cx="75" cy="104" r="3" fill="#d62728"/>
+<circle cx="135" cy="244" r="3" fill="#d62728"/>
+<circle cx="160" cy="244" r="3" fill="#d62728"/>
+<rect x="308" y="68" width="284" height="168" fill="none" stroke="#e0e0e0"/>
+<text x="316" y="86" font-size="12.5" fill="#222">2. relative c then s</text>
+<path d="M 320.0 174.0 c 30 -70 55 -70 85 0 c 30 70 55 70 85 0" fill="none" stroke="#d62728" stroke-width="3" stroke-linecap="round" opacity="0.45"/>
+<path d="M 320.0 174.0 c 30 -70 55 -70 85 0 s 55 70 85 0" fill="none" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>
+<circle cx="350" cy="104" r="3" fill="#d62728"/>
+<circle cx="375" cy="104" r="3" fill="#d62728"/>
+<circle cx="435" cy="244" r="3" fill="#d62728"/>
+<circle cx="460" cy="244" r="3" fill="#d62728"/>
+<rect x="608" y="68" width="284" height="168" fill="none" stroke="#e0e0e0"/>
+<text x="616" y="86" font-size="12.5" fill="#222">3. S after a line: state reset</text>
+<path d="M 620.0 174.0 L 705.0 174.0 C 705.0 174.0 760.0 244.0 790.0 174.0" fill="none" stroke="#d62728" stroke-width="3" stroke-linecap="round" opacity="0.45"/>
+<path d="M 620.0 174.0 L 705.0 174.0 S 760.0 244.0 790.0 174.0" fill="none" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>
+<circle cx="705" cy="174" r="3" fill="#d62728"/>
+<circle cx="760" cy="244" r="3" fill="#d62728"/>
+<rect x="8" y="246" width="284" height="168" fill="none" stroke="#e0e0e0"/>
+<text x="16" y="264" font-size="12.5" fill="#222">4. S after an arc: state reset</text>
+<path d="M 20.0 362.0 A 30.0 272.0 0.0 242.0 1.0 322.0 120.0 L 105.0 362.0 C 105.0 362.0 160.0 422.0 190.0 362.0" fill="none" stroke="#d62728" stroke-width="3" stroke-linecap="round" opacity="0.45"/>
+<path d="M 20.0 362.0 A 30.0 272.0 0.0 242.0 1.0 322.0 120.0 L 105.0 362.0 S 160.0 422.0 190.0 362.0" fill="none" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>
+<circle cx="105" cy="362" r="3" fill="#d62728"/>
+<circle cx="160" cy="422" r="3" fill="#d62728"/>
+<rect x="308" y="246" width="284" height="168" fill="none" stroke="#e0e0e0"/>
+<text x="316" y="264" font-size="12.5" fill="#222">5. move opens a new subpath: reset</text>
+<path d="M 320.0 332.0 C 350.0 272.0 375.0 272.0 405.0 332.0 M 410.0 392.0 C 410.0 392.0 460.0 422.0 490.0 392.0" fill="none" stroke="#d62728" stroke-width="3" stroke-linecap="round" opacity="0.45"/>
+<path d="M 320.0 332.0 C 350.0 272.0 375.0 272.0 405.0 332.0 M 410.0 392.0 S 460.0 422.0 490.0 392.0" fill="none" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>
+<circle cx="410" cy="392" r="3" fill="#d62728"/>
+<circle cx="460" cy="422" r="3" fill="#d62728"/>
+<rect x="608" y="246" width="284" height="168" fill="none" stroke="#e0e0e0"/>
+<text x="616" y="264" font-size="12.5" fill="#222">6. close then restart: reset</text>
+<path d="M 620.0 332.0 C 650.0 272.0 675.0 272.0 705.0 332.0 Z M 710.0 392.0 C 710.0 392.0 760.0 422.0 790.0 392.0" fill="none" stroke="#d62728" stroke-width="3" stroke-linecap="round" opacity="0.45"/>
+<path d="M 620.0 332.0 C 650.0 272.0 675.0 272.0 705.0 332.0 Z M 710.0 392.0 S 760.0 422.0 790.0 392.0" fill="none" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>
+<circle cx="710" cy="392" r="3" fill="#d62728"/>
+<circle cx="760" cy="422" r="3" fill="#d62728"/>
+<rect x="8" y="424" width="284" height="168" fill="none" stroke="#e0e0e0"/>
+<text x="16" y="442" font-size="12.5" fill="#222">7. Q then T: eligible reflection</text>
+<path d="M 20.0 530.0 Q 62.0 460.0 105.0 530.0 Q 148.0 600.0 190.0 530.0" fill="none" stroke="#d62728" stroke-width="3" stroke-linecap="round" opacity="0.45"/>
+<path d="M 20.0 530.0 Q 62.0 460.0 105.0 530.0 T 190.0 530.0" fill="none" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>
+<circle cx="62" cy="460" r="3" fill="#d62728"/>
+<circle cx="148" cy="600" r="3" fill="#d62728"/>
+<rect x="308" y="424" width="284" height="168" fill="none" stroke="#e0e0e0"/>
+<text x="316" y="442" font-size="12.5" fill="#222">8. T after a line: state reset</text>
+<path d="M 320.0 530.0 L 405.0 530.0 Q 405.0 530.0 490.0 530.0" fill="none" stroke="#d62728" stroke-width="3" stroke-linecap="round" opacity="0.45"/>
+<path d="M 320.0 530.0 L 405.0 530.0 T 490.0 530.0" fill="none" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>
+<circle cx="405" cy="530" r="3" fill="#d62728"/>
+<rect x="608" y="424" width="284" height="168" fill="none" stroke="#e0e0e0"/>
+<text x="616" y="442" font-size="12.5" fill="#222">9. S as the first curve command</text>
+<path d="M 620.0 530.0 C 620.0 530.0 760.0 600.0 790.0 530.0" fill="none" stroke="#d62728" stroke-width="3" stroke-linecap="round" opacity="0.45"/>
+<path d="M 620.0 530.0 S 760.0 600.0 790.0 530.0" fill="none" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>
+<circle cx="620" cy="530" r="3" fill="#d62728"/>
+<circle cx="760" cy="600" r="3" fill="#d62728"/>
+<rect x="8" y="602" width="284" height="168" fill="none" stroke="#e0e0e0"/>
+<text x="16" y="620" font-size="12.5" fill="#222">10. T as the first curve command</text>
+<path d="M 20.0 708.0 Q 20.0 708.0 190.0 708.0" fill="none" stroke="#d62728" stroke-width="3" stroke-linecap="round" opacity="0.45"/>
+<path d="M 20.0 708.0 T 190.0 708.0" fill="none" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>
+<circle cx="20" cy="708" r="3" fill="#d62728"/>
+<rect x="308" y="602" width="284" height="168" fill="none" stroke="#e0e0e0"/>
+<text x="316" y="620" font-size="12.5" fill="#222">11. chained S with repeated groups</text>
+<path d="M 310.0 718.0 C 340.0 648.0 365.0 648.0 395.0 718.0 C 425.0 788.0 450.0 788.0 480.0 718.0 C 510.0 648.0 535.0 648.0 565.0 718.0" fill="none" stroke="#d62728" stroke-width="3" stroke-linecap="round" opacity="0.45"/>
+<path d="M 310.0 718.0 C 340.0 648.0 365.0 648.0 395.0 718.0 S 450.0 788.0 480.0 718.0 535.0 648.0 565.0 718.0" fill="none" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>
+<circle cx="425" cy="788" r="3" fill="#d62728"/>
+<circle cx="450" cy="788" r="3" fill="#d62728"/>
+<circle cx="510" cy="648" r="3" fill="#d62728"/>
+<circle cx="535" cy="648" r="3" fill="#d62728"/>
+<rect x="608" y="602" width="284" height="168" fill="none" stroke="#e0e0e0"/>
+<text x="616" y="620" font-size="12.5" fill="#222">12. two independent path elements</text>
+<path d="M 620.0 688.0 C 650.0 628.0 675.0 628.0 705.0 688.0" fill="none" stroke="#d62728" stroke-width="3" stroke-linecap="round" opacity="0.45"/>
+<path d="M 710.0 748.0 C 710.0 748.0 760.0 778.0 790.0 748.0" fill="none" stroke="#d62728" stroke-width="3" stroke-linecap="round" opacity="0.45"/>
+<path d="M 620.0 688.0 C 650.0 628.0 675.0 628.0 705.0 688.0" fill="none" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>
+<path d="M 710.0 748.0 S 760.0 778.0 790.0 748.0" fill="none" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>
+<circle cx="710" cy="748" r="3" fill="#d62728"/>
+<circle cx="760" cy="778" r="3" fill="#d62728"/>
+<text x="20" y="788" font-size="13" fill="#222">13. malformed smooth commands: PointError rule, only the valid C/Q prefix is drawn</text>
+<rect x="8" y="798" width="424" height="92" fill="none" stroke="#e0e0e0"/>
+<text x="16" y="816" font-size="12" fill="#555">C prefix only (S has missing coordinates)</text>
+<path d="M 20.0 886.0 C 50.0 826.0 75.0 826.0 105.0 886.0 S 150.0" fill="none" stroke="#7f7f7f" stroke-width="2.5"/>
+<rect x="448" y="798" width="424" height="92" fill="none" stroke="#e0e0e0"/>
+<text x="456" y="816" font-size="12" fill="#555">Q prefix only (T has no coordinates)</text>
+<path d="M 460.0 886.0 Q 502.0 826.0 545.0 886.0 T" fill="none" stroke="#7f7f7f" stroke-width="2.5"/>
+<line x1="20" y1="946" x2="60" y2="946" stroke="#d62728" stroke-width="3" opacity="0.45"/>
+<text x="68" y="951" font-size="13">explicit control points</text>
+<line x1="260" y1="946" x2="300" y2="946" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="6 4"/>
+<text x="308" y="951" font-size="13">smooth S/T writing</text>
+<circle cx="500" cy="946" r="3" fill="#d62728"/>
+<text x="512" y="951" font-size="13">reference control point</text>
+</svg>

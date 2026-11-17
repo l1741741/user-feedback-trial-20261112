@@ -349,8 +349,14 @@ def path(surface, node):
         elif letter == 's':
             # Relative smooth curve
             x, y = current_point
-            x1 = x3 - x2 if last_letter in 'csCS' else 0
-            y1 = y3 - y2 if last_letter in 'csCS' else 0
+            # Only a previous cubic curve (C/c/S/s) is eligible for the
+            # reflection. last_letter is None at the start of a path: use the
+            # default tangent (a zero-length relative first control point).
+            if last_letter in ('c', 's', 'C', 'S'):
+                x1 = x3 - x2
+                y1 = y3 - y2
+            else:
+                x1 = y1 = 0
             x2, y2, string = point(surface, string)
             x3, y3, string = point(surface, string)
             node.vertices.append((
@@ -369,8 +375,15 @@ def path(surface, node):
         elif letter == 'S':
             # Smooth curve
             x, y = current_point
-            x1 = x3 + (x3 - x2) if last_letter in 'csCS' else x
-            y1 = y3 + (y3 - y2) if last_letter in 'csCS' else y
+            # Only a previous cubic curve (C/c/S/s) is eligible for the
+            # reflection. Otherwise the first control point defaults to the
+            # current point, including when S starts a path or follows a
+            # line, an arc, a move or a close.
+            if last_letter in ('c', 's', 'C', 'S'):
+                x1 = x3 + (x3 - x2)
+                y1 = y3 + (y3 - y2)
+            else:
+                x1, y1 = x, y
             x2, y2, string = point(surface, string)
             x3, y3, string = point(surface, string)
             node.vertices.append((
@@ -380,15 +393,21 @@ def path(surface, node):
 
         elif letter == 't':
             # Relative quadratic curve end
-            if last_letter not in 'QqTt':
-                x2, y2, x3, y3 = 0, 0, 0, 0
-            elif last_letter in 'QT':
+            if last_letter in ('q', 't'):
+                # The previous control point is relative to the previous
+                # current point, express it relative to the current point.
+                x2, y2 = x3 - x2, y3 - y2
+            elif last_letter in ('Q', 'T'):
                 x2 -= x1
                 y2 -= y1
                 x3 -= x1
                 y3 -= y1
-            x2 = x3 - x2
-            y2 = y3 - y2
+                x2, y2 = x3 - x2, y3 - y2
+            else:
+                # No eligible previous quadratic command (Q/q/T/t): the
+                # reflected control point defaults to the current point,
+                # i.e. a zero-length relative control point.
+                x2 = y2 = 0
             x1, y1 = 0, 0
             x3, y3, string = point(surface, string)
             xq1, yq1, xq2, yq2, xq3, yq3 = quadratic_points(
@@ -400,15 +419,20 @@ def path(surface, node):
         elif letter == 'T':
             # Quadratic curve end
             abs_x, abs_y = current_point
-            if last_letter not in 'QqTt':
-                x2, y2, x3, y3 = abs_x, abs_y, abs_x, abs_y
-            elif last_letter in 'qt':
+            if last_letter in ('q', 't'):
+                # The previous control point is relative: make it absolute
+                # before reflecting it around the current point.
                 x2 += abs_x
                 y2 += abs_y
                 x3 += abs_x
                 y3 += abs_y
-            x2 = abs_x + (x3 - x2)
-            y2 = abs_y + (y3 - y2)
+                x2, y2 = abs_x + (x3 - x2), abs_y + (y3 - y2)
+            elif last_letter in ('Q', 'T'):
+                x2, y2 = abs_x + (x3 - x2), abs_y + (y3 - y2)
+            else:
+                # No eligible previous quadratic command (Q/q/T/t): the
+                # reflected control point defaults to the current point.
+                x2, y2 = abs_x, abs_y
             x1, y1 = abs_x, abs_y
             x3, y3, string = point(surface, string)
             xq1, yq1, xq2, yq2, xq3, yq3 = quadratic_points(
