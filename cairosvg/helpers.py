@@ -27,6 +27,29 @@ class PointError(Exception):
     """Exception raised when parsing a point fails."""
 
 
+def parse_viewbox(viewbox):
+    """Validate a parsed ``viewBox`` tuple.
+
+    A viewBox must define four numbers with strictly positive width and
+    height, as required by the SVG specification. Empty or degenerate
+    view boxes are rejected with a ``ValueError`` so callers keep the
+    existing error contract and can restore their drawing state.
+
+    """
+    if viewbox is None:
+        return None
+    if len(viewbox) != 4:
+        raise ValueError(
+            'A viewBox must define 4 numbers: '
+            f'{viewbox!r}')
+    viewbox_x, viewbox_y, viewbox_width, viewbox_height = viewbox
+    if viewbox_width <= 0 or viewbox_height <= 0:
+        raise ValueError(
+            'A viewBox must have a strictly positive width and height: '
+            f'{viewbox!r}')
+    return viewbox
+
+
 def distance(x1, y1, x2, y2):
     """Get the distance between two points."""
     return hypot(x2 - x1, y2 - y1)
@@ -67,6 +90,7 @@ def node_format(surface, node, reference=True):
     if viewbox:
         viewbox = re.sub('[ \n\r\t,]+', ' ', viewbox)
         viewbox = tuple(float(position) for position in viewbox.split())
+        viewbox = parse_viewbox(viewbox)
         width = width or viewbox[2]
         height = height or viewbox[3]
     return width, height, viewbox
@@ -97,28 +121,51 @@ def point_angle(cx, cy, px, py):
     return atan2(py - cy, px - cx)
 
 
-def preserve_ratio(surface, node, width=None, height=None):
-    """Manage the ratio preservation."""
+def preserve_ratio(surface, node, width=None, height=None, viewbox=None):
+    """Manage the ratio preservation.
+
+    Return ``(scale_x, scale_y, translate_x, translate_y)`` mapping the
+    coordinate system established by ``viewBox`` onto a viewport of
+    ``width`` by ``height`` device pixels. The returned translation is
+    expressed in viewBox user units (i.e. applied *after* the scaling),
+    so a point ``(x, y)`` of the viewBox lands on:
+
+        (translate_x + x - viewbox_x) * scale_x,
+        (translate_y + y - viewbox_y) * scale_y
+
+    ``meet`` fits the whole viewBox inside the viewport, ``slice`` fills
+    the viewport and lets the content overflow (it is the caller's job to
+    clip to the effective viewport), and ``none`` stretches the two axes
+    independently.
+
+    """
     if node.tag == 'marker':
         width = width or size(surface, node.get('markerWidth', '3'), 'x')
         height = height or size(surface, node.get('markerHeight', '3'), 'y')
         _, _, viewbox = node_format(surface, node)
+        viewbox_x, viewbox_y = viewbox[0:2]
         viewbox_width, viewbox_height = viewbox[2:]
     elif node.tag in ('svg', 'image', 'g'):
-        node_width, node_height, _ = node_format(surface, node)
+        node_width, node_height, node_viewbox = node_format(surface, node)
         width = width or node_width
         height = height or node_height
-        viewbox_width, viewbox_height = node.image_width, node.image_height
+        if viewbox is None:
+            viewbox = node_viewbox
+        if viewbox is None:
+            viewbox_x = viewbox_y = 0
+            viewbox_width = node.image_width
+            viewbox_height = node.image_height
+        else:
+            viewbox_x, viewbox_y = viewbox[0:2]
+            viewbox_width, viewbox_height = viewbox[2:]
     else:
         raise TypeError(
             f'Root node is {node.tag}. Should be one of '
             'marker, svg, image, or g.'
         )
 
-    translate_x = 0
-    translate_y = 0
-    scale_x = width / viewbox_width if viewbox_width > 0 else 1
-    scale_y = height / viewbox_height if viewbox_height > 0 else 1
+    scale_x = width / viewbox_width
+    scale_y = height / viewbox_height
 
     aspect_ratio = node.get('preserveAspectRatio', 'xMidYMid').split()
     align = aspect_ratio[0]
@@ -136,42 +183,54 @@ def preserve_ratio(surface, node, width=None, height=None):
         y_position = align[5:].lower()
 
     if node.tag == 'marker':
-        translate_x = -size(surface, node.get('refX', '0'), 'x')
-        translate_y = -size(surface, node.get('refY', '0'), 'y')
+        translate_x = viewbox_x - size(
+            surface, node.get('refX', '0'), 'x')
+        translate_y = viewbox_y - size(
+            surface, node.get('refY', '0'), 'y')
     else:
-        translate_x = 0
-        if x_position == 'mid':
-            translate_x = (width / scale_x - viewbox_width) / 2
-        elif x_position == 'max':
-            translate_x = width / scale_x - viewbox_width
+        # Empty space (meet) or overflow (slice), measured in viewBox units
+        extra_x = width / scale_x - viewbox_width
+        extra_y = height / scale_y - viewbox_height
 
-        translate_y = 0
+        translate_x = viewbox_x
+        if x_position == 'mid':
+            translate_x += extra_x / 2
+        elif x_position == 'max':
+            translate_x += extra_x
+
+        translate_y = viewbox_y
         if y_position == 'mid':
-            translate_y += (height / scale_y - viewbox_height) / 2
+            translate_y += extra_y / 2
         elif y_position == 'max':
-            translate_y += height / scale_y - viewbox_height
+            translate_y += extra_y
 
     return scale_x, scale_y, translate_x, translate_y
 
 
 def clip_marker_box(surface, node, scale_x, scale_y):
-    """Get the clip ``(x, y, width, height)`` of the marker box."""
+    """Get the clip ``(x, y, width, height)`` of the marker box.
+
+    The rectangle is expressed in the marker's viewBox coordinate system,
+    including the (possibly non-zero) viewBox origin.
+
+    """
     width = size(surface, node.get('markerWidth', '3'), 'x')
     height = size(surface, node.get('markerHeight', '3'), 'y')
     _, _, viewbox = node_format(surface, node)
+    viewbox_x, viewbox_y = viewbox[0:2]
     viewbox_width, viewbox_height = viewbox[2:]
 
     align = node.get('preserveAspectRatio', 'xMidYMid').split(' ')[0]
     x_position = 'min' if align == 'none' else align[1:4].lower()
     y_position = 'min' if align == 'none' else align[5:].lower()
 
-    clip_x = viewbox[0]
+    clip_x = viewbox_x
     if x_position == 'mid':
         clip_x += (viewbox_width - width / scale_x) / 2.
     elif x_position == 'max':
         clip_x += viewbox_width - width / scale_x
 
-    clip_y = viewbox[1]
+    clip_y = viewbox_y
     if y_position == 'mid':
         clip_y += (viewbox_height - height / scale_y) / 2.
     elif y_position == 'max':

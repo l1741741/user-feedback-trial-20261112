@@ -40,10 +40,6 @@ def image(surface, node):
         image_bytes.startswith((b'<svg ', b'<?xml', b'<!DOC', b'\x1f\x8b'))
         or b'<svg' in image_bytes
     ):
-        if 'x' in node:
-            del node['x']
-        if 'y' in node:
-            del node['y']
         tree = Tree(
             url=url.geturl(), url_fetcher=node.url_fetcher,
             bytestring=image_bytes, tree_cache=surface.tree_cache,
@@ -53,16 +49,20 @@ def image(surface, node):
         if viewbox:
             tree_scale_x = tree_width / viewbox[2]
             tree_scale_y = tree_height / viewbox[3]
+            node.image_width = viewbox[2]
+            node.image_height = viewbox[3]
         else:
-            tree_width = tree['width'] = width
-            tree_height = tree['height'] = height
             tree_scale_x = tree_scale_y = 1
-        node.image_width = tree_width or width
-        node.image_height = tree_height or height
+            node.image_width = tree_width or width
+            node.image_height = tree_height or height
+        # Map the embedded document onto the image viewport (x, y,
+        # width, height): preserve_ratio returns the viewBox-aware
+        # transform, including non-zero viewBox origins.
         scale_x, scale_y, translate_x, translate_y = preserve_ratio(
-            surface, node)
+            surface, node, width, height, viewbox)
 
-        # Clip image region
+        # Clip image region to its effective viewport, so an embedded
+        # document in slice mode can never paint outside the image box.
         surface.context.rectangle(x, y, width, height)
         surface.context.clip()
 

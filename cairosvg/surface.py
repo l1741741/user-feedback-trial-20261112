@@ -158,6 +158,7 @@ class Surface(object):
 
         """
         self.cairo = None
+        self._finished = False
         self.context_width, self.context_height = parent_width, parent_height
         self.cursor_position = [0, 0]
         self.cursor_d_position = [0, 0]
@@ -217,17 +218,24 @@ class Surface(object):
         # We must scale the context as the surface size is using physical units
         self.context.scale(
             self.device_units_per_user_units, self.device_units_per_user_units)
-        # Initial, non-rounded dimensions
-        self.set_context_size(width, height, viewbox, tree)
-        self.context.move_to(0, 0)
+        try:
+            # Initial, non-rounded dimensions
+            self.set_context_size(width, height, viewbox, tree)
+            self.context.move_to(0, 0)
 
-        if background_color:
-            self.context.set_source_rgba(*color(background_color))
-            self.context.paint()
+            if background_color:
+                self.context.set_source_rgba(*color(background_color))
+                self.context.paint()
 
-        self.map_rgba = map_rgba
-        self.map_image = map_image
-        self.draw(tree)
+            self.map_rgba = map_rgba
+            self.map_image = map_image
+            self.draw(tree)
+        except BaseException:
+            # Make sure the native drawing state is released even when an
+            # invalid viewBox (or any other error) aborts the rendering,
+            # instead of leaking the underlying Cairo surface.
+            self.finish()
+            raise
 
     @property
     def points_per_pixel(self):
@@ -250,32 +258,49 @@ class Surface(object):
         return cairo_surface, width, height
 
     def set_context_size(self, width, height, viewbox, tree):
-        """Set the Cairo context size, set the SVG viewport size."""
-        if viewbox:
-            rect_x, rect_y = viewbox[0:2]
-            tree.image_width = viewbox[2]
-            tree.image_height = viewbox[3]
-        else:
-            rect_x, rect_y = 0, 0
-            tree.image_width = width
-            tree.image_height = height
+        """Set the Cairo context size, set the SVG viewport size.
+
+        The clip path (when overflow is not ``visible``) is installed on
+        the effective viewport before the viewBox-to-viewport transform,
+        so that ``slice`` overflow is cut exactly at the viewport edges
+        and never paints the surrounding layers. The viewBox origin,
+        alignment and scaling are then applied as a single transform.
+
+        """
+        if viewbox is None:
+            viewbox = (0, 0, width, height)
+        tree.image_width = viewbox[2]
+        tree.image_height = viewbox[3]
 
         scale_x, scale_y, translate_x, translate_y = preserve_ratio(
-            self, tree, width, height)
-        rect_x, rect_y = rect_x * scale_x, rect_y * scale_y
-        rect_width, rect_height = width, height
+            self, tree, width, height, viewbox)
+
+        # Move to the viewport origin ((x, y) of the nested node, or (0, 0)
+        # at the document root)
         self.context.translate(*self.context.get_current_point())
-        self.context.translate(-rect_x, -rect_y)
         if tree.get('overflow', 'hidden') != 'visible':
-            self.context.rectangle(rect_x, rect_y, rect_width, rect_height)
+            # Clip in the viewport coordinate system: the rectangle always
+            # matches the actual viewport, whatever the viewBox origin is.
+            self.context.rectangle(0, 0, width, height)
             self.context.clip()
         self.context.scale(scale_x, scale_y)
         self.context.translate(translate_x, translate_y)
-        self.context_width = rect_width / scale_x
-        self.context_height = rect_height / scale_y
+        # Viewport size expressed in the new (viewBox) user units, used to
+        # resolve percentages in the subtree.
+        self.context_width = width / scale_x
+        self.context_height = height / scale_y
 
     def finish(self):
-        """Read the surface content."""
+        """Read the surface content.
+
+        Idempotent: calling it more than once (for example from a cleanup
+        handler after an aborted rendering) does not touch the finished
+        native surface again.
+
+        """
+        if getattr(self, '_finished', False):
+            return
+        self._finished = True
         self.cairo.finish()
 
     def map_color(self, string, opacity=1):
@@ -313,7 +338,24 @@ class Surface(object):
 
         self.font_size = size(self, node.get('font-size', '12pt'))
         self.context.save()
+        try:
+            self._draw(node)
+        finally:
+            # Always balance the context save above, even when an invalid
+            # nested viewBox (or any other error) interrupts painting: the
+            # clip paths and transforms of this node must not leak into
+            # sibling layers or into the next document.
+            self.context.restore()
+            self.parent_node = old_parent_node
+            self.font_size = old_font_size
+            self.context_width, self.context_height = old_context_size
 
+    def _draw(self, node):
+        """Draw ``node`` and its children.
+
+        The context state saved by :meth:`draw` is restored by the caller.
+
+        """
         # Apply transformations
         transform(
             self, node.get('transform'),
@@ -494,11 +536,6 @@ class Surface(object):
             self.cursor_d_position = [0, 0]
             self.text_path_width = 0
 
-        self.context.restore()
-        self.parent_node = old_parent_node
-        self.font_size = old_font_size
-        self.context_width, self.context_height = old_context_size
-
 
 class PDFSurface(Surface):
     """A surface that writes in PDF format."""
@@ -533,6 +570,8 @@ class PNGSurface(Surface):
 
     def finish(self):
         """Read the PNG surface content."""
+        if getattr(self, '_finished', False):
+            return
         if self.output is not None:
             self.cairo.write_to_png(self.output)
         return super().finish()
