@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+    width="520" height="360">
+  <rect width="520" height="360" fill="white"/>
+  
+    <text x="30" y="30" font-family="Menlo"
+        font-size="14" fill="dimgray"
+        xml:space="preserve">xml:space default: SIGN SHOP No 319</text>
+    <line x1="20" y1="130" x2="500" y2="130"
+        stroke="red" stroke-width="1" stroke-dasharray="6 4"/>
+    <rect x="31.90" y="109.22"
+        width="265.92" height="21.18"
+        fill="none" stroke="blue" stroke-width="1"/>
+    <text x="30" y="130" font-family="Menlo"
+        font-size="28">SIGN SHOP No 319</text>
+    <text x="30" y="200" font-family="Menlo"
+        font-size="14" fill="dimgray"
+        xml:space="preserve">xml:space="preserve": SIGN  SHOP    No   319  </text>
+    <line x1="20" y1="300" x2="500" y2="300"
+        stroke="red" stroke-width="1" stroke-dasharray="6 4"/>
+    <rect x="31.90" y="279.22"
+        width="367.06" height="21.18"
+        fill="none" stroke="blue" stroke-width="1"/>
+    <text x="30" y="300" font-family="Menlo"
+        font-size="28">SIGN  SHOP    No   319  </text>
+</svg>

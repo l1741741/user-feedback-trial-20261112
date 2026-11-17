@@ -1,0 +1,29 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12587-text-whitespace/local-frozen-source/cairosvg/__init__.py",
+  "tests": 5,
+  "passed": 5,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "default-newline-tab-collapse",
+      "passed": true
+    },
+    {
+      "name": "preserve-newline-tab-to-spaces",
+      "passed": true
+    },
+    {
+      "name": "span-boundary-spaces",
+      "passed": true
+    },
+    {
+      "name": "empty-span-consolidates-space",
+      "passed": true
+    },
+    {
+      "name": "same-text-repeat",
+      "passed": true
+    }
+  ],
+  "oracle_reference": "SVG 1.1 text 10.15 whitespace; same local monospaced font, rendered equivalences"
+}

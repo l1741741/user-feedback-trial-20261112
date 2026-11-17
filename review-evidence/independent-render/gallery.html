@@ -1,0 +1,33 @@
+<!doctype html><meta charset="utf-8"><title>文本空白等价核验</title><style>body{font:18px system-ui;margin:25px;background:#eee}section{display:inline-block;background:white;padding:12px;margin:8px}img{width:480px;border:1px solid #aaa;image-rendering:pixelated}pre{white-space:pre-wrap}</style><h1>SVG文本空白处理</h1><p>每组展示原输入与等价文本的当次PNG，同一本地字体。</p><section><h2>default-newline-tab-collapse-case</h2><img src="default-newline-tab-collapse-case.png"><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;g fill=&quot;red&quot; font-family=&quot;DejaVu Sans Mono&quot; font-size=&quot;24&quot;&gt;&lt;text x=&quot;30&quot; y=&quot;70&quot;&gt; 
+ A
+ B	   C 
+ &lt;/text&gt;&lt;/g&gt;&lt;/svg&gt;</pre></section><section><h2>default-newline-tab-collapse-equivalent</h2><img src="default-newline-tab-collapse-equivalent.png"><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;g fill=&quot;red&quot; font-family=&quot;DejaVu Sans Mono&quot; font-size=&quot;24&quot;&gt;&lt;text x=&quot;30&quot; y=&quot;70&quot;&gt;A B C&lt;/text&gt;&lt;/g&gt;&lt;/svg&gt;</pre></section><section><h2>preserve-newline-tab-to-spaces-case</h2><img src="preserve-newline-tab-to-spaces-case.png"><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;g fill=&quot;red&quot; font-family=&quot;DejaVu Sans Mono&quot; font-size=&quot;24&quot;&gt;&lt;text x=&quot;30&quot; y=&quot;70&quot; xml:space=&quot;preserve&quot;&gt; A	 
+B &lt;/text&gt;&lt;/g&gt;&lt;/svg&gt;</pre></section><section><h2>preserve-newline-tab-to-spaces-equivalent</h2><img src="preserve-newline-tab-to-spaces-equivalent.png"><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;g fill=&quot;red&quot; font-family=&quot;DejaVu Sans Mono&quot; font-size=&quot;24&quot;&gt;&lt;text x=&quot;30&quot; y=&quot;70&quot; xml:space=&quot;preserve&quot;&gt; A   B &lt;/text&gt;&lt;/g&gt;&lt;/svg&gt;</pre></section><section><h2>span-boundary-spaces-case</h2><img src="span-boundary-spaces-case.png"><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;g fill=&quot;red&quot; font-family=&quot;DejaVu Sans Mono&quot; font-size=&quot;24&quot;&gt;&lt;text x=&quot;30&quot; y=&quot;70&quot;&gt; A &lt;tspan&gt;B&lt;/tspan&gt; C &lt;/text&gt;&lt;/g&gt;&lt;/svg&gt;</pre></section><section><h2>span-boundary-spaces-equivalent</h2><img src="span-boundary-spaces-equivalent.png"><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;g fill=&quot;red&quot; font-family=&quot;DejaVu Sans Mono&quot; font-size=&quot;24&quot;&gt;&lt;text x=&quot;30&quot; y=&quot;70&quot;&gt;A B C&lt;/text&gt;&lt;/g&gt;&lt;/svg&gt;</pre></section><section><h2>empty-span-consolidates-space-case</h2><img src="empty-span-consolidates-space-case.png"><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;g fill=&quot;red&quot; font-family=&quot;DejaVu Sans Mono&quot; font-size=&quot;24&quot;&gt;&lt;text x=&quot;30&quot; y=&quot;70&quot;&gt;A &lt;tspan/&gt; B&lt;/text&gt;&lt;/g&gt;&lt;/svg&gt;</pre></section><section><h2>empty-span-consolidates-space-equivalent</h2><img src="empty-span-consolidates-space-equivalent.png"><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;g fill=&quot;red&quot; font-family=&quot;DejaVu Sans Mono&quot; font-size=&quot;24&quot;&gt;&lt;text x=&quot;30&quot; y=&quot;70&quot;&gt;A B&lt;/text&gt;&lt;/g&gt;&lt;/svg&gt;</pre></section><section><h2>same-text-repeat-case</h2><img src="same-text-repeat-case.png"><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;g fill=&quot;red&quot; font-family=&quot;DejaVu Sans Mono&quot; font-size=&quot;24&quot;&gt;&lt;text x=&quot;30&quot; y=&quot;70&quot; xml:space=&quot;preserve&quot;&gt;  A  B &lt;/text&gt;&lt;/g&gt;&lt;/svg&gt;</pre></section><section><h2>same-text-repeat-equivalent</h2><img src="same-text-repeat-equivalent.png"><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;g fill=&quot;red&quot; font-family=&quot;DejaVu Sans Mono&quot; font-size=&quot;24&quot;&gt;&lt;text x=&quot;30&quot; y=&quot;70&quot; xml:space=&quot;preserve&quot;&gt;  A  B &lt;/text&gt;&lt;/g&gt;&lt;/svg&gt;</pre></section><pre>{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12587-text-whitespace/local-frozen-source/cairosvg/__init__.py",
+  "tests": 5,
+  "passed": 5,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "default-newline-tab-collapse",
+      "passed": true
+    },
+    {
+      "name": "preserve-newline-tab-to-spaces",
+      "passed": true
+    },
+    {
+      "name": "span-boundary-spaces",
+      "passed": true
+    },
+    {
+      "name": "empty-span-consolidates-space",
+      "passed": true
+    },
+    {
+      "name": "same-text-repeat",
+      "passed": true
+    }
+  ],
+  "oracle_reference": "SVG 1.1 text 10.15 whitespace; same local monospaced font, rendered equivalences"
+}</pre>

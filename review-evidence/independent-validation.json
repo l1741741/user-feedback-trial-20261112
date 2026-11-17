@@ -1,0 +1,21 @@
+{
+  "task_id": "recover-20261118-12587-text-whitespace",
+  "final_sha": "d16e6a2411d5bdbb693b41062b7b1ada5a16e223",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/recover-20261118-12587-text-whitespace/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12587-text-whitespace/independent-validation.xml",
+    "cairosvg/test_api.py"
+  ],
+  "exit_code": 0,
+  "tests": 16,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-18T02:30:26.974908+08:00"
+}

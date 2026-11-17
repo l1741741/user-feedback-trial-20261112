@@ -1,0 +1,49 @@
+<!doctype html><meta charset="utf-8"><title>文本空白演示实测</title><style>body{font:19px system-ui;margin:24px;background:#eee}section{display:inline-block;background:white;margin:10px;padding:15px;vertical-align:top}img{width:650px;max-width:100%;border:1px solid #aaa;image-rendering:pixelated}pre{white-space:pre-wrap}</style><h1>preserve面板的实际字距</h1><p>左侧为原演示本次运行结果，右侧为等价显式文本参考。独立测量只统计黑色字形，排除红色基准线和蓝色边界框。</p><section><h2>原演示实际PNG</h2><img src="model-demo.png"><p>原演示实际传入的SVG</p><img src="model-demo.svg"></section><section><h2>显式文本参考PNG</h2><img src="explicit-reference.png"><p>参考SVG</p><img src="explicit-reference.svg"></section><pre>{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12587-text-whitespace/local-frozen-source/cairosvg/__init__.py",
+  "evaluated_demo": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12587-text-whitespace/local-frozen-source/demo/text_whitespace_sign.py",
+  "tests": 3,
+  "passed": 1,
+  "failed": 2,
+  "checks": [
+    {
+      "name": "default-panel-glyphs-match-reference",
+      "actual": [
+        32,
+        109,
+        297,
+        130
+      ],
+      "expected": [
+        32,
+        109,
+        297,
+        130
+      ],
+      "passed": true
+    },
+    {
+      "name": "preserve-panel-glyphs-match-reference",
+      "actual": [
+        32,
+        279,
+        297,
+        300
+      ],
+      "expected": [
+        32,
+        279,
+        399,
+        300
+      ],
+      "passed": false
+    },
+    {
+      "name": "preserve-panel-is-wider-than-default",
+      "default_width": 265,
+      "preserve_width": 265,
+      "expected_preserve_width": 367,
+      "passed": false
+    }
+  ],
+  "font": "Menlo"
+}</pre>
