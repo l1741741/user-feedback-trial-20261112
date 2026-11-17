@@ -1,0 +1,40 @@
+<!doctype html><meta charset="utf-8"><title>真实异常后绘制隔离</title><style>body{font:19px system-ui;margin:24px}section{display:inline-block;margin:10px;padding:12px;background:#eee}img{width:480px;max-width:100%;border:1px solid #999;image-rendering:pixelated}pre{white-space:pre-wrap}</style><h1>同一绘制入口在真实错误之后恢复</h1><p>实际错误需向外抛出，之后的蓝色图层应与独立基准一致。共享图案的两次绘制应相同，后一对象不累乘前一对象透明度。</p><section><h2>reference</h2><img src="reference.png"></section><section><h2>after-failure</h2><img src="after-failure.png"></section><section><h2>first-tree-render</h2><img src="first-tree-render.png"></section><section><h2>second-tree-render</h2><img src="second-tree-render.png"></section><pre>{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12598-render-state-isolation/local-frozen-source/cairosvg/__init__.py",
+  "tests": 2,
+  "passed": 2,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "actual-draw-error-propagates-and-same-renderer-recovers",
+      "passed": true,
+      "details": {
+        "before_matrix": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "after_matrix": [
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        "same_pixels_as_reference": true
+      }
+    },
+    {
+      "name": "shared-pattern-tree-repeat-and-opacity-isolation",
+      "passed": true,
+      "details": {
+        "repeat_same_pixels": true,
+        "half_alpha": 128,
+        "full_alpha": 255
+      }
+    }
+  ]
+}</pre>

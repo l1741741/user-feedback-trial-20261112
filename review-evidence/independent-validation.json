@@ -1,0 +1,22 @@
+{
+  "task_id": "recover-20261118-12598-render-state-isolation",
+  "final_sha": "07e124daac23dd239a9ce26195552310bb28e87a",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/recover-20261118-12598-render-state-isolation/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12598-render-state-isolation/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_state_isolation.py"
+  ],
+  "exit_code": 0,
+  "tests": 20,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-18T02:45:07.111459+08:00"
+}

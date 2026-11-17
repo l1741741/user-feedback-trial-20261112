@@ -1,0 +1,8 @@
+....................                                                     [100%]
+=============================== warnings summary ===============================
+cairosvg/test_state_isolation.py: 12 warnings
+  /Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12598-render-state-isolation/local-frozen-source/cairosvg/test_state_isolation.py:120: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+    return image.size, list(image.getdata())
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+20 passed, 12 warnings in 0.25s

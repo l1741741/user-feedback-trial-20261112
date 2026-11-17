@@ -1,0 +1,36 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12598-render-state-isolation/local-frozen-source/cairosvg/__init__.py",
+  "tests": 4,
+  "passed": 3,
+  "failed": 1,
+  "checks": [
+    {
+      "name": "fresh-public-conversion-has-blue-rect",
+      "passed": true
+    },
+    {
+      "name": "actual-native-error-propagates",
+      "passed": true,
+      "actual_error": {
+        "type": "CairoError",
+        "message": "cairo returned CAIRO_STATUS_INVALID_DASH: b'invalid value for a dash setting'",
+        "traceback": "Traceback (most recent call last):\n  File \"/Users/lichao/Desktop/xpert/user-feedback/state/replay-recovery-20261118/acceptance/cairo_error_reuse_check.py\", line 21, in <module>\n    surface.draw(Tree(bytestring=bad.encode()))\n  File \"/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12598-render-state-isolation/local-frozen-source/cairosvg/surface.py\", line 527, in draw\n    self.draw(child)\n  File \"/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12598-render-state-isolation/local-frozen-source/cairosvg/surface.py\", line 527, in draw\n    self.draw(child)\n  File \"/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12598-render-state-isolation/local-frozen-source/cairosvg/surface.py\", line 391, in draw\n    self.context.set_dash(dashes, offset)\n  File \"/Users/lichao/.local/share/user-feedback/trials/20261112/uid-319-source/.venv/lib/python3.12/site-packages/cairocffi/context.py\", line 470, in set_dash\n    self._check_status()\n  File \"/Users/lichao/.local/share/user-feedback/trials/20261112/uid-319-source/.venv/lib/python3.12/site-packages/cairocffi/context.py\", line 107, in _check_status\n    _check_status(cairo.cairo_status(self._pointer))\n  File \"/Users/lichao/.local/share/user-feedback/trials/20261112/uid-319-source/.venv/lib/python3.12/site-packages/cairocffi/__init__.py\", line 100, in _check_status\n    raise exception(message, status)\ncairocffi.CairoError: cairo returned CAIRO_STATUS_INVALID_DASH: b'invalid value for a dash setting'\n"
+      }
+    },
+    {
+      "name": "same-entry-recovers-and-renders-blue",
+      "passed": false,
+      "actual_error": {
+        "type": "CairoError",
+        "message": "cairo returned CAIRO_STATUS_INVALID_DASH: b'invalid value for a dash setting'",
+        "traceback": "Traceback (most recent call last):\n  File \"/Users/lichao/Desktop/xpert/user-feedback/state/replay-recovery-20261118/acceptance/cairo_error_reuse_check.py\", line 26, in <module>\n    surface.draw(Tree(bytestring=blue.encode()));surface.finish()\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12598-render-state-isolation/local-frozen-source/cairosvg/surface.py\", line 347, in draw\n    self.context.save()\n  File \"/Users/lichao/.local/share/user-feedback/trials/20261112/uid-319-source/.venv/lib/python3.12/site-packages/cairocffi/context.py\", line 168, in save\n    self._check_status()\n  File \"/Users/lichao/.local/share/user-feedback/trials/20261112/uid-319-source/.venv/lib/python3.12/site-packages/cairocffi/context.py\", line 107, in _check_status\n    _check_status(cairo.cairo_status(self._pointer))\n  File \"/Users/lichao/.local/share/user-feedback/trials/20261112/uid-319-source/.venv/lib/python3.12/site-packages/cairocffi/__init__.py\", line 100, in _check_status\n    raise exception(message, status)\ncairocffi.CairoError: cairo returned CAIRO_STATUS_INVALID_DASH: b'invalid value for a dash setting'\n"
+      },
+      "output_png_created": false
+    },
+    {
+      "name": "fresh-public-conversion-after-error-matches-reference",
+      "passed": true
+    }
+  ],
+  "scope": "same PNGSurface.draw entry reused after an actual Cairo native error; fresh public conversions are controls"
+}

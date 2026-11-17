@@ -1,0 +1,27 @@
+{
+  "slug": "render-state-isolation",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12598-render-state-isolation/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 3,
+  "failures": 0,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "clip-opacity-transform-restored-for-sibling",
+      "passed": true
+    },
+    {
+      "name": "parse-error-followed-by-real-render",
+      "passed": true
+    }
+  ],
+  "images": [
+    "ordinary",
+    "special-before-sibling",
+    "after-error",
+    "separate-call"
+  ]
+}
