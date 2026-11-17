@@ -1,0 +1,33 @@
+<!doctype html><meta charset="utf-8"><title>拐点箭头方向</title><style>body{font:19px system-ui;margin:24px}section{display:inline-block;margin:12px}img{width:480px;max-width:100%;border:1px solid #999}pre{white-space:pre-wrap}</style><h1>自动方向与几何参考对照</h1><p>每对左图为auto实际PNG，右图为按入射和出射单位向量角平分线给定的显式角度PNG。</p><h2>right-down</h2><section><h3>实际auto</h3><img src="right-down-auto.png"></section><section><h3>显式角度参考</h3><img src="right-down-reference.png"></section><details><summary>实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;defs&gt;&lt;marker id=&quot;m&quot; markerWidth=&quot;32&quot; markerHeight=&quot;24&quot; viewBox=&quot;-4 -12 32 24&quot; refX=&quot;0&quot; refY=&quot;0&quot; markerUnits=&quot;userSpaceOnUse&quot; orient=&quot;auto&quot;&gt;&lt;path d=&quot;M0 -8 L24 0 L0 8Z&quot; fill=&quot;red&quot;/&gt;&lt;/marker&gt;&lt;/defs&gt;&lt;path d=&quot;M30 30 L100 30 L100 130&quot; fill=&quot;none&quot; stroke=&quot;gray&quot; marker-mid=&quot;url(#m)&quot;/&gt;&lt;/svg&gt;</pre></details><h2>left-down</h2><section><h3>实际auto</h3><img src="left-down-auto.png"></section><section><h3>显式角度参考</h3><img src="left-down-reference.png"></section><details><summary>实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;defs&gt;&lt;marker id=&quot;m&quot; markerWidth=&quot;32&quot; markerHeight=&quot;24&quot; viewBox=&quot;-4 -12 32 24&quot; refX=&quot;0&quot; refY=&quot;0&quot; markerUnits=&quot;userSpaceOnUse&quot; orient=&quot;auto&quot;&gt;&lt;path d=&quot;M0 -8 L24 0 L0 8Z&quot; fill=&quot;red&quot;/&gt;&lt;/marker&gt;&lt;/defs&gt;&lt;path d=&quot;M190 60 L100 60 L25 110&quot; fill=&quot;none&quot; stroke=&quot;gray&quot; marker-mid=&quot;url(#m)&quot;/&gt;&lt;/svg&gt;</pre></details><h2>left-near-straight</h2><section><h3>实际auto</h3><img src="left-near-straight-auto.png"></section><section><h3>显式角度参考</h3><img src="left-near-straight-reference.png"></section><details><summary>实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;defs&gt;&lt;marker id=&quot;m&quot; markerWidth=&quot;32&quot; markerHeight=&quot;24&quot; viewBox=&quot;-4 -12 32 24&quot; refX=&quot;0&quot; refY=&quot;0&quot; markerUnits=&quot;userSpaceOnUse&quot; orient=&quot;auto&quot;&gt;&lt;path d=&quot;M0 -8 L24 0 L0 8Z&quot; fill=&quot;red&quot;/&gt;&lt;/marker&gt;&lt;/defs&gt;&lt;path d=&quot;M190 80 L100 80 L20 81&quot; fill=&quot;none&quot; stroke=&quot;gray&quot; marker-mid=&quot;url(#m)&quot;/&gt;&lt;/svg&gt;</pre></details><h2>up-left</h2><section><h3>实际auto</h3><img src="up-left-auto.png"></section><section><h3>显式角度参考</h3><img src="up-left-reference.png"></section><details><summary>实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;240&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;defs&gt;&lt;marker id=&quot;m&quot; markerWidth=&quot;32&quot; markerHeight=&quot;24&quot; viewBox=&quot;-4 -12 32 24&quot; refX=&quot;0&quot; refY=&quot;0&quot; markerUnits=&quot;userSpaceOnUse&quot; orient=&quot;auto&quot;&gt;&lt;path d=&quot;M0 -8 L24 0 L0 8Z&quot; fill=&quot;red&quot;/&gt;&lt;/marker&gt;&lt;/defs&gt;&lt;path d=&quot;M160 140 L160 80 L40 80&quot; fill=&quot;none&quot; stroke=&quot;gray&quot; marker-mid=&quot;url(#m)&quot;/&gt;&lt;/svg&gt;</pre></details><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-5747-marker-direction/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 4,
+  &quot;passed&quot;: 3,
+  &quot;failed&quot;: 1,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;right-down&quot;,
+      &quot;expected_angle_degrees&quot;: 45.0,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;left-down&quot;,
+      &quot;expected_angle_degrees&quot;: 163.15496623701011,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;left-near-straight&quot;,
+      &quot;expected_angle_degrees&quot;: 179.6419200272648,
+      &quot;changed_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;up-left&quot;,
+      &quot;expected_angle_degrees&quot;: -135.0,
+      &quot;changed_pixels&quot;: 428,
+      &quot;passed&quot;: false
+    }
+  ],
+  &quot;oracle&quot;: &quot;normalized incoming plus outgoing vectors at a nondegenerate middle vertex; explicit orientation is the reference&quot;
+}</pre>

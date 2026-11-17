@@ -1,0 +1,33 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-5747-marker-direction/local-frozen-source/cairosvg/__init__.py",
+  "tests": 4,
+  "passed": 3,
+  "failed": 1,
+  "checks": [
+    {
+      "name": "right-down",
+      "expected_angle_degrees": 45.0,
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "left-down",
+      "expected_angle_degrees": 163.15496623701011,
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "left-near-straight",
+      "expected_angle_degrees": 179.6419200272648,
+      "changed_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "up-left",
+      "expected_angle_degrees": -135.0,
+      "changed_pixels": 428,
+      "passed": false
+    }
+  ],
+  "oracle": "normalized incoming plus outgoing vectors at a nondegenerate middle vertex; explicit orientation is the reference"
+}

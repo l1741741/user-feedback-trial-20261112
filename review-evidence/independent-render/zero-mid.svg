@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="120" ><defs><marker id="m" markerWidth="6" markerHeight="6" refX="3" refY="3" markerUnits="userSpaceOnUse"><circle cx="3" cy="3" r="3" fill="red"/></marker></defs><path d="M20 60 L70 60 L70 60 L120 60" stroke="blue" marker-mid="url(#m)"/></svg>
