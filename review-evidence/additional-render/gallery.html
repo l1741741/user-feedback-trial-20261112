@@ -1,0 +1,77 @@
+<!doctype html><meta charset="utf-8"><title>非零viewBox等价变换</title><style>body{font:19px system-ui;margin:24px}img{width:400px;max-width:100%;border:1px solid #aaa;background:#eee}section{display:inline-block;margin:12px}pre{white-space:pre-wrap}</style><h1>图形与viewBox同时平移，PNG应完全相同</h1><p>左为非零起点的当次PNG，右为等价零起点参考。两侧各有四色角标和黑色中心十字。</p><h2>200x100-xMidYMid-meet-origin-10-20</h2><section><h3>非零起点实际图</h3><img src="200x100-xMidYMid-meet-origin-10-20.png"></section><section><h3>等价零起点参考</h3><img src="200x100-xMidYMid-meet-reference.png"></section><details><summary>实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;200&quot; height=&quot;100&quot; viewBox=&quot;10 20 100 100&quot; preserveAspectRatio=&quot;xMidYMid meet&quot;&gt;&lt;g transform=&quot;translate(10 20)&quot;&gt;&lt;rect width=&quot;100&quot; height=&quot;100&quot; fill=&quot;white&quot;/&gt;&lt;rect width=&quot;20&quot; height=&quot;20&quot; fill=&quot;red&quot;/&gt;&lt;rect x=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;lime&quot;/&gt;&lt;rect y=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;blue&quot;/&gt;&lt;rect x=&quot;80&quot; y=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;yellow&quot;/&gt;&lt;path d=&quot;M50 0V100M0 50H100&quot; stroke=&quot;black&quot; stroke-width=&quot;4&quot;/&gt;&lt;/g&gt;&lt;/svg&gt;</pre></details><h2>200x100-xMidYMid-meet-origin--15--25</h2><section><h3>非零起点实际图</h3><img src="200x100-xMidYMid-meet-origin--15--25.png"></section><section><h3>等价零起点参考</h3><img src="200x100-xMidYMid-meet-reference.png"></section><details><summary>实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;200&quot; height=&quot;100&quot; viewBox=&quot;-15 -25 100 100&quot; preserveAspectRatio=&quot;xMidYMid meet&quot;&gt;&lt;g transform=&quot;translate(-15 -25)&quot;&gt;&lt;rect width=&quot;100&quot; height=&quot;100&quot; fill=&quot;white&quot;/&gt;&lt;rect width=&quot;20&quot; height=&quot;20&quot; fill=&quot;red&quot;/&gt;&lt;rect x=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;lime&quot;/&gt;&lt;rect y=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;blue&quot;/&gt;&lt;rect x=&quot;80&quot; y=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;yellow&quot;/&gt;&lt;path d=&quot;M50 0V100M0 50H100&quot; stroke=&quot;black&quot; stroke-width=&quot;4&quot;/&gt;&lt;/g&gt;&lt;/svg&gt;</pre></details><h2>200x100-xMidYMid-slice-origin-10-20</h2><section><h3>非零起点实际图</h3><img src="200x100-xMidYMid-slice-origin-10-20.png"></section><section><h3>等价零起点参考</h3><img src="200x100-xMidYMid-slice-reference.png"></section><details><summary>实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;200&quot; height=&quot;100&quot; viewBox=&quot;10 20 100 100&quot; preserveAspectRatio=&quot;xMidYMid slice&quot;&gt;&lt;g transform=&quot;translate(10 20)&quot;&gt;&lt;rect width=&quot;100&quot; height=&quot;100&quot; fill=&quot;white&quot;/&gt;&lt;rect width=&quot;20&quot; height=&quot;20&quot; fill=&quot;red&quot;/&gt;&lt;rect x=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;lime&quot;/&gt;&lt;rect y=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;blue&quot;/&gt;&lt;rect x=&quot;80&quot; y=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;yellow&quot;/&gt;&lt;path d=&quot;M50 0V100M0 50H100&quot; stroke=&quot;black&quot; stroke-width=&quot;4&quot;/&gt;&lt;/g&gt;&lt;/svg&gt;</pre></details><h2>200x100-xMidYMid-slice-origin--15--25</h2><section><h3>非零起点实际图</h3><img src="200x100-xMidYMid-slice-origin--15--25.png"></section><section><h3>等价零起点参考</h3><img src="200x100-xMidYMid-slice-reference.png"></section><details><summary>实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;200&quot; height=&quot;100&quot; viewBox=&quot;-15 -25 100 100&quot; preserveAspectRatio=&quot;xMidYMid slice&quot;&gt;&lt;g transform=&quot;translate(-15 -25)&quot;&gt;&lt;rect width=&quot;100&quot; height=&quot;100&quot; fill=&quot;white&quot;/&gt;&lt;rect width=&quot;20&quot; height=&quot;20&quot; fill=&quot;red&quot;/&gt;&lt;rect x=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;lime&quot;/&gt;&lt;rect y=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;blue&quot;/&gt;&lt;rect x=&quot;80&quot; y=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;yellow&quot;/&gt;&lt;path d=&quot;M50 0V100M0 50H100&quot; stroke=&quot;black&quot; stroke-width=&quot;4&quot;/&gt;&lt;/g&gt;&lt;/svg&gt;</pre></details><h2>200x100-none-origin-10-20</h2><section><h3>非零起点实际图</h3><img src="200x100-none-origin-10-20.png"></section><section><h3>等价零起点参考</h3><img src="200x100-none-reference.png"></section><details><summary>实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;200&quot; height=&quot;100&quot; viewBox=&quot;10 20 100 100&quot; preserveAspectRatio=&quot;none&quot;&gt;&lt;g transform=&quot;translate(10 20)&quot;&gt;&lt;rect width=&quot;100&quot; height=&quot;100&quot; fill=&quot;white&quot;/&gt;&lt;rect width=&quot;20&quot; height=&quot;20&quot; fill=&quot;red&quot;/&gt;&lt;rect x=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;lime&quot;/&gt;&lt;rect y=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;blue&quot;/&gt;&lt;rect x=&quot;80&quot; y=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;yellow&quot;/&gt;&lt;path d=&quot;M50 0V100M0 50H100&quot; stroke=&quot;black&quot; stroke-width=&quot;4&quot;/&gt;&lt;/g&gt;&lt;/svg&gt;</pre></details><h2>200x100-none-origin--15--25</h2><section><h3>非零起点实际图</h3><img src="200x100-none-origin--15--25.png"></section><section><h3>等价零起点参考</h3><img src="200x100-none-reference.png"></section><details><summary>实际SVG输入</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;200&quot; height=&quot;100&quot; viewBox=&quot;-15 -25 100 100&quot; preserveAspectRatio=&quot;none&quot;&gt;&lt;g transform=&quot;translate(-15 -25)&quot;&gt;&lt;rect width=&quot;100&quot; height=&quot;100&quot; fill=&quot;white&quot;/&gt;&lt;rect width=&quot;20&quot; height=&quot;20&quot; fill=&quot;red&quot;/&gt;&lt;rect x=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;lime&quot;/&gt;&lt;rect y=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;blue&quot;/&gt;&lt;rect x=&quot;80&quot; y=&quot;80&quot; width=&quot;20&quot; height=&quot;20&quot; fill=&quot;yellow&quot;/&gt;&lt;path d=&quot;M50 0V100M0 50H100&quot; stroke=&quot;black&quot; stroke-width=&quot;4&quot;/&gt;&lt;/g&gt;&lt;/svg&gt;</pre></details><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12581-viewbox-slice/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 14,
+  &quot;passed&quot;: 2,
+  &quot;failed&quot;: 12,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;200x100-xMidYMid-meet-origin-10-20&quot;,
+      &quot;passed&quot;: false,
+      &quot;changed_pixels&quot;: 8064
+    },
+    {
+      &quot;name&quot;: &quot;200x100-xMidYMid-meet-origin--15--25&quot;,
+      &quot;passed&quot;: false,
+      &quot;changed_pixels&quot;: 9280
+    },
+    {
+      &quot;name&quot;: &quot;200x100-xMidYMid-slice-origin-10-20&quot;,
+      &quot;passed&quot;: false,
+      &quot;changed_pixels&quot;: 12288
+    },
+    {
+      &quot;name&quot;: &quot;200x100-xMidYMid-slice-origin--15--25&quot;,
+      &quot;passed&quot;: false,
+      &quot;changed_pixels&quot;: 15560
+    },
+    {
+      &quot;name&quot;: &quot;200x100-none-origin-10-20&quot;,
+      &quot;passed&quot;: false,
+      &quot;changed_pixels&quot;: 13728
+    },
+    {
+      &quot;name&quot;: &quot;200x100-none-origin--15--25&quot;,
+      &quot;passed&quot;: false,
+      &quot;changed_pixels&quot;: 15560
+    },
+    {
+      &quot;name&quot;: &quot;100x200-xMidYMid-meet-origin-10-20&quot;,
+      &quot;passed&quot;: false,
+      &quot;changed_pixels&quot;: 10064
+    },
+    {
+      &quot;name&quot;: &quot;100x200-xMidYMid-meet-origin--15--25&quot;,
+      &quot;passed&quot;: false,
+      &quot;changed_pixels&quot;: 11280
+    },
+    {
+      &quot;name&quot;: &quot;100x200-xMidYMid-slice-origin-10-20&quot;,
+      &quot;passed&quot;: false,
+      &quot;changed_pixels&quot;: 12096
+    },
+    {
+      &quot;name&quot;: &quot;100x200-xMidYMid-slice-origin--15--25&quot;,
+      &quot;passed&quot;: false,
+      &quot;changed_pixels&quot;: 13720
+    },
+    {
+      &quot;name&quot;: &quot;100x200-none-origin-10-20&quot;,
+      &quot;passed&quot;: false,
+      &quot;changed_pixels&quot;: 13728
+    },
+    {
+      &quot;name&quot;: &quot;100x200-none-origin--15--25&quot;,
+      &quot;passed&quot;: false,
+      &quot;changed_pixels&quot;: 15560
+    },
+    {
+      &quot;name&quot;: &quot;scale-vs-output-dimensions&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;fresh-call-isolation&quot;,
+      &quot;passed&quot;: true
+    }
+  ],
+  &quot;oracle&quot;: &quot;Adding the same translation to viewBox origin and all geometry preserves the device image&quot;
+}</pre>

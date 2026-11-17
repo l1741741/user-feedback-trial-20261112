@@ -1,0 +1,29 @@
+{
+  "slug": "viewbox-slice",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/replay-recovery-20261118/recover-20261118-12581-viewbox-slice/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 2,
+  "failures": 1,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "meet-letterbox-slice-fills",
+      "passed": true
+    },
+    {
+      "name": "nonzero-viewbox-origin",
+      "passed": false,
+      "error": "(0, 0, (0, 0, 0, 0), (255, 0, 0, 255))",
+      "traceback": "Traceback (most recent call last):\n  File \"/Users/lichao/Desktop/xpert/user-feedback/state/replay-recovery-20261118/acceptance/render_check.py\", line 22, in case\n    try:fn();CASES.append({'name':name,'passed':True})\n        ^^^^\n  File \"/Users/lichao/Desktop/xpert/user-feedback/state/replay-recovery-20261118/acceptance/render_check.py\", line 122, in origin\n    a=render('viewbox-origin',svg('<rect x=\"10\" y=\"20\" width=\"100\" height=\"50\" fill=\"red\"/>',100,50,'viewBox=\"10 20 100 50\"'));px(a,0,0,red);px(a,99,49,red)\n                                                                                                                               ^^^^^^^^^^^^^\n  File \"/Users/lichao/Desktop/xpert/user-feedback/state/replay-recovery-20261118/acceptance/render_check.py\", line 16, in px\n    value=im.getpixel((x,y));assert max(abs(a-b) for a,b in zip(value,expected))<=tol,(x,y,value,expected)\n                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: (0, 0, (0, 0, 0, 0), (255, 0, 0, 255))\n"
+    }
+  ],
+  "images": [
+    "ordinary",
+    "meet",
+    "slice",
+    "viewbox-origin"
+  ]
+}
