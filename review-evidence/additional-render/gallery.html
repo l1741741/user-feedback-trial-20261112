@@ -1,0 +1,68 @@
+<!doctype html><meta charset="utf-8"><title>嵌套视口与独立几何</title><style>body{font:20px system-ui;margin:24px}img{width:640px;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>meet/slice/none、symbol与零面积视口</h1><p>前九组依次为嵌套、显式几何参考和symbol；三种映射均应与各自参考一致。零面积视口无红块，蓝色外层兄弟保持不变。</p><h2>meet</h2><p>SVG输入</p><img src="meet.svg"><p>当次PNG</p><img src="meet.png"><h2>meet-reference</h2><p>SVG输入</p><img src="meet-reference.svg"><p>当次PNG</p><img src="meet-reference.png"><h2>meet-symbol</h2><p>SVG输入</p><img src="meet-symbol.svg"><p>当次PNG</p><img src="meet-symbol.png"><h2>slice</h2><p>SVG输入</p><img src="slice.svg"><p>当次PNG</p><img src="slice.png"><h2>slice-reference</h2><p>SVG输入</p><img src="slice-reference.svg"><p>当次PNG</p><img src="slice-reference.png"><h2>slice-symbol</h2><p>SVG输入</p><img src="slice-symbol.svg"><p>当次PNG</p><img src="slice-symbol.png"><h2>none</h2><p>SVG输入</p><img src="none.svg"><p>当次PNG</p><img src="none.png"><h2>none-reference</h2><p>SVG输入</p><img src="none-reference.svg"><p>当次PNG</p><img src="none-reference.png"><h2>none-symbol</h2><p>SVG输入</p><img src="none-symbol.svg"><p>当次PNG</p><img src="none-symbol.png"><h2>zero-width</h2><p>SVG输入</p><img src="zero-width.svg"><p>当次PNG</p><img src="zero-width.png"><h2>zero-height</h2><p>SVG输入</p><img src="zero-height.svg"><p>当次PNG</p><img src="zero-height.png"><h2>zero-both</h2><p>SVG输入</p><img src="zero-both.svg"><p>当次PNG</p><img src="zero-both.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12580-viewport-percent/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 15,
+  &quot;passed&quot;: 15,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;meet-explicit-geometry&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;meet-symbol-equivalence&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;meet-outer-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;slice-explicit-geometry&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;slice-symbol-equivalence&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;slice-outer-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;none-explicit-geometry&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;none-symbol-equivalence&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;none-outer-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;zero-width-empty&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;zero-width-outer-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;zero-height-empty&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;zero-height-outer-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;zero-both-empty&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;zero-both-outer-sibling&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>
