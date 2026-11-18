@@ -10,6 +10,11 @@ EPS, PS, and PNG files.
 * Professional support: https://www.courtbouillon.org
 * Donation: https://opencollective.com/courtbouillon
 
+See ``COLOR-SUPPORT.md`` for the supported CSS color syntaxes, the alpha
+composition rules, and the explicitly unsupported parts of CSS Color 4. A
+regenerable pixel-comparison chart is available in ``demo/``
+(``python demo/color_comparison.py``).
+
 CairoSVG has been created and developed by Kozea (https://kozea.fr).
 Professional support, maintenance and community management is provided by
 CourtBouillon (https://www.courtbouillon.org).

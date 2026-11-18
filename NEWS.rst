@@ -3,6 +3,24 @@
 ======
 
 
+Unreleased
+==========
+
+* Parse ``#RGBA`` and ``#RRGGBBAA`` hexadecimal colors
+* Parse ``rgb()``/``rgba()`` with space-separated channels, percentages and
+  slash-separated alpha, while keeping the legacy comma syntax
+* Normalize color alpha to 0–1 so it composes once with ``fill-opacity``,
+  ``stroke-opacity`` and ``stop-opacity``
+* Accept percentages in ``opacity`` attributes
+* Apply element ``opacity`` exactly once with masks, filters, images and
+  ``<use>`` references
+* Don’t compound pattern and mask opacity when they are referenced twice
+* Treat invalid colors as opaque black instead of raising an exception, so a
+  bad color no longer aborts the whole document
+* Add ``COLOR-SUPPORT.md`` and a regenerable color comparison chart in
+  ``demo/``
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

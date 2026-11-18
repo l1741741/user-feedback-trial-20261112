@@ -1,0 +1,1268 @@
+{
+  "generator": "demo/color_comparison.py",
+  "chart": {
+    "path": "color_comparison.png",
+    "swatch_size": [
+      96,
+      64
+    ]
+  },
+  "groups": [
+    {
+      "title": "填充 · 等价写法（表现属性）",
+      "title_en": "Fill: equivalent spellings",
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "equivalent": true,
+      "matches_expected": true,
+      "cases": [
+        {
+          "label": "#f00（短十六进制）",
+          "label_en": "#f00 (short hex)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"#f00\"/></svg>"
+        },
+        {
+          "label": "#ff0000（长十六进制）",
+          "label_en": "#ff0000 (long hex)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"#ff0000\"/></svg>"
+        },
+        {
+          "label": "red（命名颜色）",
+          "label_en": "red (named color)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"red\"/></svg>"
+        },
+        {
+          "label": "rgb(255,0,0)（合法逗号写法）",
+          "label_en": "rgb(255,0,0) (commas)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"rgb(255,0,0)\"/></svg>"
+        },
+        {
+          "label": "rgb(255 0 0)（空格写法）",
+          "label_en": "rgb(255 0 0) (spaces)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"rgb(255 0 0)\"/></svg>"
+        },
+        {
+          "label": "rgb(100%, 0%, 0%)（百分比）",
+          "label_en": "rgb(100%, 0%, 0%) (percent)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"rgb(100%, 0%, 0%)\"/></svg>"
+        },
+        {
+          "label": "rgb(100% 0% 0%)（百分比+空格）",
+          "label_en": "rgb(100% 0% 0%) (percent, spaces)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"rgb(100% 0% 0%)\"/></svg>"
+        },
+        {
+          "label": "style=\"fill:rgb(255 0 0)\"（内联样式）",
+          "label_en": "style=\"fill:rgb(255 0 0)\" (inline style)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              255
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" style=\"fill:rgb(255 0 0)\"/></svg>"
+        }
+      ]
+    },
+    {
+      "title": "填充 · 颜色自带 alpha 的等价写法",
+      "title_en": "Fill: equivalent spellings with color alpha",
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "equivalent": true,
+      "matches_expected": true,
+      "cases": [
+        {
+          "label": "#ff000080（长十六进制 + alpha）",
+          "label_en": "#ff000080 (long hex + alpha)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"#ff000080\"/></svg>"
+        },
+        {
+          "label": "rgba(255,0,0,0.5)（逗号写法）",
+          "label_en": "rgba(255,0,0,0.5) (commas)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"rgba(255,0,0,0.5)\"/></svg>"
+        },
+        {
+          "label": "rgb(255 0 0 / 0.5)（斜线 alpha）",
+          "label_en": "rgb(255 0 0 / 0.5) (slash alpha)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"rgb(255 0 0 / 0.5)\"/></svg>"
+        },
+        {
+          "label": "rgb(255 0 0 / 50%)（斜线百分比）",
+          "label_en": "rgb(255 0 0 / 50%) (slash percent)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"rgb(255 0 0 / 50%)\"/></svg>"
+        },
+        {
+          "label": "rgb(100% 0% 0% / 50%)（百分比 + 斜线）",
+          "label_en": "rgb(100% 0% 0% / 50%) (percent + slash)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"rgb(100% 0% 0% / 50%)\"/></svg>"
+        },
+        {
+          "label": "style=\"fill:#ff000080\"（内联样式）",
+          "label_en": "style=\"fill:#ff000080\" (inline style)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" style=\"fill:#ff000080\"/></svg>"
+        }
+      ]
+    },
+    {
+      "title": "填充 · 短十六进制中的 alpha（#f008）",
+      "title_en": "Fill: alpha in short hex (#f008)",
+      "expected": [
+        255,
+        0,
+        0,
+        136
+      ],
+      "equivalent": true,
+      "matches_expected": true,
+      "cases": [
+        {
+          "label": "#f008（短十六进制 + alpha）",
+          "label_en": "#f008 (short hex + alpha)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              136
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              136
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"#f008\"/></svg>"
+        },
+        {
+          "label": "#ff000088（等价长写法）",
+          "label_en": "#ff000088 (equivalent long hex)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              136
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              136
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"#ff000088\"/></svg>"
+        },
+        {
+          "label": "rgb(255 0 0 / 53.333%)（等价百分比）",
+          "label_en": "rgb(255 0 0 / 53.333%) (equivalent percent)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              136
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              136
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"rgb(255 0 0 / 53.333%)\"/></svg>"
+        }
+      ]
+    },
+    {
+      "title": "描边 · 等价写法",
+      "title_en": "Stroke: equivalent spellings",
+      "expected": [
+        0,
+        128,
+        0,
+        255
+      ],
+      "equivalent": true,
+      "matches_expected": true,
+      "cases": [
+        {
+          "label": "#008000",
+          "label_en": "#008000",
+          "expected": [
+            [
+              0,
+              128,
+              0,
+              255
+            ]
+          ],
+          "pixels": [
+            [
+              0,
+              128,
+              0,
+              255
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><line x1=\"4\" y1=\"32\" x2=\"92\" y2=\"32\" stroke=\"#008000\" stroke-width=\"24\"/></svg>"
+        },
+        {
+          "label": "rgb(0,128,0)（逗号写法）",
+          "label_en": "rgb(0,128,0) (commas)",
+          "expected": [
+            [
+              0,
+              128,
+              0,
+              255
+            ]
+          ],
+          "pixels": [
+            [
+              0,
+              128,
+              0,
+              255
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><line x1=\"4\" y1=\"32\" x2=\"92\" y2=\"32\" stroke=\"rgb(0,128,0)\" stroke-width=\"24\"/></svg>"
+        },
+        {
+          "label": "rgb(0 128 0)（空格写法）",
+          "label_en": "rgb(0 128 0) (spaces)",
+          "expected": [
+            [
+              0,
+              128,
+              0,
+              255
+            ]
+          ],
+          "pixels": [
+            [
+              0,
+              128,
+              0,
+              255
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><line x1=\"4\" y1=\"32\" x2=\"92\" y2=\"32\" stroke=\"rgb(0 128 0)\" stroke-width=\"24\"/></svg>"
+        },
+        {
+          "label": "rgb(0% 50.1961% 0%)（百分比）",
+          "label_en": "rgb(0% 50.1961% 0%) (percent)",
+          "expected": [
+            [
+              0,
+              128,
+              0,
+              255
+            ]
+          ],
+          "pixels": [
+            [
+              0,
+              128,
+              0,
+              255
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><line x1=\"4\" y1=\"32\" x2=\"92\" y2=\"32\" stroke=\"rgb(0% 50.1961% 0%)\" stroke-width=\"24\"/></svg>"
+        }
+      ]
+    },
+    {
+      "title": "描边 · 颜色 alpha 与 stroke-opacity 组合（各乘一次）",
+      "title_en": "Stroke: color alpha x stroke-opacity, each applied once",
+      "expected": [
+        0,
+        128,
+        0,
+        128
+      ],
+      "equivalent": null,
+      "matches_expected": true,
+      "cases": [
+        {
+          "label": "stroke=\"#00800080\"",
+          "label_en": "stroke=\"#00800080\"",
+          "expected": [
+            [
+              0,
+              128,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              0,
+              128,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><line x1=\"4\" y1=\"32\" x2=\"92\" y2=\"32\" stroke=\"#00800080\" stroke-width=\"24\"/></svg>"
+        },
+        {
+          "label": "rgba(0,128,0,0.5)",
+          "label_en": "rgba(0,128,0,0.5)",
+          "expected": [
+            [
+              0,
+              128,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              0,
+              128,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><line x1=\"4\" y1=\"32\" x2=\"92\" y2=\"32\" stroke=\"rgba(0,128,0,0.5)\" stroke-width=\"24\"/></svg>"
+        },
+        {
+          "label": "rgb(0 128 0 / 50%)",
+          "label_en": "rgb(0 128 0 / 50%)",
+          "expected": [
+            [
+              0,
+              128,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              0,
+              128,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><line x1=\"4\" y1=\"32\" x2=\"92\" y2=\"32\" stroke=\"rgb(0 128 0 / 50%)\" stroke-width=\"24\"/></svg>"
+        },
+        {
+          "label": "stroke-opacity=\"0.5\"（无颜色 alpha）",
+          "label_en": "stroke-opacity=\"0.5\" (no color alpha)",
+          "expected": [
+            [
+              0,
+              128,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              0,
+              128,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><line x1=\"4\" y1=\"32\" x2=\"92\" y2=\"32\" stroke=\"#008000\" stroke-width=\"24\" stroke-opacity=\"0.5\"/></svg>"
+        },
+        {
+          "label": "颜色 alpha × stroke-opacity = 25%",
+          "label_en": "color alpha x stroke-opacity = 25%",
+          "expected": [
+            [
+              0,
+              128,
+              0,
+              64
+            ]
+          ],
+          "pixels": [
+            [
+              0,
+              128,
+              0,
+              64
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><line x1=\"4\" y1=\"32\" x2=\"92\" y2=\"32\" stroke=\"#00800080\" stroke-width=\"24\" stroke-opacity=\"0.5\"/></svg>"
+        }
+      ]
+    },
+    {
+      "title": "渐变 · 色标等价写法（色标 alpha 50%）",
+      "title_en": "Gradient: equivalent stop spellings (stop alpha 50%)",
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "equivalent": true,
+      "matches_expected": true,
+      "cases": [
+        {
+          "label": "stop-color=\"#ff000080\"",
+          "label_en": "stop-color=\"#ff000080\"",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"96\" y2=\"0\"><stop offset=\"0\" stop-color=\"#ff000080\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#ff000080\" stop-opacity=\"1\"/></linearGradient></defs><rect width=\"96\" height=\"64\" fill=\"url(#g)\"/></svg>"
+        },
+        {
+          "label": "stop-color=\"rgba(255,0,0,0.5)\"",
+          "label_en": "stop-color=\"rgba(255,0,0,0.5)\"",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"96\" y2=\"0\"><stop offset=\"0\" stop-color=\"rgba(255,0,0,0.5)\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"rgba(255,0,0,0.5)\" stop-opacity=\"1\"/></linearGradient></defs><rect width=\"96\" height=\"64\" fill=\"url(#g)\"/></svg>"
+        },
+        {
+          "label": "stop-color=\"rgb(255 0 0 / 50%)\"",
+          "label_en": "stop-color=\"rgb(255 0 0 / 50%)\"",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"96\" y2=\"0\"><stop offset=\"0\" stop-color=\"rgb(255 0 0 / 50%)\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"rgb(255 0 0 / 50%)\" stop-opacity=\"1\"/></linearGradient></defs><rect width=\"96\" height=\"64\" fill=\"url(#g)\"/></svg>"
+        },
+        {
+          "label": "style=\"stop-color:#ff000080\"（内联样式）",
+          "label_en": "style=\"stop-color:#ff000080\" (inline style)",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"96\" y2=\"0\"><stop offset=\"0\" style=\"stop-color:#ff000080;stop-opacity:1\"/><stop offset=\"1\" style=\"stop-color:#ff000080;stop-opacity:1\"/></linearGradient></defs><rect width=\"96\" height=\"64\" fill=\"url(#g)\"/></svg>"
+        }
+      ]
+    },
+    {
+      "title": "渐变 · stop-opacity 与色标 alpha 叠加",
+      "title_en": "Gradient: stop-opacity combined with stop alpha",
+      "expected": [
+        255,
+        0,
+        0,
+        64
+      ],
+      "equivalent": true,
+      "matches_expected": true,
+      "cases": [
+        {
+          "label": "色标 alpha 50% × stop-opacity 0.5",
+          "label_en": "stop alpha 50% x stop-opacity 0.5",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              64
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              64
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"96\" y2=\"0\"><stop offset=\"0\" stop-color=\"rgb(255 0 0 / 50%)\" stop-opacity=\"0.5\"/><stop offset=\"1\" stop-color=\"rgb(255 0 0 / 50%)\" stop-opacity=\"0.5\"/></linearGradient></defs><rect width=\"96\" height=\"64\" fill=\"url(#g)\"/></svg>"
+        },
+        {
+          "label": "不透明色标 × stop-opacity 25%",
+          "label_en": "opaque stop x stop-opacity 25%",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              64
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              64
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"96\" y2=\"0\"><stop offset=\"0\" stop-color=\"red\" stop-opacity=\"25%\"/><stop offset=\"1\" stop-color=\"red\" stop-opacity=\"25%\"/></linearGradient></defs><rect width=\"96\" height=\"64\" fill=\"url(#g)\"/></svg>"
+        }
+      ]
+    },
+    {
+      "title": "半透明重叠 · 单层/两层/三层",
+      "title_en": "Translucent overlap: single, double and triple layers",
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "equivalent": true,
+      "matches_expected": true,
+      "cases": [
+        {
+          "label": "单层 50% / 两层 75% / 三层 87.5% / 单层 50%",
+          "label_en": "single 50% / double 75% / triple 87.5% / single 50%",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ],
+            [
+              255,
+              0,
+              0,
+              192
+            ],
+            [
+              255,
+              0,
+              0,
+              224
+            ],
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ],
+            [
+              255,
+              0,
+              0,
+              192
+            ],
+            [
+              255,
+              0,
+              0,
+              224
+            ],
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"60\" height=\"64\" fill=\"rgba(255,0,0,0.5)\"/><rect x=\"20\" width=\"50\" height=\"64\" fill=\"rgb(255 0 0 / 50%)\"/><rect x=\"40\" width=\"50\" height=\"64\" fill=\"#ff000080\"/></svg>"
+        }
+      ]
+    },
+    {
+      "title": "透明度组合 · color alpha × fill-opacity × 组透明度",
+      "title_en": "Opacity: color alpha x fill-opacity x group opacity",
+      "expected": [
+        255,
+        0,
+        0,
+        64
+      ],
+      "equivalent": null,
+      "matches_expected": true,
+      "cases": [
+        {
+          "label": "color alpha 50% × fill-opacity 50%",
+          "label_en": "color alpha 50% x fill-opacity 50%",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              64
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              64
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" fill=\"rgba(255,0,0,0.5)\" fill-opacity=\"0.5\"/></svg>"
+        },
+        {
+          "label": "color alpha 50% × 组 opacity 50%",
+          "label_en": "color alpha 50% x group opacity 50%",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              64
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              64
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><g opacity=\"0.5\"><rect width=\"96\" height=\"64\" fill=\"rgb(255 0 0 / 50%)\"/></g></svg>"
+        },
+        {
+          "label": "fill-opacity 50% × 组 opacity 50%",
+          "label_en": "fill-opacity 50% x group opacity 50%",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              64
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              64
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><g opacity=\"0.5\"><rect width=\"96\" height=\"64\" fill=\"#ff0000\" fill-opacity=\"0.5\"/></g></svg>"
+        },
+        {
+          "label": "三者相乘 50% × 50% × 50% = 12.5%",
+          "label_en": "all three: 50% x 50% x 50% = 12.5%",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              32
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              32
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><g opacity=\"0.5\"><rect width=\"96\" height=\"64\" fill=\"#ff000080\" fill-opacity=\"0.5\"/></g></svg>"
+        }
+      ]
+    },
+    {
+      "title": "opacity 只应用一次（组/蒙版/滤镜/use）",
+      "title_en": "opacity applied exactly once (group/mask/filter/use)",
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "equivalent": true,
+      "matches_expected": true,
+      "cases": [
+        {
+          "label": "普通元素 opacity 50%",
+          "label_en": "plain element, opacity 50%",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"96\" height=\"64\" style=\"fill:#f00;opacity:0.5\"/></svg>"
+        },
+        {
+          "label": "带 mask 的元素 opacity 50%",
+          "label_en": "element with mask, opacity 50%",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><defs><mask id=\"m\"><rect width=\"96\" height=\"64\" fill=\"#fff\"/></mask></defs><rect width=\"96\" height=\"64\" fill=\"#f00\" opacity=\"0.5\" mask=\"url(#m)\"/></svg>"
+        },
+        {
+          "label": "带 filter 的元素 opacity 50%",
+          "label_en": "element with filter, opacity 50%",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><defs><filter id=\"f\"><feOffset dx=\"0\" dy=\"0\"/></filter></defs><rect width=\"96\" height=\"64\" fill=\"#f00\" opacity=\"0.5\" filter=\"url(#f)\"/></svg>"
+        },
+        {
+          "label": "<use> 引用 opacity 50%",
+          "label_en": "<use> reference, opacity 50%",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><defs><rect id=\"r\" width=\"96\" height=\"64\" fill=\"#f00\"/></defs><use href=\"#r\" opacity=\"0.5\"/></svg>"
+        }
+      ]
+    },
+    {
+      "title": "无效输入隔离 · 同文档其他图形不受影响",
+      "title_en": "Invalid input isolation: siblings keep rendering",
+      "expected": [
+        0,
+        255,
+        0,
+        255
+      ],
+      "equivalent": null,
+      "matches_expected": true,
+      "cases": [
+        {
+          "label": "无效 fill 回退黑色，两侧兄弟图形正常",
+          "label_en": "invalid fill falls back to black; siblings render",
+          "expected": [
+            [
+              0,
+              255,
+              0,
+              255
+            ],
+            [
+              0,
+              0,
+              0,
+              255
+            ],
+            [
+              0,
+              255,
+              0,
+              255
+            ]
+          ],
+          "pixels": [
+            [
+              0,
+              255,
+              0,
+              255
+            ],
+            [
+              0,
+              0,
+              0,
+              255
+            ],
+            [
+              0,
+              255,
+              0,
+              255
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><rect width=\"32\" height=\"64\" fill=\"#00ff00\"/><rect x=\"32\" width=\"32\" height=\"64\" style=\"fill:rgb(1,2)\"/><rect x=\"64\" width=\"32\" height=\"64\" fill=\"#00ff00\"/></svg>"
+        },
+        {
+          "label": "无效 opacity 回退为 1，右侧兄弟图形正常",
+          "label_en": "invalid opacity falls back to 1; sibling renders",
+          "expected": [
+            [
+              255,
+              0,
+              0,
+              255
+            ],
+            [
+              0,
+              255,
+              0,
+              255
+            ],
+            [
+              0,
+              255,
+              0,
+              255
+            ]
+          ],
+          "pixels": [
+            [
+              255,
+              0,
+              0,
+              255
+            ],
+            [
+              0,
+              255,
+              0,
+              255
+            ],
+            [
+              0,
+              255,
+              0,
+              255
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><g opacity=\"not-a-number\"><rect width=\"48\" height=\"64\" fill=\"#ff0000\" fill-opacity=\"nope\"/></g><rect x=\"48\" width=\"48\" height=\"64\" fill=\"#00ff00\"/></svg>"
+        }
+      ]
+    },
+    {
+      "title": "重复导出与重复引用",
+      "title_en": "Repeated export and repeated reference",
+      "expected": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "equivalent": true,
+      "matches_expected": true,
+      "cases": [
+        {
+          "label": "同一 pattern 两次引用，fill-opacity 均为 0.5",
+          "label_en": "same pattern referenced twice, fill-opacity 0.5",
+          "expected": [
+            [
+              0,
+              0,
+              255,
+              128
+            ],
+            [
+              0,
+              0,
+              255,
+              128
+            ]
+          ],
+          "pixels": [
+            [
+              0,
+              0,
+              255,
+              128
+            ],
+            [
+              0,
+              0,
+              255,
+              128
+            ]
+          ],
+          "matches_expected": true,
+          "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"96\" height=\"64\"><defs><pattern id=\"p\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\"><rect width=\"8\" height=\"8\" fill=\"#0000ff\"/></pattern></defs><rect width=\"40\" height=\"64\" fill=\"url(#p)\" fill-opacity=\"0.5\"/><rect x=\"56\" width=\"40\" height=\"64\" fill=\"url(#p)\" fill-opacity=\"0.5\"/></svg>"
+        }
+      ]
+    }
+  ],
+  "repeated_export": {
+    "identical_png": true,
+    "identical_pixels": true,
+    "pixels": [
+      [
+        255,
+        0,
+        0,
+        128
+      ],
+      [
+        0,
+        0,
+        255,
+        128
+      ],
+      [
+        255,
+        0,
+        0,
+        128
+      ]
+    ]
+  }
+}

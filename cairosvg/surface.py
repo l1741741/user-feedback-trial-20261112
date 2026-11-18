@@ -8,7 +8,7 @@ import io
 
 import cairocffi as cairo
 
-from .colors import color, negate_color
+from .colors import color, negate_color, parse_opacity
 from .defs import (
     apply_filter_after_painting, apply_filter_before_painting, clip_path,
     filter_, gradient_or_pattern, linear_gradient, marker, mask, paint_mask,
@@ -77,6 +77,10 @@ PATH_TAGS = frozenset((
 INVISIBLE_TAGS = frozenset((
     'clipPath', 'filter', 'linearGradient', 'marker', 'mask', 'pattern',
     'radialGradient', 'symbol'))
+
+# Tags drawn by a handler that paints through a sub-surface; their
+# ``opacity`` has to be applied to the resulting group by ``draw``.
+GROUPED_TAGS = frozenset(('image', 'use'))
 
 
 class Surface(object):
@@ -322,12 +326,15 @@ class Surface(object):
         # Find and prepare opacity, masks and filters
         mask = parse_url(node.get('mask')).fragment
         filter_ = parse_url(node.get('filter')).fragment
-        opacity = float(node.get('opacity', 1))
+        opacity = parse_opacity(node.get('opacity'))
 
         if filter_:
             prepare_filter(self, node, filter_)
 
-        if filter_ or mask or (opacity < 1 and node.children):
+        grouped = bool(
+            filter_ or mask or
+            (opacity < 1 and (node.children or node.tag in GROUPED_TAGS)))
+        if grouped:
             self.context.push_group()
 
         # Move to (node.x, node.y)
@@ -411,10 +418,12 @@ class Surface(object):
                 # Error in point parsing, do nothing
                 pass
 
-        # Get stroke and fill opacity
-        stroke_opacity = float(node.get('stroke-opacity', 1))
-        fill_opacity = float(node.get('fill-opacity', 1))
-        if opacity < 1 and not node.children:
+        # Get stroke and fill opacity. The element's own ``opacity`` is
+        # applied once, either multiplied here for ungrouped shapes or as the
+        # group alpha for elements rendered in a pushed group, never both.
+        stroke_opacity = parse_opacity(node.get('stroke-opacity'))
+        fill_opacity = parse_opacity(node.get('fill-opacity'))
+        if opacity < 1 and not grouped:
             stroke_opacity *= opacity
             fill_opacity *= opacity
 
@@ -477,11 +486,13 @@ class Surface(object):
                 self.draw(child)
 
         # Apply filter, mask and opacity
-        if filter_ or mask or (opacity < 1 and node.children):
+        if grouped:
             self.context.pop_group_to_source()
             if filter_:
                 apply_filter_before_painting(self, node, filter_)
             if mask in self.masks:
+                # The mask itself is drawn with the element opacity applied,
+                # so the group must not be painted with it a second time.
                 paint_mask(self, node, mask, opacity)
             else:
                 self.context.paint_with_alpha(opacity)

@@ -206,9 +206,10 @@ class Node(dict):
                 for name, value in declarations:
                     self[name] = value.strip()
 
-        # Replace currentColor by a real color value
+        # Replace currentColor by a real color value. The keyword is
+        # case-insensitive, like every other color keyword.
         for attribute in COLOR_ATTRIBUTES:
-            if self.get(attribute) == 'currentColor':
+            if (self.get(attribute) or '').lower() == 'currentcolor':
                 self[attribute] = self.get('color', 'black')
 
         # Replace inherit by the parent value

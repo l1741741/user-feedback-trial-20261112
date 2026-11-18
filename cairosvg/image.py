@@ -106,14 +106,14 @@ def image(surface, node):
         surface.context.rectangle(x, y, width, height)
         surface.context.clip()
 
-    # Paint raster image
-    opacity = float(node.get('opacity', 1))
+    # Paint raster image. The element ``opacity`` is applied by the caller on
+    # the whole group, so it is not applied here.
     surface.context.save()
     surface.context.translate(x, y)
     surface.context.scale(scale_x, scale_y)
     surface.context.translate(translate_x, translate_y)
     surface.context.set_source(image_surface.pattern)
-    surface.context.paint_with_alpha(opacity)
+    surface.context.paint()
     surface.context.restore()
 
 

@@ -187,16 +187,92 @@ COLORS = {
     'transparent': (0, 0, 0, 0),
 }
 
-RGBA = re.compile(r'rgba\((.+?)\)')
-RGB = re.compile(r'rgb\((.+?)\)')
-HEX_RRGGBB = re.compile('#[0-9a-f]{6}')
-HEX_RGB = re.compile('#[0-9a-f]{3}')
+NUMBER = r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?'
+# A single RGB channel or alpha value, with an optional percent sign.
+COMPONENT = re.compile(rf'({NUMBER})(%?)')
+FUNCTION = re.compile(r'(?:rgba?)\((.*)\)', re.DOTALL)
+HEX = re.compile(r'#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})')
+
+INVALID_COLOR = (0, 0, 0, 1)
+
+
+def _clamp(value, minimum=0, maximum=1):
+    """Clamp ``value`` into the ``[minimum, maximum]`` range."""
+    return max(minimum, min(maximum, value))
+
+
+def _parse_component(string):
+    """Return ``(number, is_percentage)`` for an RGB or alpha component."""
+    match = COMPONENT.fullmatch(string.strip())
+    if match is None:
+        raise ValueError(f'Invalid color component: {string!r}')
+    return float(match.group(1)), bool(match.group(2))
+
+
+def _parse_function(body):
+    """Parse the body of an ``rgb()`` or ``rgba()`` color function.
+
+    Both the legacy comma-separated syntax (``rgb(255, 0, 0)``,
+    ``rgba(255, 0, 0, .5)``) and the whitespace syntax with an optional
+    slash-separated alpha value (``rgb(255 0 0 / 50%)``) are supported.
+    The legacy syntax requires channels to be all numbers or all
+    percentages; the whitespace syntax allows mixing both per channel.
+
+    """
+    alpha_string = None
+    legacy = ',' in body
+    if legacy:
+        # Legacy comma-separated syntax, with spaces allowed around commas.
+        if '/' in body:
+            raise ValueError('Invalid color: mixed separators')
+        components = [component.strip() for component in body.split(',')]
+        if len(components) not in (3, 4):
+            raise ValueError('Invalid number of color components')
+        if len(components) == 4:
+            alpha_string = components.pop()
+    else:
+        # Modern whitespace-separated syntax, with optional "/ alpha".
+        components_string, slash, alpha = body.partition('/')
+        if slash:
+            if '/' in alpha:
+                raise ValueError('Invalid color: too many slashes')
+            alpha = alpha.strip()
+            if not alpha or len(alpha.split()) != 1:
+                raise ValueError('Invalid alpha component')
+            alpha_string = alpha
+        components = components_string.split()
+        if len(components) != 3:
+            raise ValueError('Invalid number of color components')
+
+    parsed = [_parse_component(component) for component in components]
+    if legacy and len({percentage for _, percentage in parsed}) != 1:
+        raise ValueError('Invalid color: mixed numbers and percentages')
+    channels = [
+        _clamp(value / 100 if percentage else value / 255)
+        for value, percentage in parsed]
+    if alpha_string is None:
+        alpha = 1
+    else:
+        alpha, percentage = _parse_component(alpha_string)
+        alpha = _clamp(alpha / 100 if percentage else alpha)
+    return (*channels, alpha)
 
 
 def color(string, opacity=1):
     """Replace ``string`` representing a color by a RGBA tuple.
 
-    See http://www.w3.org/TR/SVG/types.html#DataTypeColor
+    Supported syntaxes:
+
+    - named colors and ``transparent``/``none``;
+    - ``#RGB``, ``#RGBA``, ``#RRGGBB`` and ``#RRGGBBAA`` hexadecimal colors;
+    - ``rgb()``/``rgba()`` with comma-separated or whitespace-separated
+      channels, percentages, and an optional slash-separated alpha value.
+
+    Channel values are clamped to their valid ranges, as in CSS. Invalid
+    colors fall back to opaque black, the historical CairoSVG behavior, and
+    never raise an exception so that one bad color cannot abort a document.
+
+    See https://www.w3.org/TR/css-color-3/#colorunits
 
     """
     if not string:
@@ -206,37 +282,48 @@ def color(string, opacity=1):
 
     if string in COLORS:
         r, g, b, a = COLORS[string]
-        return (r, g, b, a * opacity)
+        return (r, g, b, _clamp(a * opacity))
 
-    match = RGBA.search(string)
+    match = HEX.fullmatch(string)
     if match:
-        r, g, b, a = tuple(
-            float(i.strip(' %')) / 100 if '%' in i else float(i) / 255
-            for i in match.group(1).strip().split(','))
-        return (r, g, b, a * 255 * opacity)
+        digits = match.group(1)
+        if len(digits) in (3, 4):
+            values = [int(value, 16) / 15 for value in digits]
+        else:
+            values = [
+                int(digits[index:index + 2], 16) / 255
+                for index in range(0, len(digits), 2)]
+        r, g, b = values[:3]
+        a = values[3] if len(values) == 4 else 1
+        return (r, g, b, _clamp(a * opacity))
 
-    match = RGB.search(string)
+    match = FUNCTION.fullmatch(string)
     if match:
-        r, g, b = tuple(
-            float(i.strip(' %')) / 100 if '%' in i else float(i) / 255
-            for i in match.group(1).strip().split(','))
-        return (r, g, b, opacity)
+        try:
+            r, g, b, a = _parse_function(match.group(1))
+        except ValueError:
+            return INVALID_COLOR
+        return (r, g, b, _clamp(a * opacity))
 
-    match = HEX_RRGGBB.search(string)
-    if match:
-        plain_color = tuple(
-            int(value, 16) / 255 for value in (
-                string[1:3], string[3:5], string[5:7]))
-        return plain_color + (opacity,)
+    return INVALID_COLOR
 
-    match = HEX_RGB.search(string)
-    if match:
-        plain_color = tuple(
-            int(value, 16) / 15 for value in (
-                string[1], string[2], string[3]))
-        return plain_color + (opacity,)
 
-    return (0, 0, 0, 1)
+def parse_opacity(value, default=1):
+    """Parse an opacity attribute, as a number or a percentage.
+
+    Invalid values fall back to ``default`` (the CSS initial value) instead of
+    aborting the whole document.
+
+    """
+    if value is None:
+        return default
+    try:
+        number, percentage = _parse_component(str(value))
+    except (TypeError, ValueError):
+        return default
+    if percentage:
+        number /= 100
+    return _clamp(number)
 
 
 def negate_color(rgba_tuple):

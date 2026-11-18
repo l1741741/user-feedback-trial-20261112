@@ -6,6 +6,7 @@ This module handles clips, gradients, masks, patterns and external nodes.
 """
 
 from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
+from .colors import parse_opacity
 from .features import match_features
 from .helpers import paint, size, transform
 from .parser import Tree
@@ -205,7 +206,7 @@ def draw_gradient(surface, node, name, opacity):
         offset = max(offset, size(surface, child.get('offset'), 1))
         stop_color = surface.map_color(
             child.get('stop-color', 'black'),
-            float(child.get('stop-opacity', 1)) * opacity)
+            parse_opacity(child.get('stop-opacity')) * opacity)
         gradient_pattern.add_color_stop_rgba(offset, *stop_color)
 
     # Set spread method for gradient outside target bounds
@@ -219,9 +220,24 @@ def draw_gradient(surface, node, name, opacity):
 def draw_pattern(surface, node, name, opacity):
     """Draw a pattern image."""
     pattern_node = surface.patterns[name]
-    pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
+    # Compose the pattern opacity for this reference without mutating the
+    # stored definition, so that a second reference does not compound it.
+    old_opacity = pattern_node.get('opacity')
+    pattern_node['opacity'] = parse_opacity(old_opacity) * opacity
     pattern_node.tag = 'g'
     transform(surface, pattern_node.get('patternTransform'))
+
+    try:
+        return _draw_pattern(surface, node, pattern_node)
+    finally:
+        if old_opacity is None:
+            pattern_node.pop('opacity', None)
+        else:
+            pattern_node['opacity'] = old_opacity
+
+
+def _draw_pattern(surface, node, pattern_node):
+    """Create the Cairo pattern for ``pattern_node`` and set it as source."""
 
     if pattern_node.get('viewBox'):
         if not (size(surface, pattern_node.get('width', 1), 1) and
@@ -327,7 +343,7 @@ def apply_filter_after_painting(surface, node, name):
                 rect(surface, dict(x=x, y=y, width=width, height=height))
                 surface.context.set_source_rgba(*surface.map_color(
                     paint(child.get('flood-color'))[1],
-                    float(child.get('flood-opacity', 1))))
+                    parse_opacity(child.get('flood-opacity'))))
                 surface.context.fill()
                 surface.context.restore()
 
