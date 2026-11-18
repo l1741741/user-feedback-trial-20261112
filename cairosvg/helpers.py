@@ -3,8 +3,9 @@ Surface helpers.
 
 """
 
+import math
 import re
-from math import atan2, cos, hypot, radians, sin, tan
+from math import atan2, cos, hypot, isfinite, radians, sin, tan
 
 from .surface import cairo
 from .url import parse_url
@@ -79,6 +80,68 @@ def normalize(string):
     string = re.sub('[ \n\r\t,]+', ' ', string)
     string = re.sub(r'(\.[0-9-]+)(?=\.)', r'\1 ', string)
     return string.strip()
+
+
+def parse_dash_array(surface, value):
+    """Parse an SVG ``stroke-dasharray`` value.
+
+    Return a tuple ``(dashes, dashed, stroked)`` describing how the node has
+    to be stroked:
+
+    * an absent value or ``none`` means no dashing, so the caller paints a
+      solid stroke: ``([], False, True)``;
+    * each length is resolved through :func:`size`, which gives percentages,
+      em/ex/ch and physical units one stable, surface-dependent meaning. A
+      length that cannot be resolved becomes ``0`` instead of aborting the
+      whole render;
+    * a negative or non-finite length makes the declaration invalid in SVG, so
+      the property is ignored and a solid stroke is painted;
+    * an odd number of entries is doubled so that alternating on/off lengths
+      keep the meaning they have in the SVG specification;
+    * zero lengths are kept (they simply contribute no ink or no gap), but an
+      array whose entries are all zero describes an invisible stroke and is
+      reported with ``stroked=False``.
+
+    The function never feeds a value Cairo would reject, keeping the drawing
+    context usable for the following nodes.
+
+    """
+    if not value or value.strip().lower() == 'none':
+        return [], False, True
+
+    tokens = normalize(value).split()
+    dashes = []
+    for token in tokens:
+        length = size(surface, token)
+        if not isfinite(length) or length < 0:
+            # Invalid dash array: ignore the property and stroke solid.
+            return [], False, True
+        dashes.append(length)
+
+    if not dashes:
+        return [], False, True
+
+    if len(dashes) % 2:
+        # SVG repeats an odd list to form a full on/off cycle.
+        dashes *= 2
+
+    if not math.fsum(dashes):
+        # Every length is zero: nothing of the stroke can be painted.
+        return dashes, False, False
+
+    return dashes, True, True
+
+
+def parse_dash_offset(surface, value):
+    """Parse an SVG ``stroke-dashoffset`` value into a finite user length.
+
+    Negative offsets are valid: Cairo shifts the pattern start backwards,
+    which is equivalent to starting partway through the first pattern cycle.
+    A missing or non-finite offset resolves to ``0``.
+
+    """
+    offset = size(surface, value)
+    return offset if isfinite(offset) else 0
 
 
 def point(surface, string):

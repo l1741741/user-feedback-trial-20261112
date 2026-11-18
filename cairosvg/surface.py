@@ -14,8 +14,8 @@ from .defs import (
     filter_, gradient_or_pattern, linear_gradient, marker, mask, paint_mask,
     parse_all_defs, pattern, prepare_filter, radial_gradient, use)
 from .helpers import (
-    UNITS, PointError, clip_rect, node_format, normalize, paint,
-    preserve_ratio, size, transform)
+    UNITS, PointError, clip_rect, node_format, paint,
+    parse_dash_array, parse_dash_offset, preserve_ratio, size, transform)
 from .image import image, invert_image
 from .parser import Tree
 from .path import draw_markers, path
@@ -348,12 +348,15 @@ class Surface(object):
         if join_cap == 'bevel':
             self.context.set_line_join(cairo.LINE_JOIN_BEVEL)
 
-        dash_array = normalize(node.get('stroke-dasharray', '')).split()
-        if dash_array:
-            dashes = [size(self, dash) for dash in dash_array]
-            if sum(dashes):
-                offset = size(self, node.get('stroke-dashoffset'))
-                self.context.set_dash(dashes, offset)
+        dashes, node.dashed, node.stroked = parse_dash_array(
+            self, node.get('stroke-dasharray', ''))
+        if node.dashed:
+            offset = parse_dash_offset(self, node.get('stroke-dashoffset'))
+            self.context.set_dash(dashes, offset)
+        else:
+            # Reset explicitly so an inherited pattern cannot survive on the
+            # context and leak onto a later node.
+            self.context.set_dash([])
 
         miter_limit = float(node.get('stroke-miterlimit', 4))
         self.context.set_miter_limit(miter_limit)
@@ -454,17 +457,23 @@ class Surface(object):
                 self.context.fill_preserve()
             self.context.restore()
 
-            # Stroke
-            self.context.save()
-            self.context.set_line_width(
-                size(self, node.get('stroke-width', '1')))
-            paint_source, paint_color = paint(node.get('stroke'))
-            if not gradient_or_pattern(
-                    self, node, paint_source, stroke_opacity):
-                self.context.set_source_rgba(
-                    *self.map_color(paint_color, stroke_opacity))
-            self.context.stroke()
-            self.context.restore()
+            # Stroke (skipped when an all-zero dash array disables it)
+            if getattr(node, 'stroked', True):
+                self.context.save()
+                self.context.set_line_width(
+                    size(self, node.get('stroke-width', '1')))
+                paint_source, paint_color = paint(node.get('stroke'))
+                if not gradient_or_pattern(
+                        self, node, paint_source, stroke_opacity):
+                    self.context.set_source_rgba(
+                        *self.map_color(paint_color, stroke_opacity))
+                self.context.stroke()
+                self.context.restore()
+            else:
+                # fill_preserve() kept the current path on purpose for the
+                # stroke. With the stroke disabled, drop it explicitly so the
+                # path cannot be stroked again by a later node.
+                self.context.new_path()
         elif not visible:
             self.context.new_path()
 

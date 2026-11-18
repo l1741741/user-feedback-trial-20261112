@@ -3,6 +3,18 @@
 ======
 
 
+Unreleased
+==========
+
+* Hardened ``stroke-dasharray`` and ``stroke-dashoffset`` handling:
+  odd-length dash lists are doubled following the SVG specification, negative
+  and non-finite entries fall back to a solid stroke instead of aborting the
+  render, an all-zero array disables the stroke, and a disabled stroke no
+  longer leaves its path on the context for a later node to paint.
+  Percentages, font and physical units, scientific notation and negative
+  offsets resolve to stable, reproducible user-unit lengths.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 
