@@ -1,0 +1,21 @@
+{
+  "task_id": "rerun15-20261118-12593-fill-rule",
+  "final_sha": "f8e525f8a44f5420bae8cd345a0fe0eaf6d6c189",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-12593-fill-rule/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12593-fill-rule/independent-validation.xml",
+    "cairosvg/test_api.py"
+  ],
+  "exit_code": 0,
+  "tests": 22,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T03:01:58.272892+08:00"
+}

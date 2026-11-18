@@ -1,0 +1,104 @@
+<!doctype html><meta charset="utf-8"><title>裁剪规则与子元素并集</title><style>body{font:20px system-ui;padding:20px}img{width:600px;border:1px solid #888;background:white;image-rendering:pixelated}</style><h1>分别计算clip-rule并合并子元素区域</h1><h2>fill-not-clip</h2><p>SVG输入</p><img src="fill-not-clip.svg"><p>本次PNG</p><img src="fill-not-clip.png"><h2>duplicate-evenodd</h2><p>SVG输入</p><img src="duplicate-evenodd.svg"><p>本次PNG</p><img src="duplicate-evenodd.png"><h2>mixed-rules</h2><p>SVG输入</p><img src="mixed-rules.svg"><p>本次PNG</p><img src="mixed-rules.png"><pre>{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12593-fill-rule/local-frozen-source/cairosvg/__init__.py",
+  "tests": 6,
+  "passed": 6,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "fill-not-clip-60-60",
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "fill-not-clip-20-20",
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "duplicate-evenodd-50-50",
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "duplicate-evenodd-90-20",
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "mixed-rules-60-60",
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "mixed-rules-160-50",
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}</pre>
