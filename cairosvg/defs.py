@@ -219,51 +219,108 @@ def draw_gradient(surface, node, name, opacity):
 def draw_pattern(surface, node, name, opacity):
     """Draw a pattern image."""
     pattern_node = surface.patterns[name]
-    pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
-    pattern_node.tag = 'g'
-    transform(surface, pattern_node.get('patternTransform'))
 
-    if pattern_node.get('viewBox'):
-        if not (size(surface, pattern_node.get('width', 1), 1) and
-                size(surface, pattern_node.get('height', 1), 1)):
-            return False
-    else:
-        if not (size(surface, pattern_node.get('width', 0), 1) and
-                size(surface, pattern_node.get('height', 0), 1)):
-            return False
-
-    if pattern_node.get('patternUnits') == 'userSpaceOnUse':
-        x = size(surface, pattern_node.get('x'), 'x')
-        y = size(surface, pattern_node.get('y'), 'y')
-        pattern_width = size(surface, pattern_node.get('width', 0), 1)
-        pattern_height = size(surface, pattern_node.get('height', 0), 1)
-    else:
-        _, _, width, height = calculate_bounding_box(surface, node)
-        x = size(surface, pattern_node.get('x'), 1) * width
-        y = size(surface, pattern_node.get('y'), 1) * height
-        pattern_width = (
-            size(surface, pattern_node.pop('width', '1'), 1) * width)
-        pattern_height = (
-            size(surface, pattern_node.pop('height', '1'), 1) * height)
-        if 'viewBox' not in pattern_node:
-            pattern_node['width'] = pattern_width
-            pattern_node['height'] = pattern_height
-            if pattern_node.get('patternContentUnits') == 'objectBoundingBox':
-                pattern_node['transform'] = f'scale({width}, {height})'
-
-    # Fail if pattern has an invalid size
-    if pattern_width == 0.0 or pattern_height == 0.0:
+    # A pattern without content is not a valid paint server: let the caller
+    # fall back without touching the current source.
+    if not pattern_node.children:
         return False
 
-    from .surface import SVGSurface  # circular import
-    pattern_surface = SVGSurface(pattern_node, None, surface.dpi, surface)
-    pattern_pattern = cairo.SurfacePattern(pattern_surface.cairo)
-    pattern_pattern.set_extend(cairo.EXTEND_REPEAT)
-    pattern_pattern.set_matrix(cairo.Matrix(
-        pattern_surface.width / pattern_width, 0, 0,
-        pattern_surface.height / pattern_height, -x, -y))
-    surface.context.set_source(pattern_pattern)
-    return True
+    # The pattern node is shared by all the elements referencing it. Every
+    # attribute modified below to render the tile is restored before
+    # leaving, so that a reference can never alter the next one: no
+    # accumulated opacity, no consumed width/height, no leftover transform.
+    saved_tag = pattern_node.tag
+    saved_attributes = {
+        key: pattern_node.get(key)
+        for key in ('opacity', 'transform', 'width', 'height')}
+
+    try:
+        pattern_node['opacity'] = (
+            float(pattern_node.get('opacity', 1)) * opacity)
+        pattern_node.tag = 'g'
+
+        viewbox = pattern_node.get('viewBox')
+        if viewbox:
+            if not (size(surface, pattern_node.get('width', 1), 1) and
+                    size(surface, pattern_node.get('height', 1), 1)):
+                return False
+        else:
+            if not (size(surface, pattern_node.get('width', 0), 1) and
+                    size(surface, pattern_node.get('height', 0), 1)):
+                return False
+
+        # Tile geometry, in the user space of the referencing element
+        if pattern_node.get('patternUnits') == 'userSpaceOnUse':
+            # The tile is defined in user space: its geometry doesn't
+            # depend on the referencing element's bounding box.
+            x = size(surface, pattern_node.get('x'), 'x')
+            y = size(surface, pattern_node.get('y'), 'y')
+            pattern_width = size(surface, pattern_node.get('width'), 'x')
+            pattern_height = size(surface, pattern_node.get('height'), 'y')
+        else:
+            # The tile is defined as fractions of the referencing
+            # element's bounding box: it follows the element's position
+            # and size.
+            bounding_box = calculate_bounding_box(surface, node)
+            if not is_non_empty_bounding_box(bounding_box):
+                return False
+            box_x, box_y, box_width, box_height = bounding_box
+            x = box_x + size(surface, pattern_node.get('x'), 1) * box_width
+            y = box_y + size(surface, pattern_node.get('y'), 1) * box_height
+            pattern_width = (
+                size(surface, pattern_node.get('width', '1'), 1) * box_width)
+            pattern_height = (
+                size(surface, pattern_node.get('height', '1'), 1)
+                * box_height)
+
+        # Fail if pattern has an invalid size
+        if pattern_width <= 0 or pattern_height <= 0:
+            return False
+
+        if not viewbox:
+            # The content is painted in the coordinate system defined by
+            # patternContentUnits. Translate it so that the tile window
+            # starts at the tile surface's origin: tiles with an offset
+            # then keep a continuous, stable phase.
+            if (pattern_node.get('patternContentUnits')
+                    == 'objectBoundingBox'):
+                bounding_box = calculate_bounding_box(surface, node)
+                if not is_non_empty_bounding_box(bounding_box):
+                    return False
+                box_x, box_y, box_width, box_height = bounding_box
+                pattern_node['transform'] = (
+                    f'translate({box_x - x} {box_y - y}) '
+                    f'scale({box_width} {box_height})')
+            else:
+                pattern_node['transform'] = f'translate({-x} {-y})'
+
+        # Give the tile surface exactly the tile size, so that the pattern
+        # matrix only has to move the tile origin into place
+        pattern_node['width'] = pattern_width
+        pattern_node['height'] = pattern_height
+
+        from .surface import SVGSurface  # circular import
+        pattern_surface = SVGSurface(pattern_node, None, surface.dpi, surface)
+        pattern_pattern = cairo.SurfacePattern(pattern_surface.cairo)
+        pattern_pattern.set_extend(cairo.EXTEND_REPEAT)
+        scale_x = pattern_surface.width / pattern_width
+        scale_y = pattern_surface.height / pattern_height
+        pattern_pattern.set_matrix(cairo.Matrix(
+            scale_x, 0, 0, scale_y, -x * scale_x, -y * scale_y))
+        # Apply the pattern transform to the pattern matrix, never to the
+        # context, so that the tile grid keeps a stable origin and so that
+        # an invalid pattern cannot leak a transform into later drawings
+        transform(
+            surface, pattern_node.get('patternTransform'), pattern_pattern)
+        surface.context.set_source(pattern_pattern)
+        return True
+    finally:
+        pattern_node.tag = saved_tag
+        for key, value in saved_attributes.items():
+            if value is None:
+                pattern_node.pop(key, None)
+            else:
+                pattern_node[key] = value
 
 
 def prepare_filter(surface, node, name):

@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Demo: pattern tiling across outlines of different sizes.
+     The texture is a directional two-color motif (teal arrow + orange bar)
+     with transparent padding, so period, phase and transparent regions are
+     easy to check by eye. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="420"
+     viewBox="0 0 560 420">
+  <defs>
+    <!-- userSpaceOnUse: 16x16 tile, motif in the top-left 10x10,
+         transparent padding on the right and bottom -->
+    <pattern id="arrows" patternUnits="userSpaceOnUse"
+             x="0" y="0" width="16" height="16">
+      <polygon points="1,3 7,3 7,1 12,5.5 7,10 7,8 1,8" fill="#0f766e"/>
+      <rect x="13" y="2" width="2" height="10" fill="#ea580c"/>
+    </pattern>
+
+    <!-- Same motif shifted by x/y: tiling must stay continuous -->
+    <pattern id="arrows-offset" patternUnits="userSpaceOnUse"
+             x="5" y="7" width="16" height="16">
+      <polygon points="6,10 12,10 12,8 17,12.5 12,17 12,15 6,15"
+               fill="#0f766e"/>
+      <rect x="18" y="9" width="2" height="10" fill="#ea580c"/>
+    </pattern>
+
+    <!-- Rotated grid: the tile origin must stay anchored at (0, 0) -->
+    <pattern id="arrows-rotated" patternUnits="userSpaceOnUse"
+             x="0" y="0" width="16" height="16"
+             patternTransform="rotate(30)">
+      <polygon points="1,3 7,3 7,1 12,5.5 7,10 7,8 1,8" fill="#0f766e"/>
+      <rect x="13" y="2" width="2" height="10" fill="#ea580c"/>
+    </pattern>
+
+    <!-- objectBoundingBox: tile and content follow each shape's
+         bounding box (content coordinates are bbox fractions, drawn
+         within the first tile's fraction range 0..0.25) -->
+    <pattern id="quarters" patternUnits="objectBoundingBox"
+             patternContentUnits="objectBoundingBox"
+             width="0.25" height="0.25">
+      <rect x="0" y="0" width="0.1" height="0.1" fill="#0f766e"/>
+      <rect x="0.12" y="0.12" width="0.08" height="0.08" fill="#ea580c"/>
+    </pattern>
+
+    <!-- viewBox content: 4x4 viewBox scaled into a 16x16 tile -->
+    <pattern id="scaled" patternUnits="userSpaceOnUse"
+             width="16" height="16" viewBox="0 0 4 4">
+      <rect x="0" y="0" width="2" height="4" fill="#0f766e"/>
+      <rect x="2" y="0" width="1" height="4" fill="#ea580c"/>
+    </pattern>
+  </defs>
+
+  <rect x="0" y="0" width="560" height="420" fill="#fafafa"/>
+
+  <!-- Same user-space pattern on outlines of different sizes and
+       positions: tile size and phase must be identical everywhere -->
+  <rect x="16" y="16" width="240" height="120" fill="url(#arrows)"/>
+  <rect x="300" y="24" width="173" height="88" fill="url(#arrows)"/>
+  <circle cx="120" cy="240" r="70" fill="url(#arrows)"/>
+
+  <!-- Offset tile: continuous tiling, stable phase -->
+  <rect x="300" y="140" width="220" height="90" fill="url(#arrows-offset)"/>
+
+  <!-- Rotated tile grid -->
+  <rect x="16" y="160" width="150" height="150" fill="url(#arrows-rotated)"/>
+
+  <!-- Bounding-box pattern on two different outlines -->
+  <rect x="200" y="180" width="80" height="60" fill="url(#quarters)"/>
+  <rect x="200" y="260" width="140" height="40" fill="url(#quarters)"/>
+
+  <!-- viewBox-scaled content -->
+  <rect x="360" y="260" width="160" height="60" fill="url(#scaled)"/>
+
+  <!-- Reused with different fill-opacity: opacity must not accumulate.
+       Left: fill-opacity 0.4. Middle: full opacity (must be fully opaque,
+       not 0.4). Right: 0.4 again (must not become 0.16). -->
+  <rect x="16" y="340" width="160" height="60"
+        fill="url(#arrows)" fill-opacity="0.4"/>
+  <rect x="200" y="340" width="160" height="60" fill="url(#arrows)"/>
+  <rect x="384" y="340" width="160" height="60"
+        fill="url(#arrows)" fill-opacity="0.4"/>
+</svg>
