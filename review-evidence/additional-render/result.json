@@ -1,0 +1,44 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-10358-use-instance-state/local-frozen-source/cairosvg/__init__.py",
+  "tests": 9,
+  "passed": 9,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "reverse-order-independent",
+      "passed": true
+    },
+    {
+      "name": "red-instance-matches-alone",
+      "passed": true
+    },
+    {
+      "name": "red-pixel",
+      "passed": true
+    },
+    {
+      "name": "blue-instance-matches-alone",
+      "passed": true
+    },
+    {
+      "name": "blue-pixel",
+      "passed": true
+    },
+    {
+      "name": "cyclic-reference-does-not-block-valid-instances",
+      "passed": true
+    },
+    {
+      "name": "missing-reference-does-not-block-valid",
+      "passed": true
+    },
+    {
+      "name": "same-tree-repeat-identical",
+      "passed": true
+    },
+    {
+      "name": "input-xml-attributes-unchanged",
+      "passed": true
+    }
+  ]
+}

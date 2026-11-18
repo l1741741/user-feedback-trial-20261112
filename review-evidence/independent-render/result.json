@@ -1,0 +1,38 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-10358-use-instance-state/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 3,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "red-instance",
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "blue-partial-size",
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "sibling",
+      "actual": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+<!doctype html><meta charset="utf-8"><title>复用实例隔离</title><style>body{font:20px system-ui;margin:24px}img{width:650px;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>独立实例、引用顺序与错误引用</h1><h2>instances</h2><p>SVG输入</p><img src="instances.svg"><p>当次PNG</p><img src="instances.png"><h2>reverse-order</h2><p>SVG输入</p><img src="reverse-order.svg"><p>当次PNG</p><img src="reverse-order.png"><h2>red-alone</h2><p>SVG输入</p><img src="red-alone.svg"><p>当次PNG</p><img src="red-alone.png"><h2>blue-alone</h2><p>SVG输入</p><img src="blue-alone.svg"><p>当次PNG</p><img src="blue-alone.png"><h2>loop-before-valid</h2><p>SVG输入</p><img src="loop-before-valid.svg"><p>当次PNG</p><img src="loop-before-valid.png"><h2>missing-before-valid</h2><p>SVG输入</p><img src="missing-before-valid.svg"><p>当次PNG</p><img src="missing-before-valid.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-10358-use-instance-state/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 9,
+  &quot;passed&quot;: 9,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;reverse-order-independent&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;red-instance-matches-alone&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;red-pixel&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;blue-instance-matches-alone&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;blue-pixel&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;cyclic-reference-does-not-block-valid-instances&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;missing-reference-does-not-block-valid&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;same-tree-repeat-identical&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;input-xml-attributes-unchanged&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>
