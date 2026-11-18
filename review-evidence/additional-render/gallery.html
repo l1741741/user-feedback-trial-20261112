@@ -1,0 +1,37 @@
+<!doctype html><meta charset="utf-8"><title>文本块锚点核验</title><style>body{font:20px system-ui;margin:24px}img{width:900px;max-width:100%;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>文本分块、锚点与位移的等价参考</h1><h2>start-spans</h2><p>SVG输入</p><img src="start-spans.svg"><p>当次PNG</p><img src="start-spans.png"><h2>start-flat</h2><p>SVG输入</p><img src="start-flat.svg"><p>当次PNG</p><img src="start-flat.png"><h2>middle-spans</h2><p>SVG输入</p><img src="middle-spans.svg"><p>当次PNG</p><img src="middle-spans.png"><h2>middle-flat</h2><p>SVG输入</p><img src="middle-flat.svg"><p>当次PNG</p><img src="middle-flat.png"><h2>end-spans</h2><p>SVG输入</p><img src="end-spans.svg"><p>当次PNG</p><img src="end-spans.png"><h2>end-flat</h2><p>SVG输入</p><img src="end-flat.svg"><p>当次PNG</p><img src="end-flat.png"><h2>two-anchored-chunks</h2><p>SVG输入</p><img src="two-anchored-chunks.svg"><p>当次PNG</p><img src="two-anchored-chunks.png"><h2>two-independent-texts</h2><p>SVG输入</p><img src="two-independent-texts.svg"><p>当次PNG</p><img src="two-independent-texts.png"><h2>relative-offset</h2><p>SVG输入</p><img src="relative-offset.svg"><p>当次PNG</p><img src="relative-offset.png"><h2>relative-offset-reference</h2><p>SVG输入</p><img src="relative-offset-reference.svg"><p>当次PNG</p><img src="relative-offset-reference.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12585-text-chunk-anchor/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 6,
+  &quot;passed&quot;: 6,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;start-unstyled-span-equivalence&quot;,
+      &quot;passed&quot;: true,
+      &quot;different_pixels&quot;: 0
+    },
+    {
+      &quot;name&quot;: &quot;middle-unstyled-span-equivalence&quot;,
+      &quot;passed&quot;: true,
+      &quot;different_pixels&quot;: 0
+    },
+    {
+      &quot;name&quot;: &quot;end-unstyled-span-equivalence&quot;,
+      &quot;passed&quot;: true,
+      &quot;different_pixels&quot;: 0
+    },
+    {
+      &quot;name&quot;: &quot;explicit-x-starts-independent-anchor-chunk&quot;,
+      &quot;passed&quot;: true,
+      &quot;different_pixels&quot;: 0
+    },
+    {
+      &quot;name&quot;: &quot;nested-relative-offset-applied-once&quot;,
+      &quot;passed&quot;: true,
+      &quot;different_pixels&quot;: 0
+    },
+    {
+      &quot;name&quot;: &quot;blue-sibling&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>

@@ -1,0 +1,13 @@
+from pathlib import Path
+from io import BytesIO
+import sys,json,html
+import cairosvg
+from PIL import Image
+OUT=Path(sys.argv[1]);OUT.mkdir(parents=True,exist_ok=True);checks=[];names=[]
+def render(n,body):
+ names.append(n);s='<svg xmlns="http://www.w3.org/2000/svg" width="360" height="120"><g font-family="Menlo" font-size="24" fill="red">'+body+'</g><rect x="320" y="20" width="20" height="60" fill="blue"/></svg>';(OUT/(n+'.svg')).write_text(s);png=cairosvg.svg2png(bytestring=s.encode());(OUT/(n+'.png')).write_bytes(png);return Image.open(BytesIO(png)).convert('RGBA')
+for anchor in ['start','middle','end']:
+ attr=f' x="180" y="70" text-anchor="{anchor}"';a=render(anchor+'-spans','<text'+attr+'>A<tspan>B<tspan>C</tspan>D</tspan></text>');b=render(anchor+'-flat','<text'+attr+'>ABCD</text>');checks.append({'name':anchor+'-unstyled-span-equivalence','passed':a.tobytes()==b.tobytes(),'different_pixels':sum(x!=y for x,y in zip(a.getdata(),b.getdata()))})
+a=render('two-anchored-chunks','<text x="80" y="70" text-anchor="middle">AB<tspan x="220">CD</tspan></text>');b=render('two-independent-texts','<text x="80" y="70" text-anchor="middle">AB</text><text x="220" y="70" text-anchor="middle">CD</text>');checks.append({'name':'explicit-x-starts-independent-anchor-chunk','passed':a.tobytes()==b.tobytes(),'different_pixels':sum(x!=y for x,y in zip(a.getdata(),b.getdata()))})
+a=render('relative-offset','<text x="20" y="50" dx="10" dy="15">A<tspan dx="5">BC</tspan></text><text x="250" y="100" fill="blue">Z</text>');b=render('relative-offset-reference','<text x="30" y="65">A<tspan dx="5">BC</tspan></text><text x="250" y="100" fill="blue">Z</text>');checks.append({'name':'nested-relative-offset-applied-once','passed':a.tobytes()==b.tobytes(),'different_pixels':sum(x!=y for x,y in zip(a.getdata(),b.getdata()))});checks.append({'name':'blue-sibling','passed':a.getpixel((330,50))==(0,0,255,255)})
+r={'source':cairosvg.__file__,'tests':len(checks),'passed':sum(c['passed'] for c in checks),'failed':sum(not c['passed'] for c in checks),'checks':checks};(OUT/'result.json').write_text(json.dumps(r,ensure_ascii=False,indent=2)+'\n');print(json.dumps(r,ensure_ascii=False,indent=2));(OUT/'gallery.html').write_text('<!doctype html><meta charset="utf-8"><title>文本块锚点核验</title><style>body{font:20px system-ui;margin:24px}img{width:900px;max-width:100%;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>文本分块、锚点与位移的等价参考</h1>'+''.join('<h2>'+n+'</h2><p>SVG输入</p><img src="'+n+'.svg"><p>当次PNG</p><img src="'+n+'.png">' for n in names)+'<pre>'+html.escape(json.dumps(r,ensure_ascii=False,indent=2))+'</pre>');sys.exit(bool(r['failed']))

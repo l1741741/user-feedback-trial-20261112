@@ -1,0 +1,37 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12585-text-chunk-anchor/local-frozen-source/cairosvg/__init__.py",
+  "tests": 6,
+  "passed": 6,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "start-unstyled-span-equivalence",
+      "passed": true,
+      "different_pixels": 0
+    },
+    {
+      "name": "middle-unstyled-span-equivalence",
+      "passed": true,
+      "different_pixels": 0
+    },
+    {
+      "name": "end-unstyled-span-equivalence",
+      "passed": true,
+      "different_pixels": 0
+    },
+    {
+      "name": "explicit-x-starts-independent-anchor-chunk",
+      "passed": true,
+      "different_pixels": 0
+    },
+    {
+      "name": "nested-relative-offset-applied-once",
+      "passed": true,
+      "different_pixels": 0
+    },
+    {
+      "name": "blue-sibling",
+      "passed": true
+    }
+  ]
+}

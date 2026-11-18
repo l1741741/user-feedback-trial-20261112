@@ -1,0 +1,22 @@
+{
+  "task_id": "rerun15-20261118-12585-text-chunk-anchor",
+  "final_sha": "32fc516df2efee5bd481a71ffdccf67b2b990981",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-12585-text-chunk-anchor/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12585-text-chunk-anchor/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_text_layout/test_text_chunks.py"
+  ],
+  "exit_code": 0,
+  "tests": 25,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T02:37:15.146458+08:00"
+}
