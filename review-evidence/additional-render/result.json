@@ -1,0 +1,58 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11719-stroke-joins/local-frozen-source/cairosvg/__init__.py",
+  "tests": 12,
+  "passed": 11,
+  "failed": 1,
+  "checks": [
+    {
+      "name": "explicit-butt-miter-resets-inherited-round",
+      "passed": true
+    },
+    {
+      "name": "miterlimit-garbage-fallback",
+      "passed": true
+    },
+    {
+      "name": "miterlimit-garbage-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "miterlimit-nan-fallback",
+      "passed": true
+    },
+    {
+      "name": "miterlimit-nan-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "miterlimit-inf-fallback",
+      "passed": true
+    },
+    {
+      "name": "miterlimit-inf-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "miterlimit--1-fallback",
+      "passed": true
+    },
+    {
+      "name": "miterlimit--1-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "miterlimit-0.5-fallback",
+      "passed": true
+    },
+    {
+      "name": "miterlimit-0.5-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "quadratic-marker-follows-end-tangent",
+      "passed": false,
+      "different_pixels": 130,
+      "end_tangent_degrees": 56.309932474020215
+    }
+  ]
+}
