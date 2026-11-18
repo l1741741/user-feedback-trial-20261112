@@ -3,6 +3,23 @@
 ======
 
 
+Unreleased
+==========
+
+* Fix ``currentColor`` and ``inherit`` handling across definitions,
+  references and instances. Colors are now resolved lazily at paint time
+  instead of being frozen at parse time, so a single symbol, gradient,
+  pattern or mask keeps independent colors for every ``<use>`` or paint
+  reference, including when the keyword reaches the parser through a CSS
+  ``style`` attribute or a ``url(...) <color>`` fallback.
+* Stop mutating shared definition nodes while rendering (gradient href
+  chains, pattern geometry, masks): one instance can no longer leak colors,
+  tags or opacity into its siblings or into a later render of the same tree.
+* Gradient stops using ``currentColor`` now follow the color of the painted
+  element (including content rendered through pattern and mask
+  sub-surfaces), matching the SVG 2 inheritance model.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

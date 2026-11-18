@@ -15,7 +15,7 @@ from .defs import (
     parse_all_defs, pattern, prepare_filter, radial_gradient, use)
 from .helpers import (
     UNITS, PointError, clip_rect, node_format, normalize, paint,
-    preserve_ratio, size, transform)
+    preserve_ratio, resolve_color, size, transform)
 from .image import image, invert_image
 from .parser import Tree
 from .path import draw_markers, path
@@ -146,7 +146,8 @@ class Surface(object):
     def __init__(self, tree, output, dpi, parent_surface=None,
                  parent_width=None, parent_height=None,
                  scale=1, output_width=None, output_height=None,
-                 background_color=None, map_rgba=None, map_image=None):
+                 background_color=None, map_rgba=None, map_image=None,
+                 color_context=None):
         """Create the surface from a filename or a file-like object.
 
         The rendered content is written to ``output`` which can be a filename,
@@ -181,6 +182,13 @@ class Surface(object):
             self.filters = {}
             self.images = {}
         self._old_parent_node = self.parent_node = None
+        # Painted element whose ``color`` provides the currentColor context
+        # for content rendered through a separate surface (patterns, masks),
+        # whose nodes live in <defs> and cannot walk to the referencing
+        # element through their own parent chain.
+        self.color_context = (
+            color_context
+            or (parent_surface.color_context if parent_surface else None))
         self.output = output
         self.dpi = dpi
         self.font_size = size(self, '12pt')
@@ -278,8 +286,19 @@ class Surface(object):
         """Read the surface content."""
         self.cairo.finish()
 
-    def map_color(self, string, opacity=1):
-        """Parse a color ``string`` and apply ``map_rgba`` function to it."""
+    def map_color(self, string, opacity=1, node=None, attribute=None,
+                  color_context=None):
+        """Parse a color ``string`` and apply ``map_rgba`` function to it.
+
+        ``currentColor`` and the ``inherit`` keyword are resolved against the
+        given painted ``node`` and its ancestors at paint time, so shared
+        definitions keep independent colors for each reference.
+
+        """
+        if node is not None:
+            context = color_context or self.color_context
+            string = resolve_color(
+                node, string, attribute, color_context=context)
         rgba = color(string, opacity)
         return self.map_rgba(rgba) if self.map_rgba else rgba
 
@@ -444,7 +463,8 @@ class Surface(object):
                 self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
             if not gradient_or_pattern(self, node, paint_source, fill_opacity):
                 self.context.set_source_rgba(
-                    *self.map_color(paint_color, fill_opacity))
+                    *self.map_color(
+                        paint_color, fill_opacity, node, 'fill'))
             if TAGS[node.tag] == text:
                 self.cursor_position = save_cursor[0]
                 self.cursor_d_position = save_cursor[1]
@@ -462,7 +482,8 @@ class Surface(object):
             if not gradient_or_pattern(
                     self, node, paint_source, stroke_opacity):
                 self.context.set_source_rgba(
-                    *self.map_color(paint_color, stroke_opacity))
+                    *self.map_color(
+                        paint_color, stroke_opacity, node, 'stroke'))
             self.context.stroke()
             self.context.restore()
         elif not visible:

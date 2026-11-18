@@ -5,9 +5,12 @@ This module handles clips, gradients, masks, patterns and external nodes.
 
 """
 
+import copy
+
 from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
 from .features import match_features
-from .helpers import paint, size, transform
+from .helpers import (
+    inherit_value, paint, resolve_color, size, transform)
 from .parser import Tree
 from .shapes import rect
 from .surface import cairo
@@ -29,24 +32,43 @@ EXTEND_OPERATORS = {
 }
 
 
-def update_def_href(surface, def_name, def_dict, chain=None):
-    """Update the attributes of the def according to its href attribute."""
-    def_node = def_dict[def_name]
-    href = parse_url(def_node.get_href()).fragment
-    if chain is None:
-        chain = set()
-    if href in def_dict and href not in chain:
-        chain.add(href)
-        update_def_href(surface, href, def_dict, chain)
-        href_node = def_dict[href]
-        def_dict[def_name] = Tree(
-            url=f'#{def_name}', url_fetcher=def_node.url_fetcher,
-            parent=href_node, parent_children=(not def_node.children),
-            tree_cache=surface.tree_cache, unsafe=def_node.unsafe)
-        # Inherit attributes generally not inherited
-        for key, value in href_node.items():
-            if key not in def_dict[def_name]:
-                def_dict[def_name][key] = value
+def resolve_def_href(surface, def_name, def_dict):
+    """Resolve the href chain of a definition without mutating it.
+
+    Follow ``href``/``xlink:href`` links from the definition named
+    ``def_name`` and return a merged, ready-to-draw node. Attributes of the
+    referencing definition take precedence; attributes defined on referenced
+    definitions (and their children when the reference has no children) are
+    inherited. The stored definition nodes themselves are never modified, so
+    several references stay independent.
+
+    """
+    chain = set()
+    current_name = def_name
+    merged = None
+    while current_name in def_dict and current_name not in chain:
+        chain.add(current_name)
+        def_node = def_dict[current_name]
+        href = parse_url(def_node.get_href()).fragment
+        if merged is None:
+            # First node of the chain: build a shallow working copy so that
+            # later rendering (tag switches, geometry writes) cannot leak back
+            # into the shared definition.
+            merged = copy.copy(def_node)
+            if not def_node.children:
+                merged.children = list(def_node.children)
+        else:
+            # Attributes generally not inherited are copied from the
+            # referenced node unless the referencing one defines them.
+            for key, value in def_node.items():
+                if key not in merged:
+                    merged[key] = value
+            if not merged.children and def_node.children:
+                merged.children = list(def_node.children)
+        if not href:
+            break
+        current_name = href
+    return merged
 
 
 def parse_all_defs(surface, node):
@@ -73,11 +95,16 @@ def parse_def(surface, node):
 def gradient_or_pattern(surface, node, name, opacity):
     """Gradient or pattern color."""
     if name in surface.gradients:
-        update_def_href(surface, name, surface.gradients)
-        return draw_gradient(surface, node, name, opacity)
+        gradient_node = resolve_def_href(surface, name, surface.gradients)
+        if gradient_node is None:
+            return False
+        return draw_gradient(
+            surface, node, gradient_node, opacity)
     elif name in surface.patterns:
-        update_def_href(surface, name, surface.patterns)
-        return draw_pattern(surface, node, name, opacity)
+        pattern_node = resolve_def_href(surface, name, surface.patterns)
+        if pattern_node is None:
+            return False
+        return draw_pattern(surface, node, pattern_node, opacity)
 
 
 def marker(surface, node):
@@ -118,7 +145,8 @@ def clip_path(surface, node):
 
 def paint_mask(surface, node, name, opacity):
     """Paint the mask of the current surface."""
-    mask_node = surface.masks[name]
+    mask_node = copy.copy(surface.masks[name])
+    mask_node.children = list(surface.masks[name].children)
     mask_node.tag = 'g'
     mask_node['opacity'] = opacity
 
@@ -145,7 +173,8 @@ def paint_mask(surface, node, name, opacity):
         mask_node['viewBox'] = '{x} {y} {width} {height}'.format(**mask_node)
 
     from .surface import SVGSurface  # circular import
-    mask_surface = SVGSurface(mask_node, None, surface.dpi, surface)
+    mask_surface = SVGSurface(
+        mask_node, None, surface.dpi, surface, color_context=node)
     surface.context.save()
     surface.context.translate(x, y)
     surface.context.scale(
@@ -155,9 +184,14 @@ def paint_mask(surface, node, name, opacity):
     surface.context.restore()
 
 
-def draw_gradient(surface, node, name, opacity):
-    """Gradients colors."""
-    gradient_node = surface.gradients[name]
+def draw_gradient(surface, node, gradient_node, opacity):
+    """Gradients colors.
+
+    ``gradient_node`` is a per-paint, non-shared resolution of the gradient
+    definition (including its href chain); ``node`` is the painted element
+    and provides the context used to resolve ``currentColor`` in stops.
+
+    """
 
     if gradient_node.get('gradientUnits') == 'userSpaceOnUse':
         width_ref, height_ref = 'x', 'y'
@@ -203,9 +237,14 @@ def draw_gradient(surface, node, name, opacity):
     offset = 0
     for child in gradient_node.children:
         offset = max(offset, size(surface, child.get('offset'), 1))
+        # currentColor/inherit are resolved against the painted element: the
+        # same gradient definition must follow the theme of each reference.
+        stop_value = inherit_value(child, 'stop-color', 'black')
+        stop_opacity = inherit_value(child, 'stop-opacity', 1)
+        resolved_stop = resolve_color(
+            child, stop_value, 'stop-color', 'black', color_context=node)
         stop_color = surface.map_color(
-            child.get('stop-color', 'black'),
-            float(child.get('stop-opacity', 1)) * opacity)
+            resolved_stop, float(stop_opacity) * opacity)
         gradient_pattern.add_color_stop_rgba(offset, *stop_color)
 
     # Set spread method for gradient outside target bounds
@@ -216,9 +255,14 @@ def draw_gradient(surface, node, name, opacity):
     return True
 
 
-def draw_pattern(surface, node, name, opacity):
-    """Draw a pattern image."""
-    pattern_node = surface.patterns[name]
+def draw_pattern(surface, node, pattern_node, opacity):
+    """Draw a pattern image.
+
+    ``pattern_node`` is a per-paint, non-shared resolution of the pattern
+    definition, so writing geometry back to it cannot leak into later
+    references of the same pattern.
+
+    """
     pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
     pattern_node.tag = 'g'
     transform(surface, pattern_node.get('patternTransform'))
@@ -242,9 +286,9 @@ def draw_pattern(surface, node, name, opacity):
         x = size(surface, pattern_node.get('x'), 1) * width
         y = size(surface, pattern_node.get('y'), 1) * height
         pattern_width = (
-            size(surface, pattern_node.pop('width', '1'), 1) * width)
+            size(surface, pattern_node.get('width', '1'), 1) * width)
         pattern_height = (
-            size(surface, pattern_node.pop('height', '1'), 1) * height)
+            size(surface, pattern_node.get('height', '1'), 1) * height)
         if 'viewBox' not in pattern_node:
             pattern_node['width'] = pattern_width
             pattern_node['height'] = pattern_height
@@ -256,7 +300,12 @@ def draw_pattern(surface, node, name, opacity):
         return False
 
     from .surface import SVGSurface  # circular import
-    pattern_surface = SVGSurface(pattern_node, None, surface.dpi, surface)
+    # Pattern content lives in <defs>: currentColor follows the element
+    # referencing the pattern, not the pattern node's own ancestors. The
+    # surface draws its tree during construction, so the context must be
+    # passed in here rather than assigned afterwards.
+    pattern_surface = SVGSurface(
+        pattern_node, None, surface.dpi, surface, color_context=node)
     pattern_pattern = cairo.SurfacePattern(pattern_surface.cairo)
     pattern_pattern.set_extend(cairo.EXTEND_REPEAT)
     pattern_pattern.set_matrix(cairo.Matrix(
@@ -325,8 +374,11 @@ def apply_filter_after_painting(surface, node, name):
                 width *= size(surface, child.get('width', 0), 1)
                 height *= size(surface, child.get('height', 0), 1)
                 rect(surface, dict(x=x, y=y, width=width, height=height))
+                flood_color = resolve_color(
+                    child, paint(child.get('flood-color'))[1],
+                    'flood-color')
                 surface.context.set_source_rgba(*surface.map_color(
-                    paint(child.get('flood-color'))[1],
+                    flood_color,
                     float(child.get('flood-opacity', 1))))
                 surface.context.fill()
                 surface.context.restore()
@@ -370,6 +422,4 @@ def use(surface, node):
             tree['width'], tree['height'] = node['width'], node['height']
 
     surface.draw(tree)
-    node.get('fill', None)
-    node.get('stroke', None)
     surface.context.restore()

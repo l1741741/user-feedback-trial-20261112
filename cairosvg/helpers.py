@@ -53,6 +53,98 @@ def paint(value):
     return (source, color)
 
 
+def inherit_value(node, attribute, default=None):
+    """Return the computed value of ``attribute`` for ``node``.
+
+    Walk the node and its ancestors, resolving the CSS ``inherit`` keyword.
+    ``currentColor`` is *not* expanded here: use :func:`resolve_color` for
+    paint and color attributes.
+
+    """
+    current = node
+    while current is not None:
+        if attribute in current:
+            value = current[attribute]
+            if isinstance(value, str) and value.strip().lower() == 'inherit':
+                current = getattr(current, 'parent', None)
+                continue
+            return value
+        current = getattr(current, 'parent', None)
+    return default
+
+
+def resolve_color(node, value, attribute=None, default=None, _seen=None,
+                  color_context=None):
+    """Resolve ``currentColor`` and ``inherit`` inside a color value.
+
+    The resolution uses the parent chain of ``node`` (the element actually
+    being painted), so a definition stored once in ``<defs>`` gets different
+    concrete colors when referenced from different contexts, and no shared
+    node is mutated.
+
+    :param attribute: name of the attribute the value comes from, used to
+        apply attribute-specific defaults (``fill`` defaults to black,
+        ``stroke`` to none).
+    :param default: value returned when nothing is set and no attribute
+        default applies.
+    :param color_context: optional node whose ``color`` is used when
+        resolving ``currentColor`` and ``node`` and its ancestors define no
+        ``color``. Gradient/pattern/mask content lives outside the painted
+        element in the tree but per SVG 2 its ``currentColor`` follows the
+        element referencing the paint server.
+
+    """
+    if value is None:
+        if attribute == 'fill' or attribute == 'stop-color':
+            value = 'black'
+        elif attribute == 'stroke':
+            value = 'none'
+        else:
+            return default
+    if not isinstance(value, str):
+        return value
+
+    stripped = value.strip().lower()
+    if stripped == 'inherit':
+        parent = getattr(node, 'parent', None)
+        if parent is not None:
+            inherited = inherit_value(parent, attribute)
+            if inherited is not None:
+                # The inherited value may itself contain currentColor, so it
+                # goes through full resolution rather than being returned
+                # verbatim.
+                return resolve_color(
+                    parent, inherited, attribute, default, _seen,
+                    color_context)
+        # No parent value: the property resets to its initial value
+        if attribute == 'fill' or attribute == 'stop-color':
+            return 'black'
+        return default
+
+    if 'currentcolor' not in stripped:
+        return value
+
+    if _seen is None:
+        _seen = set()
+    key = id(node)
+    if key in _seen:
+        # Cyclic color references are invalid; behave like no color set.
+        return default
+    _seen.add(key)
+
+    current_color = inherit_value(node, 'color')
+    if current_color is None and color_context is not None:
+        current_color = inherit_value(color_context, 'color')
+    current_color = resolve_color(
+        node, current_color if current_color is not None else 'black',
+        'color', 'black', _seen, color_context)
+
+    def replace(match):
+        return current_color
+
+    return re.sub(r'currentcolor', replace, value, flags=re.IGNORECASE)
+
+
 def node_format(surface, node, reference=True):
     """Return ``(width, height, viewbox)`` of ``node``.
 

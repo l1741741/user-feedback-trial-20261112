@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<!--
+  Regression fixture for currentColor / inherit resolution across
+  definitions, references and instances.
+
+  It contains:
+    * two themes (red and blue groups) referencing the same <symbol>;
+    * one shared linearGradient whose stops use currentColor, referenced
+      under green, orange and teal contexts, including from inside a symbol;
+    * a plain path control filled with a literal color;
+    * a half-opacity instance and a draw-order swap (orange before green)
+      to prove instances render independently and never pollute siblings.
+
+  Render offline and inspect the PNG, or run the pixel assertions in
+  cairosvg/test_color_inheritance.py.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"
+     viewBox="0 0 400 200">
+  <defs>
+    <linearGradient id="themeGradient">
+      <stop offset="0" stop-color="currentColor"/>
+      <stop offset="1" stop-color="white"/>
+    </linearGradient>
+    <symbol id="icon" viewBox="0 0 40 40">
+      <rect x="2" y="2" width="36" height="36" fill="currentColor"/>
+      <circle cx="20" cy="20" r="10" fill="none"
+              stroke="currentColor" stroke-width="4"/>
+    </symbol>
+    <symbol id="gradientIcon" viewBox="0 0 40 40">
+      <rect x="2" y="2" width="36" height="36" fill="url(#themeGradient)"/>
+    </symbol>
+  </defs>
+
+  <!-- Row 1: red and blue themed instances of the same symbol -->
+  <g color="red">
+    <use href="#icon" x="10" y="10" width="40" height="40"/>
+  </g>
+  <g color="blue">
+    <use href="#icon" x="60" y="10" width="40" height="40"/>
+  </g>
+
+  <!-- Same gradient definition under two different themes -->
+  <g color="green">
+    <rect x="110" y="10" width="40" height="40" fill="url(#themeGradient)"/>
+  </g>
+  <g color="orange">
+    <rect x="160" y="10" width="40" height="40" fill="url(#themeGradient)"/>
+  </g>
+
+  <!-- Symbol whose content itself uses the shared gradient -->
+  <g color="teal">
+    <use href="#gradientIcon" x="210" y="10" width="40" height="40"/>
+  </g>
+
+  <!-- Plain path control, untouched by theming -->
+  <rect x="260" y="10" width="40" height="40" fill="purple"/>
+
+  <!-- Row 2: gradient endpoint again, opacity independence, order swap -->
+  <g color="green">
+    <rect x="10" y="110" width="40" height="40" fill="url(#themeGradient)"/>
+  </g>
+  <g color="red" opacity="0.5">
+    <use href="#icon" x="60" y="110" width="40" height="40"/>
+  </g>
+  <g color="orange">
+    <rect x="160" y="110" width="40" height="40" fill="url(#themeGradient)"/>
+  </g>
+  <g color="green">
+    <rect x="110" y="110" width="40" height="40" fill="url(#themeGradient)"/>
+  </g>
+</svg>

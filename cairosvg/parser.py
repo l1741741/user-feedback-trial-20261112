@@ -52,6 +52,11 @@ COLOR_ATTRIBUTES = frozenset((
     'stop-color',
     'stroke',
 ))
+# Kept for backwards compatibility with code importing it; currentColor and
+# the inherit keyword are now resolved lazily at paint time (see
+# helpers.resolve_color) instead of being rewritten at parse time, so that a
+# single definition referenced from several contexts keeps independent
+# colors.
 
 
 def handle_white_spaces(string, preserve):
@@ -206,19 +211,12 @@ class Node(dict):
                 for name, value in declarations:
                     self[name] = value.strip()
 
-        # Replace currentColor by a real color value
-        for attribute in COLOR_ATTRIBUTES:
-            if self.get(attribute) == 'currentColor':
-                self[attribute] = self.get('color', 'black')
-
-        # Replace inherit by the parent value
-        for attribute in [
-                attribute for attribute in self
-                if self[attribute] == 'inherit']:
-            if parent is not None and attribute in parent:
-                self[attribute] = parent.get(attribute)
-            else:
-                del self[attribute]
+        # Note: currentColor and the inherit keyword are NOT resolved here.
+        # They are evaluated lazily at paint time (see helpers.resolve_color)
+        # by walking the node parent chain. Resolving them at parse time would
+        # freeze the colors of shared definitions (gradients, symbols) to the
+        # context in which they were first parsed and would let one instance
+        # of a <use> leak colors into its siblings.
 
         # Manage text by creating children
         if self.tag in ('text', 'textPath', 'a'):
