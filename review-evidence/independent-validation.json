@@ -1,0 +1,22 @@
+{
+  "task_id": "rerun15-20261118-12597-raster-colour-flags",
+  "final_sha": "442c735ddfe05281d1278efe7a75c91be2dcd060",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-12597-raster-colour-flags/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12597-raster-colour-flags/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_color_flags.py"
+  ],
+  "exit_code": 0,
+  "tests": 27,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T07:46:37.879897+08:00"
+}

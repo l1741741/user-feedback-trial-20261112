@@ -1,0 +1,168 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12597-raster-colour-flags/local-frozen-source/cairosvg/__init__.py",
+  "tests": 10,
+  "passed": 10,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "off(20, 20)",
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "off(120, 20)",
+      "expected": [
+        0,
+        255,
+        0,
+        255
+      ],
+      "actual": [
+        0,
+        255,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "off(10, 110)",
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "negate(20, 20)",
+      "expected": [
+        0,
+        255,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        255,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "negate(120, 20)",
+      "expected": [
+        255,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "invert(20, 20)",
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "invert(20, 120)",
+      "expected": [
+        0,
+        255,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        255,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "invert(10, 110)",
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "both(20, 20)",
+      "expected": [
+        0,
+        255,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        255,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "both(20, 120)",
+      "expected": [
+        0,
+        255,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        255,
+        255,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}
