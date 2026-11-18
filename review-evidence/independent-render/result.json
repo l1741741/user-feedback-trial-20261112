@@ -1,0 +1,26 @@
+{
+  "slug": "pattern-tile",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-10359-pattern-tile/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 3,
+  "failures": 0,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "user-space-period-across-host-sizes",
+      "passed": true
+    },
+    {
+      "name": "pattern-opacity-not-accumulated",
+      "passed": true
+    }
+  ],
+  "images": [
+    "ordinary",
+    "tiles",
+    "pattern-opacity"
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-10359-pattern-tile/local-frozen-source/cairosvg/__init__.py",
+  "tests": 10,
+  "passed": 10,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "basic-explicit-tiles",
+      "passed": true,
+      "different_pixels": 0
+    },
+    {
+      "name": "basic-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "offset-explicit-tiles",
+      "passed": true,
+      "different_pixels": 0
+    },
+    {
+      "name": "offset-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "viewbox-explicit-tiles",
+      "passed": true,
+      "different_pixels": 0
+    },
+    {
+      "name": "viewbox-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "quarter-turn-explicit-tiles",
+      "passed": true,
+      "different_pixels": 0
+    },
+    {
+      "name": "quarter-turn-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "half-opacity-explicit-tiles",
+      "passed": true,
+      "different_pixels": 0
+    },
+    {
+      "name": "half-opacity-blue-sibling",
+      "passed": true
+    }
+  ]
+}
