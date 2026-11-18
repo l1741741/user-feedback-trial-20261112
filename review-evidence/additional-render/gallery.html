@@ -1,0 +1,48 @@
+<!doctype html><meta charset="utf-8"><title>滤镜偏移与几何参考</title><style>body{font:20px system-ui;margin:24px}img{width:700px;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>正负偏移、非方形bbox、外层缩放及区域裁切</h1><h2>positive-negative</h2><p>SVG输入</p><img src="positive-negative.svg"><p>当次PNG</p><img src="positive-negative.png"><h2>positive-negative-reference</h2><p>SVG输入</p><img src="positive-negative-reference.svg"><p>当次PNG</p><img src="positive-negative-reference.png"><h2>non-square-bbox</h2><p>SVG输入</p><img src="non-square-bbox.svg"><p>当次PNG</p><img src="non-square-bbox.png"><h2>non-square-bbox-reference</h2><p>SVG输入</p><img src="non-square-bbox-reference.svg"><p>当次PNG</p><img src="non-square-bbox-reference.png"><h2>host-scale</h2><p>SVG输入</p><img src="host-scale.svg"><p>当次PNG</p><img src="host-scale.png"><h2>host-scale-reference</h2><p>SVG输入</p><img src="host-scale-reference.svg"><p>当次PNG</p><img src="host-scale-reference.png"><h2>clipped-output</h2><p>SVG输入</p><img src="clipped-output.svg"><p>当次PNG</p><img src="clipped-output.png"><h2>clipped-output-reference</h2><p>SVG输入</p><img src="clipped-output-reference.svg"><p>当次PNG</p><img src="clipped-output-reference.png"><h2>source-shadow</h2><p>SVG输入</p><img src="source-shadow.svg"><p>当次PNG</p><img src="source-shadow.png"><h2>source-shadow-reference</h2><p>SVG输入</p><img src="source-shadow-reference.svg"><p>当次PNG</p><img src="source-shadow-reference.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12595-filter-offset/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 9,
+  &quot;passed&quot;: 9,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;positive-negative-explicit-geometry&quot;,
+      &quot;different_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;positive-negative-blue-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;non-square-bbox-explicit-geometry&quot;,
+      &quot;different_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;non-square-bbox-blue-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;host-scale-explicit-geometry&quot;,
+      &quot;different_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;host-scale-blue-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;clipped-output-explicit-geometry&quot;,
+      &quot;different_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;clipped-output-blue-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;source-and-offset-merge-with-opacity&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>

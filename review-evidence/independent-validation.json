@@ -1,0 +1,22 @@
+{
+  "task_id": "rerun15-20261118-12595-filter-offset",
+  "final_sha": "a8a50a511f5de5a85313bde3b9f39e32a4b7aee2",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-12595-filter-offset/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12595-filter-offset/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_filter.py"
+  ],
+  "exit_code": 0,
+  "tests": 64,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T06:12:37.883759+08:00"
+}

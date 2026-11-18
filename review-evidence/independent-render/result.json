@@ -1,0 +1,26 @@
+{
+  "slug": "filter-offset",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12595-filter-offset/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 3,
+  "failures": 0,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "offset-position-and-unfiltered-sibling",
+      "passed": true
+    },
+    {
+      "name": "offset-object-bbox-units",
+      "passed": true
+    }
+  ],
+  "images": [
+    "ordinary",
+    "offset",
+    "offset-bbox"
+  ]
+}

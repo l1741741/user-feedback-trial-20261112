@@ -1,0 +1,48 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12595-filter-offset/local-frozen-source/cairosvg/__init__.py",
+  "tests": 9,
+  "passed": 9,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "positive-negative-explicit-geometry",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "positive-negative-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "non-square-bbox-explicit-geometry",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "non-square-bbox-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "host-scale-explicit-geometry",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "host-scale-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "clipped-output-explicit-geometry",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "clipped-output-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "source-and-offset-merge-with-opacity",
+      "passed": true
+    }
+  ]
+}
