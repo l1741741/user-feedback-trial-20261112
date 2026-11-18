@@ -1,0 +1,32 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-10357-gradient-inheritance/local-frozen-source/cairosvg/__init__.py",
+  "tests": 6,
+  "passed": 6,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "three-inherited-icons-match-explicit-definitions",
+      "passed": true
+    },
+    {
+      "name": "drawing-order-does-not-change-icons",
+      "passed": true
+    },
+    {
+      "name": "file-cache-entry-matches-bytestring",
+      "passed": true
+    },
+    {
+      "name": "multilevel-vertical-stops-reach-leaf",
+      "passed": true
+    },
+    {
+      "name": "own-stops-and-opacity-retained",
+      "passed": true
+    },
+    {
+      "name": "broken-references-preserve-healthy-icons",
+      "passed": true
+    }
+  ]
+}
