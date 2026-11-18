@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200" viewBox="0 0 400 200"
+     font-family="Helvetica" font-size="20">
+  <defs>
+    <path id="arc" d="M 40 120 C 120 40, 280 40, 360 120" fill="none"/>
+  </defs>
+  <use href="#arc" stroke="#ccc"/>
+  <text fill="navy">
+    <textPath href="#arc">Text along a curved path</textPath>
+  </text>
+  <text x="200" y="180" text-anchor="middle" fill="darkgreen">
+    centered below
+  </text>
+</svg>

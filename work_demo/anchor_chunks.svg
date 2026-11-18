@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="360" viewBox="0 0 600 360"
+     font-family="Helvetica" font-size="24">
+  <!-- vertical guide lines: x=150 (start anchor), x=300 (middle), x=450 (end) -->
+  <line x1="150" y1="20" x2="150" y2="340" stroke="#888" stroke-width="1" stroke-dasharray="4 4"/>
+  <line x1="300" y1="20" x2="300" y2="340" stroke="#888" stroke-width="1" stroke-dasharray="4 4"/>
+  <line x1="450" y1="20" x2="450" y2="340" stroke="#888" stroke-width="1" stroke-dasharray="4 4"/>
+
+  <!-- row 1: three simple text nodes with the three anchors -->
+  <text x="150" y="50" text-anchor="start">start</text>
+  <text x="300" y="50" text-anchor="middle">middle</text>
+  <text x="450" y="50" text-anchor="end">end</text>
+
+  <!-- row 2: one text node, three chunks created by x=, each with its own anchor -->
+  <text y="110">
+    <tspan x="150" text-anchor="start">start</tspan>
+    <tspan x="300" text-anchor="middle">middle</tspan>
+    <tspan x="450" text-anchor="end">end</tspan>
+  </text>
+
+  <!-- row 3: mid-line x change must start a new chunk; anchor applies per chunk -->
+  <text x="150" y="170" text-anchor="middle">
+    AAA<tspan x="450">BBB</tspan>
+  </text>
+
+  <!-- row 4: anchor changes inside the same line -->
+  <text x="150" y="230" text-anchor="start">left
+    <tspan x="450" text-anchor="end">right</tspan>
+  </text>
+
+  <!-- row 5: nested tspan with dx must not double-apply; baseline guide -->
+  <line x1="40" y1="292" x2="560" y2="292" stroke="#c00" stroke-width="1"/>
+  <text x="60" y="290" text-anchor="start">outer
+    <tspan dx="40">inner<tspan dx="20">deep</tspan>tail</tspan>
+  </text>
+
+  <!-- row 6: per-glyph rotate; rotation must not leak to following line -->
+  <text x="60" y="340" rotate="15 15 15">rot</text>
+  <text x="200" y="340">upright</text>
+</svg>

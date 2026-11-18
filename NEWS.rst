@@ -3,6 +3,18 @@
 ======
 
 
+Unreleased
+==========
+
+* Fix SVG text chunk layout and ``text-anchor`` handling. An explicit ``x``
+  or ``y`` now opens a distinct text chunk whose boundary is independent of
+  preceding chunks, and start/middle/end anchoring is applied once to the
+  whole chunk instead of being repeated on every glyph. Supplemental
+  ``dx``/``dy`` and per-glyph ``rotate`` keep their SVG 1.1 semantics across
+  nested ``tspan`` elements without being inherited or applied a second time,
+  and separate ``text`` nodes no longer depend on earlier text state.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

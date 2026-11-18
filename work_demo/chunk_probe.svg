@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="300" viewBox="0 0 600 300"
+     font-family="Helvetica" font-size="24">
+  <line x1="150" y1="10" x2="150" y2="290" stroke="#888" stroke-dasharray="4 4"/>
+  <line x1="300" y1="10" x2="300" y2="290" stroke="#888" stroke-dasharray="4 4"/>
+  <line x1="450" y1="10" x2="450" y2="290" stroke="#888" stroke-dasharray="4 4"/>
+
+  <!-- one node, two x positions => two chunks, both middle-anchored -->
+  <text x="150 450" y="50" text-anchor="middle">AB</text>
+
+  <!-- one node, three x positions, end anchor -->
+  <text x="150 300 450" y="110" text-anchor="end">XYZ</text>
+
+  <!-- nested tspan dx: 30 applies only to 'b'; next sibling text must not inherit -->
+  <text x="60" y="170">a<tspan dx="30">b</tspan>c<tspan x="400">d</tspan></text>
+
+  <!-- dy inside nested tspan must not leak to the following top-level text -->
+  <text x="60" y="220">p<tspan dy="-30">q<tspan dy="10">r</tspan></tspan>s</text>
+  <text x="300" y="220">no-leak</text>
+
+  <!-- empty text node followed by a real one must not move it -->
+  <text x="100" y="270"></text>
+  <text x="100" y="270">after-empty</text>
+</svg>
