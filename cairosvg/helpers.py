@@ -32,6 +32,30 @@ def distance(x1, y1, x2, y2):
     return hypot(x2 - x1, y2 - y1)
 
 
+def is_non_scaling_stroke(node):
+    """Return whether ``node`` asks for a non-scaling stroke."""
+    value = node.get('vector-effect', '')
+    return 'non-scaling-stroke' in value.lower().split()
+
+
+def transform_path(path, matrix):
+    """Return a copy of a Cairo ``path`` transformed by ``matrix``."""
+    transformed = []
+    for operation, coordinates in path:
+        if operation == cairo.PATH_CURVE_TO:
+            x1, y1, x2, y2, x3, y3 = coordinates
+            x1, y1 = matrix.transform_point(x1, y1)
+            x2, y2 = matrix.transform_point(x2, y2)
+            x3, y3 = matrix.transform_point(x3, y3)
+            transformed.append((operation, (x1, y1, x2, y2, x3, y3)))
+        elif operation in (cairo.PATH_MOVE_TO, cairo.PATH_LINE_TO):
+            transformed.append(
+                (operation, matrix.transform_point(*coordinates)))
+        else:
+            transformed.append((operation, ()))
+    return transformed
+
+
 def paint(value):
     """Extract from value an uri and a color.
 

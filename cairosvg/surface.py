@@ -14,8 +14,8 @@ from .defs import (
     filter_, gradient_or_pattern, linear_gradient, marker, mask, paint_mask,
     parse_all_defs, pattern, prepare_filter, radial_gradient, use)
 from .helpers import (
-    UNITS, PointError, clip_rect, node_format, normalize, paint,
-    preserve_ratio, size, transform)
+    UNITS, PointError, clip_rect, is_non_scaling_stroke, node_format,
+    normalize, paint, preserve_ratio, size, transform, transform_path)
 from .image import image, invert_image
 from .parser import Tree
 from .path import draw_markers, path
@@ -189,6 +189,10 @@ class Surface(object):
         if viewbox is None:
             viewbox = (0, 0, width, height)
 
+        # Declared size of the initial viewport, in user units. It is used to
+        # express the “host” coordinate space of non-scaling strokes.
+        natural_width, natural_height = width, height
+
         if output_width and output_height:
             width, height = output_width, output_height
         elif output_width:
@@ -217,6 +221,17 @@ class Surface(object):
         # We must scale the context as the surface size is using physical units
         self.context.scale(
             self.device_units_per_user_units, self.device_units_per_user_units)
+        # Host coordinate space used by the “non-scaling-stroke” vector
+        # effect: the viewport coordinate system of the furthest ancestral
+        # SVG viewport. One unit is one CSS pixel there, so it includes the
+        # output scaling factor but neither the SVG viewBox nor any element
+        # transform. Nested viewports never overwrite it.
+        self.host_matrix = cairo.Matrix()
+        zoom_x = width / natural_width if natural_width else 1
+        zoom_y = height / natural_height if natural_height else 1
+        self.host_matrix.scale(
+            self.device_units_per_user_units * zoom_x,
+            self.device_units_per_user_units * zoom_y)
         # Initial, non-rounded dimensions
         self.set_context_size(width, height, viewbox, tree)
         self.context.move_to(0, 0)
@@ -463,7 +478,25 @@ class Surface(object):
                     self, node, paint_source, stroke_opacity):
                 self.context.set_source_rgba(
                     *self.map_color(paint_color, stroke_opacity))
-            self.context.stroke()
+            if is_non_scaling_stroke(node):
+                # “non-scaling-stroke”: move the path to the host coordinate
+                # space (viewport coordinate system of the furthest ancestral
+                # SVG viewport), stroke there, and let Cairo map the outline
+                # back to user space. Geometry, caps, joins, dashes and paint
+                # stay coherent because the whole stroke is computed in host
+                # space. The paint source was set above, so it is locked to
+                # the user space in effect for the element.
+                user_path = self.context.copy_path()
+                to_host = self.context.get_matrix().multiply(
+                    self.host_matrix.inverted())
+                self.context.save()
+                self.context.new_path()
+                self.context.set_matrix(self.host_matrix)
+                self.context.append_path(transform_path(user_path, to_host))
+                self.context.stroke()
+                self.context.restore()
+            else:
+                self.context.stroke()
             self.context.restore()
         elif not visible:
             self.context.new_path()

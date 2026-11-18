@@ -4,14 +4,22 @@ Paths manager.
 """
 
 from collections import deque
-from math import copysign, hypot, pi, radians
+from math import atan2, copysign, cos, hypot, pi, radians, sin
 from re import finditer
 
 from .bounding_box import calculate_bounding_box
 from .helpers import (
-    PATH_LETTERS, clip_marker_box, node_format, normalize, point, point_angle,
-    preserve_ratio, quadratic_points, rotate, size)
+    PATH_LETTERS, clip_marker_box, is_non_scaling_stroke, node_format,
+    normalize, point, point_angle, preserve_ratio, quadratic_points, rotate,
+    size)
 from .url import parse_url
+
+
+def _host_angle(matrix, angle):
+    """Return ``angle`` re-expressed after the linear part of ``matrix``."""
+    direction_x, direction_y = matrix.transform_distance(
+        cos(angle), sin(angle))
+    return atan2(direction_y, direction_x)
 
 
 def draw_markers(surface, node):
@@ -30,6 +38,15 @@ def draw_markers(surface, node):
 
     angle1, angle2 = None, None
     position = 'start'
+
+    # With a non-scaling stroke, markers are painted in the host coordinate
+    # space too, so that “markerUnits=strokeWidth” markers keep the size
+    # given by the non-scaling stroke width instead of being stretched by
+    # the element transformations.
+    non_scaling = is_non_scaling_stroke(node)
+    if non_scaling:
+        to_host = surface.context.get_matrix().multiply(
+            surface.host_matrix.inverted())
 
     while node.vertices:
         # Calculate position and angle
@@ -53,9 +70,16 @@ def draw_markers(surface, node):
             # Calculate scale based on current stroke (if requested)
             if marker_node.get('markerUnits') == 'userSpaceOnUse':
                 scale = 1
+                host_marker = False
             else:
                 scale = size(
                     surface, surface.parent_node.get('stroke-width', '1'))
+                # With a non-scaling stroke, a “markerUnits=strokeWidth” marker
+                # is non-scaling too: it is drawn in the host space with the
+                # same width as the stroke outline, so it keeps the size it
+                # has on screen instead of being stretched by element
+                # transforms. “userSpaceOnUse” markers stay in user space.
+                host_marker = non_scaling
 
             # Calculate position, (additional) scale and clipping based on
             # marker properties
@@ -93,11 +117,18 @@ def draw_markers(surface, node):
                 angle = radians(float(node_angle))
             elif node_angle == 'auto-start-reverse' and position == 'start':
                 angle += radians(180)
+            if host_marker:
+                # The marker is drawn in host space: express its direction and
+                # position in this space before mapping back from there.
+                angle = _host_angle(to_host, angle)
+                point = to_host.transform_point(*point)
 
             # Draw marker path
             # See http://www.w3.org/TR/SVG/painting.html#MarkerAlgorithm
             for child in marker_node.children:
                 surface.context.save()
+                if host_marker:
+                    surface.context.set_matrix(surface.host_matrix)
                 surface.context.translate(*point)
                 surface.context.rotate(angle)
                 surface.context.scale(scale)

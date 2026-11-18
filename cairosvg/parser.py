@@ -35,6 +35,7 @@ NOT_INHERITED_ATTRIBUTES = frozenset((
     'style',
     'transform',
     'transform-origin',
+    'vector-effect',
     'viewBox',
     'width',
     'x',

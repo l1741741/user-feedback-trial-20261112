@@ -1,0 +1,52 @@
+non-scaling-stroke: measurements on generated PNG pixels
+
+Outline: 46 x 30 user units, stroke-width 4, drawn in a viewport with a 3x viewBox zoom.
+Thickness is the summed pixel coverage of a scan across the strokes, in device pixels. A non-scaling stroke keeps the stroke-width value in viewport pixels: 4 px, whatever the object transform. A plain stroke is multiplied by the viewBox zoom (3x) and by the object scale.
+
+variant: translate  transform="translate(0 0)"
+  plain        bbox=(210, 159, 359, 260) horizontal-edges=[(159, 170, 12.0, 165.0), (249, 260, 12.0, 255.0)] vertical-edges=[(210, 221, 12.0, 216.0), (348, 359, 12.0, 354.0)]
+  non-scaling  bbox=(214, 163, 355, 256) horizontal-edges=[(163, 166, 4.0, 165.0), (253, 256, 4.0, 255.0)] vertical-edges=[(214, 217, 4.0, 216.0), (352, 355, 4.0, 354.0)]
+  edge centers: plain=(284.5, 209.5) non-scaling=(284.5, 209.5) -> same
+  thickness: plain=[12.0, 12.0, 12.0, 12.0] (expected [12, 12, 12, 12])
+             non-scaling=[4.0, 4.0, 4.0, 4.0] (expected [4, 4, 4, 4])
+
+variant: rotate  transform="rotate(30)"
+  plain        bbox=(194, 128, 375, 291) horizontal-edges=[(150, 164, 13.84, 156.9), (254, 268, 13.85, 260.9)] vertical-edges=[(198, 212, 13.85, 204.9), (357, 372, 13.85, 363.9)]
+  non-scaling  bbox=(200, 134, 369, 285) horizontal-edges=[(155, 160, 4.64, 157.3), (259, 264, 4.64, 261.3)] vertical-edges=[(203, 208, 4.63, 205.3), (362, 367, 4.63, 364.3)]
+  edge centers: plain=(284.5, 209.5) non-scaling=(284.5, 209.5) -> same
+  thickness: plain=[13.84, 13.85, 13.85, 13.85] (expected [13.856406460551018, 13.856406460551018, 13.856406460551018, 13.856406460551018])
+             non-scaling=[4.64, 4.64, 4.63, 4.63] (expected [4.618802153517006, 4.618802153517006, 4.618802153517006, 4.618802153517006])
+
+variant: uniform-scale  transform="scale(2.5)"
+  plain        bbox=(97, 82, 472, 337) horizontal-edges=[(82, 112, 30.0, 97.0), (307, 337, 30.0, 322.0)] vertical-edges=[(97, 127, 30.0, 112.0), (442, 472, 30.0, 457.0)]
+  non-scaling  bbox=(110, 95, 459, 324) horizontal-edges=[(95, 99, 4.0, 97.0), (320, 324, 4.0, 322.0)] vertical-edges=[(110, 114, 4.0, 112.0), (455, 459, 4.0, 457.0)]
+  edge centers: plain=(284.5, 209.5) non-scaling=(284.5, 209.5) -> same
+  thickness: plain=[30.0, 30.0, 30.0, 30.0] (expected [30.0, 30.0, 30.0, 30.0])
+             non-scaling=[4.0, 4.0, 4.0, 4.0] (expected [4, 4, 4, 4])
+
+variant: scale-x  transform="scale(3.2 1.2)"
+  plain        bbox=(45, 148, 524, 271) horizontal-edges=[(148, 163, 14.4, 155.2), (256, 271, 14.4, 263.2)] vertical-edges=[(45, 83, 38.4, 64.2), (486, 524, 38.4, 505.2)]
+  non-scaling  bbox=(62, 154, 507, 265) horizontal-edges=[(154, 157, 4.0, 156.0), (262, 265, 4.0, 264.0)] vertical-edges=[(62, 66, 4.0, 64.0), (503, 507, 4.0, 505.0)]
+  edge centers: plain=(284.5, 209.5) non-scaling=(284.5, 209.5) -> same
+  thickness: plain=[14.4, 14.4, 38.4, 38.4] (expected [14.4, 14.4, 38.4, 38.4])
+             non-scaling=[4.0, 4.0, 4.0, 4.0] (expected [4, 4, 4, 4])
+
+variant: scale-y  transform="scale(1.2 3.2)"
+  plain        bbox=(195, 46, 374, 373) horizontal-edges=[(46, 85, 38.4, 65.2), (334, 373, 38.4, 353.2)] vertical-edges=[(195, 209, 14.4, 202.2), (360, 374, 14.4, 367.2)]
+  non-scaling  bbox=(200, 64, 369, 355) horizontal-edges=[(64, 67, 4.0, 66.0), (352, 355, 4.0, 354.0)] vertical-edges=[(200, 204, 4.0, 202.0), (365, 369, 4.0, 367.0)]
+  edge centers: plain=(284.5, 209.5) non-scaling=(284.5, 209.5) -> same
+  thickness: plain=[38.4, 38.4, 14.4, 14.4] (expected [38.4, 38.4, 14.4, 14.4])
+             non-scaling=[4.0, 4.0, 4.0, 4.0] (expected [4, 4, 4, 4])
+
+joins.png: scale(4 1); rows 1 and 3 are round caps and a miter join, rows 2 and 4 are butt dashes of 8/4; red is plain, blue is non-scaling.
+  plain dashes:          [(30, 61, 19.74, 39.9), (78, 109, 19.74, 87.9), (126, 157, 19.74, 135.9), (174, 205, 19.74, 183.9)]
+  non-scaling dashes:    [(30, 37, 4.55, 32.3), (42, 49, 4.55, 44.3), (54, 61, 4.55, 56.3), (66, 73, 4.55, 68.3)]
+  plain capped line:     [(22, 157, 83.69, 63.8)]
+  non-scaling capped line: [(28, 151, 70.45, 63.2)]
+  first dash: plain=32 px, non-scaling=8 px (expected 32 and 8)
+  capped line length: plain=136 px, non-scaling=124 px (stroke is 4 px; the plain caps add 4x2 px, the non-scaling caps add 2x2 px)
+
+PDF: legend.pdf written and rasterized to legend-pdf.png (1140x2220). The vector output holds the same outline Cairo computed; compare it with legend.png.
+
+checks:
+  every variant keeps the same edge positions with and without the vector effect, the plain stroke scales with the transform, and the non-scaling stroke keeps a constant thickness.

@@ -3,6 +3,18 @@
 ======
 
 
+Unreleased
+==========
+
+* Support the ``non-scaling-stroke`` value of the ``vector-effect`` property:
+  the stroke outline (width, caps, joins, dashes and ``strokeWidth``
+  markers) is computed in the host coordinate space, while geometry keeps
+  following element, group and root viewport transforms. See
+  ``NON-SCALING-STROKE.md`` for the verified scope and
+  ``examples/non_scaling_stroke_legend.py`` for the offline comparison.
+* ``vector-effect`` is not inherited, as required by the specification.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 
