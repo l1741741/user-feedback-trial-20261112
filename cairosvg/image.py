@@ -40,14 +40,20 @@ def image(surface, node):
         image_bytes.startswith((b'<svg ', b'<?xml', b'<!DOC', b'\x1f\x8b'))
         or b'<svg' in image_bytes
     ):
-        if 'x' in node:
-            del node['x']
-        if 'y' in node:
-            del node['y']
-        tree = Tree(
-            url=url.geturl(), url_fetcher=node.url_fetcher,
-            bytestring=image_bytes, tree_cache=surface.tree_cache,
-            unsafe=node.unsafe)
+        # The referenced SVG receives its own viewport at (x, y): its ``x``
+        # and ``y`` attributes are consumed here and must not be inherited.
+        # Restore them afterwards so rendering the same tree again gives the
+        # same result.
+        consumed = {
+            attribute: node.pop(attribute)
+            for attribute in ('x', 'y') if attribute in node}
+        try:
+            tree = Tree(
+                url=url.geturl(), url_fetcher=node.url_fetcher,
+                bytestring=image_bytes, tree_cache=surface.tree_cache,
+                unsafe=node.unsafe)
+        finally:
+            node.update(consumed)
         tree_width, tree_height, viewbox = node_format(
             surface, tree, reference=False)
         if viewbox:

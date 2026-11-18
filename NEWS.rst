@@ -3,6 +3,26 @@
 ======
 
 
+Unreleased
+==========
+
+* Resolve ``transform-origin`` against the current viewport and the
+  ``transform-box`` reference box instead of the device surface
+* Support ``transform-box``: ``view-box`` (default), ``fill-box``,
+  ``stroke-box``, and the ``content-box``/``border-box`` aliases
+* Support one-, two- and three-value ``transform-origin`` syntax, including
+  keyword order, percentages, absolute units and ``em``/``ex``/``ch``
+* Keep transform lists and nested groups in SVG order (leftmost outermost),
+  and use the viewBox size (not the letterboxed viewport) for ``view-box``
+* Ignore invalid ``transform`` values and fall back to the initial origin for
+  invalid ``transform-origin`` values, without leaking state to other elements
+* Apply a transform on the outermost ``svg`` outside its viewBox mapping,
+  with the viewport centre as its initial origin
+* Make rendering idempotent for reused trees: ``use`` and ``image`` no longer
+  delete consumed attributes, and patterns no longer mutate their definition
+* Compute bounding boxes per render instead of caching them on the node
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

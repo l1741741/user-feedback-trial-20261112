@@ -9,13 +9,14 @@ import io
 import cairocffi as cairo
 
 from .colors import color, negate_color
+from .bounding_box import reference_box
 from .defs import (
     apply_filter_after_painting, apply_filter_before_painting, clip_path,
     filter_, gradient_or_pattern, linear_gradient, marker, mask, paint_mask,
     parse_all_defs, pattern, prepare_filter, radial_gradient, use)
 from .helpers import (
-    UNITS, PointError, clip_rect, node_format, normalize, paint,
-    preserve_ratio, size, transform)
+    TRANSFORM_BOXES, UNITS, PointError, clip_rect, node_format, normalize,
+    paint, preserve_ratio, size, transform)
 from .image import image, invert_image
 from .parser import Tree
 from .path import draw_markers, path
@@ -159,6 +160,7 @@ class Surface(object):
         """
         self.cairo = None
         self.context_width, self.context_height = parent_width, parent_height
+        self.viewbox_width, self.viewbox_height = parent_width, parent_height
         self.cursor_position = [0, 0]
         self.cursor_d_position = [0, 0]
         self.text_path_width = 0
@@ -217,6 +219,22 @@ class Surface(object):
         # We must scale the context as the surface size is using physical units
         self.context.scale(
             self.device_units_per_user_units, self.device_units_per_user_units)
+        # A transform on the outermost ``svg`` applies to the element's CSS
+        # box, i.e. *outside* its own viewBox mapping (unlike inner ``svg``
+        # elements). Its reference box is the viewport in user units, so
+        # percentages and keywords use the viewport size rather than the
+        # viewBox size. Its initial origin is the viewport centre.
+        #
+        # Sub-surfaces (patterns, masks, marker-like trees) are drawn like a
+        # regular element inside their parent surface: their own ``transform``
+        # is applied by ``draw``, in the parent's coordinate system, so it
+        # must not be applied here.
+        self.root_node = tree if parent_surface is None else None
+        if parent_surface is None:
+            transform(
+                self, tree.get('transform'),
+                transform_origin=tree.get('transform-origin', '50% 50%'),
+                box=(0, 0, width, height), font_size=self.font_size)
         # Initial, non-rounded dimensions
         self.set_context_size(width, height, viewbox, tree)
         self.context.move_to(0, 0)
@@ -273,6 +291,15 @@ class Surface(object):
         self.context.translate(translate_x, translate_y)
         self.context_width = rect_width / scale_x
         self.context_height = rect_height / scale_y
+        # The ``view-box`` reference box of CSS Transforms is the viewBox
+        # itself, ignoring its min-x/min-y offset. It differs from
+        # context_width/height when ``preserveAspectRatio`` letterboxes the
+        # content (for example width=400 height=200 with a square viewBox), so
+        # keep it separately.
+        if viewbox:
+            self.viewbox_width, self.viewbox_height = viewbox[2:4]
+        else:
+            self.viewbox_width, self.viewbox_height = width, height
 
     def finish(self):
         """Read the surface content."""
@@ -302,7 +329,10 @@ class Surface(object):
         # Save context and related attributes
         old_parent_node = self.parent_node
         old_font_size = self.font_size
-        old_context_size = self.context_width, self.context_height
+        old_context_size = (
+            self.context_width, self.context_height,
+            getattr(self, 'viewbox_width', None),
+            getattr(self, 'viewbox_height', None))
         self.parent_node = node
 
         if "font" in node:
@@ -314,10 +344,21 @@ class Surface(object):
         self.font_size = size(self, node.get('font-size', '12pt'))
         self.context.save()
 
-        # Apply transformations
-        transform(
-            self, node.get('transform'),
-            transform_origin=node.get('transform-origin'))
+        # Apply transformations (the root one is applied by ``__init__``,
+        # outside the viewBox mapping).
+        if node is not getattr(self, 'root_node', None):
+            transform_box = node.get('transform-box')
+            if transform_box is None:
+                box = None
+            else:
+                if transform_box not in TRANSFORM_BOXES:
+                    transform_box = 'view-box'
+                # ``fill-box`` and the other object boxes are computed in the
+                # element's own user space, i.e. before its own transform.
+                box = reference_box(self, node, transform_box)
+            transform(
+                self, node.get('transform'), transform_origin=node.get(
+                    'transform-origin'), box=box, font_size=self.font_size)
 
         # Find and prepare opacity, masks and filters
         mask = parse_url(node.get('mask')).fragment
@@ -497,7 +538,8 @@ class Surface(object):
         self.context.restore()
         self.parent_node = old_parent_node
         self.font_size = old_font_size
-        self.context_width, self.context_height = old_context_size
+        (self.context_width, self.context_height,
+         self.viewbox_width, self.viewbox_height) = old_context_size
 
 
 class PDFSurface(Surface):

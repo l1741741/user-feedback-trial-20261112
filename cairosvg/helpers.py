@@ -194,84 +194,307 @@ def rotate(x, y, angle):
     return x * cos(angle) - y * sin(angle), y * cos(angle) + x * sin(angle)
 
 
-def transform(surface, transform_string, gradient=None, transform_origin=None):
-    """Transform ``surface`` or ``gradient`` if supplied using ``string``.
+# ``transform`` functions allowed in the SVG transform attribute. The CSS
+# Transform Level 2 functions (``translateX``, ``rotate3d``…) are *not* valid
+# here: an unknown function makes the whole attribute invalid.
+TRANSFORM_FUNCTIONS = {
+    'matrix': 6,
+    'rotate': (1, 3),
+    'scale': (1, 2),
+    'skewX': 1,
+    'skewY': 1,
+    'translate': (1, 2),
+}
 
-    See http://www.w3.org/TR/SVG/coords.html#TransformAttribute
+TRANSFORM_TOKEN = re.compile(
+    r'\s*([a-zA-Z]+)\s*\(\s*([^()]*?)\s*\)\s*')
+NUMBER = re.compile(r'[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$', re.I)
 
+# Keywords accepted by ``transform-origin`` and the value they stand for.
+ORIGIN_KEYWORDS = {
+    'left': (0., 'x'),
+    'right': (1., 'x'),
+    'top': (0., 'y'),
+    'bottom': (1., 'y'),
+    'center': (.5, 'xy'),
+}
+
+# Reference boxes supported for ``transform-box``. ``border-box`` and
+# ``content-box`` are only defined for CSS layout boxes; for SVG elements they
+# are treated as ``stroke-box`` and ``fill-box`` respectively.
+TRANSFORM_BOXES = (
+    'view-box', 'fill-box', 'stroke-box', 'border-box', 'content-box')
+
+LENGTH_UNITS = (
+    ('px', None), ('in', 96.), ('cm', 96. / 2.54), ('mm', 96. / 25.4),
+    ('pt', 96. / 72.), ('pc', 96. / 6.))
+
+
+def parse_transform(transform_string):
+    """Parse an SVG ``transform`` attribute into a list of operations.
+
+    Return ``[(name, [float, ...]), ...]`` or ``None`` when the attribute is
+    invalid. According to the SVG specification a single invalid function
+    invalidates the whole attribute; ``None`` therefore means "no transform".
+    The parser is strict on purpose: percentages, CSS units and the CSS-only
+    transform functions are rejected, as browsers do.
     """
-    if not transform_string:
-        return
+    if transform_string is None:
+        return None
+    string = transform_string.strip()
+    if not string:
+        return []
+    operations = []
+    position = 0
+    while position < len(string):
+        match = TRANSFORM_TOKEN.match(string, position)
+        if not match:
+            return None
+        name, arguments = match.groups()
+        arity = TRANSFORM_FUNCTIONS.get(name)
+        if arity is None:
+            return None
+        arguments = arguments.replace(',', ' ').split()
+        if not all(NUMBER.match(argument) for argument in arguments):
+            return None
+        if isinstance(arity, tuple):
+            if len(arguments) not in arity:
+                return None
+        elif len(arguments) != arity:
+            return None
+        operations.append((name, [float(argument) for argument in arguments]))
+        position = match.end()
+    return operations
 
-    transformations = re.findall(
-        r'(\w+) ?\( ?(.*?) ?\)', normalize(transform_string))
-    matrix = cairo.Matrix()
 
+def parse_origin_token(token):
+    """Parse one ``transform-origin`` token.
+
+    Return ``(value, axis)`` where ``value`` is a number or a keyword, and
+    ``axis`` is ``'x'``, ``'y'`` or ``'xy'`` (``center`` is valid on both
+    axes). Lengths are kept as strings, to be resolved by the caller.
+    """
+    token = token.strip().lower()
+    if token in ORIGIN_KEYWORDS:
+        return ORIGIN_KEYWORDS[token]
+    return token, None
+
+
+def absolute_length(string, font_size):
+    """Convert an absolute length to user units, or ``None`` if invalid.
+
+    Percentages are not accepted here; they are resolved by the caller
+    against the reference box. Relative units use the element font size.
+    """
+    string = string.strip().lower()
+    try:
+        return float(string)
+    except ValueError:
+        pass
+    for unit, factor in LENGTH_UNITS:
+        if string.endswith(unit) and len(string) > len(unit):
+            try:
+                number = float(string[:-len(unit)])
+            except ValueError:
+                return None
+            return number if factor is None else number * factor
+    for unit, factor in (('em', 1.), ('ex', .5), ('ch', .5)):
+        if string.endswith(unit) and len(string) > len(unit):
+            try:
+                return float(string[:-len(unit)]) * factor * font_size
+            except ValueError:
+                return None
+    return None
+
+
+def is_length(token):
+    """Whether ``token`` looks like a length or a percentage."""
+    if token.endswith('%'):
+        try:
+            float(token[:-1])
+        except ValueError:
+            return False
+        return True
+    return absolute_length(token, 12) is not None
+
+
+def _keyword_origin(token, axis, reference_size):
+    """Resolve a keyword token on one axis, or ``None`` if invalid there."""
+    value, token_axis = token
+    if token_axis not in ('xy', axis):
+        return None
+    return value * reference_size
+
+
+def _length_origin(token, reference_size, font_size):
+    """Resolve a length or percentage token, or ``None`` if invalid."""
+    value, token_axis = token
+    if token_axis is not None:
+        return None
+    if value.endswith('%'):
+        try:
+            return float(value[:-1]) * reference_size / 100
+        except ValueError:
+            return None
+    return absolute_length(value, font_size)
+
+
+def parse_transform_origin(transform_origin, box, font_size=12):
+    """Parse a ``transform-origin`` value against a reference box.
+
+    ``box`` is a ``(x, y, width, height)`` tuple expressed in the element's
+    user coordinates. Return ``(origin_x, origin_y)``, or ``None`` when the
+    value is invalid; callers fall back to the box origin, which is the
+    property's initial ``0 0``.
+
+    The syntax follows CSS Transforms Level 1: one or two values, or three
+    values whose last one is a length (the z offset, ignored for 2D drawing).
+    Percentages and keywords are resolved against the reference box.
+    """
+    if not transform_origin:
+        return None
+    tokens = transform_origin.replace(',', ' ').split()
+    if not 1 <= len(tokens) <= 3:
+        return None
+    if len(tokens) == 3:
+        # Third value is a z offset: a plain length, ignored for 2D drawing.
+        if '%' in tokens[2] or not is_length(tokens[2]):
+            return None
+        tokens = tokens[:2]
+
+    parsed = [parse_origin_token(token) for token in tokens]
+    for (value, axis) in parsed:
+        if axis is None and not is_length(value):
+            return None
+
+    x, y, width, height = box
+
+    def resolve_x(token):
+        if token[1] is not None:
+            return _keyword_origin(token, 'x', width)
+        return _length_origin(token, width, font_size)
+
+    def resolve_y(token):
+        if token[1] is not None:
+            return _keyword_origin(token, 'y', height)
+        return _length_origin(token, height, font_size)
+
+    if len(parsed) == 1:
+        axis = parsed[0][1]
+        if axis == 'x':
+            origin_x, origin_y = resolve_x(parsed[0]), height / 2
+        elif axis == 'y':
+            origin_x, origin_y = width / 2, resolve_y(parsed[0])
+        else:
+            origin_x, origin_y = resolve_x(parsed[0]), resolve_y(parsed[0])
+    else:
+        first, second = parsed
+        first_axis, second_axis = first[1], second[1]
+        if first_axis in ('x', 'y') and second_axis in ('x', 'y'):
+            # Two keywords: they must describe different axes.
+            if first_axis == second_axis:
+                return None
+            if first_axis == 'x':
+                origin_x, origin_y = resolve_x(first), resolve_y(second)
+            else:
+                origin_x, origin_y = resolve_x(second), resolve_y(first)
+        else:
+            # At least one value is a length/percentage; the other may be a
+            # keyword, which resolve_* rejects on the wrong axis.
+            origin_x, origin_y = resolve_x(first), resolve_y(second)
+    if origin_x is None or origin_y is None:
+        return None
+    return x + origin_x, y + origin_y
+
+
+def transform_matrix(surface, transform_string, transform_origin=None,
+                     box=None, font_size=None):
+    """Return the matrix for an SVG ``transform``, or ``None``.
+
+    ``None`` means the transform is invalid (and must be ignored). The
+    returned matrix is the user-space matrix (not inverted), composed in SVG
+    order: the leftmost operation is the outermost one.
+
+    ``transform_origin`` is resolved against ``box`` (in the element's user
+    coordinates), defaulting to the current viewport when ``box`` is ``None``.
+    """
+    if not transform_string and not transform_origin:
+        return None
+
+    operations = parse_transform(transform_string or '')
+    if operations is None:
+        return None
+
+    origin = None
     if transform_origin:
-        origin = transform_origin.split(' ')
-        origin_x = origin[0]
-        if len(origin) == 1:
-            if origin_x in ('top', 'bottom'):
-                origin_y = origin_x
-                origin_x = surface.width / 2
-            else:
-                origin_y = surface.height / 2
-        elif len(origin) > 1:
-            if origin_x in ('top', 'bottom'):
-                origin_y = origin_x
-                origin_x = origin[1]
-            else:
-                origin_y = origin[1]
-        else:
-            return
+        if box is None:
+            box = (0, 0,
+                   getattr(surface, 'viewbox_width', None) or
+                   surface.context_width or 0,
+                   getattr(surface, 'viewbox_height', None) or
+                   surface.context_height or 0)
+        if font_size is None:
+            font_size = surface.font_size
+        parsed_origin = parse_transform_origin(
+            transform_origin, box, font_size)
+        # An invalid value falls back to the initial ``0 0`` origin, i.e. the
+        # top-left corner of the reference box, as browsers do. The transform
+        # itself is still applied.
+        origin = parsed_origin if parsed_origin is not None else box[:2]
+        if not operations and parsed_origin is not None:
+            # No transform to offset.
+            return None
 
-        if origin_x == 'center':
-            origin_x = surface.width / 2
-        elif origin_x == 'left':
-            origin_x = 0
-        elif origin_x == 'right':
-            origin_x = surface.width
-        else:
-            origin_x = size(surface, origin_x, 'x')
+    matrix = cairo.Matrix()
+    if origin is not None:
+        matrix.translate(*origin)
 
-        if origin_y == 'center':
-            origin_y = surface.height / 2
-        elif origin_y == 'top':
-            origin_y = 0
-        elif origin_y == 'bottom':
-            origin_y = surface.height
-        else:
-            origin_y = size(surface, origin_y, 'y')
-
-        matrix.translate(float(origin_x), float(origin_y))
-
-    for transformation_type, transformation in transformations:
-        values = [size(surface, value) for value in transformation.split(' ')]
+    for transformation_type, values in operations:
         if transformation_type == 'matrix':
             matrix = cairo.Matrix(*values).multiply(matrix)
         elif transformation_type == 'rotate':
-            angle = radians(float(values.pop(0)))
-            x, y = values or (0, 0)
+            angle = radians(values[0])
+            x, y = (values[1:] + [0, 0])[:2]
             matrix.translate(x, y)
             matrix.rotate(angle)
             matrix.translate(-x, -y)
         elif transformation_type == 'skewX':
-            tangent = tan(radians(float(values[0])))
+            tangent = tan(radians(values[0]))
             matrix = cairo.Matrix(1, 0, tangent, 1, 0, 0).multiply(matrix)
         elif transformation_type == 'skewY':
-            tangent = tan(radians(float(values[0])))
+            tangent = tan(radians(values[0]))
             matrix = cairo.Matrix(1, tangent, 0, 1, 0, 0).multiply(matrix)
         elif transformation_type == 'translate':
             if len(values) == 1:
-                values += (0,)
+                values = values + [0]
             matrix.translate(*values[:2])
         elif transformation_type == 'scale':
             if len(values) == 1:
                 values = 2 * values
             matrix.scale(*values[:2])
 
-    if transform_origin:
-        matrix.translate(-float(origin_x), -float(origin_y))
+    if origin is not None:
+        matrix.translate(-origin[0], -origin[1])
+    return matrix
+
+
+def transform(surface, transform_string, gradient=None, transform_origin=None,
+              box=None, font_size=None):
+    """Transform ``surface`` or ``gradient`` if supplied using ``string``.
+
+    See http://www.w3.org/TR/SVG/coords.html#TransformAttribute
+
+    ``box`` is the reference box used by ``transform-origin``, in the
+    element's user coordinates. When ``None``, the current viewport is used.
+    ``font_size`` overrides the surface font size for ``em`` units.
+
+    An invalid ``transform`` or ``transform-origin`` leaves the element
+    untransformed and never leaks state into the next element.
+    """
+    matrix = transform_matrix(
+        surface, transform_string, transform_origin, box, font_size)
+    if matrix is None:
+        return
 
     try:
         matrix.invert()

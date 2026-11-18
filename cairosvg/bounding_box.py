@@ -10,11 +10,18 @@ from math import (
     tau)
 
 from .features import match_features
-from .helpers import PATH_LETTERS, normalize, point, size
+from .helpers import PATH_LETTERS, normalize, paint, point, size
 from .parser import Tree
 from .url import parse_url
 
 EMPTY_BOUNDING_BOX = float('inf'), float('inf'), 0, 0
+
+# Tags that never paint anything and therefore must not contribute to a
+# reference box (``getBBox`` on a group ignores them too).
+NON_RENDERED_TAGS = frozenset((
+    'defs', 'clipPath', 'filter', 'linearGradient', 'marker', 'mask',
+    'pattern', 'radialGradient', 'symbol', 'title', 'desc', 'metadata',
+    'style', 'script'))
 
 
 def calculate_bounding_box(surface, node):
@@ -22,12 +29,24 @@ def calculate_bounding_box(surface, node):
 
     See https://www.w3.org/TR/SVG/coords.html#ObjectBoundingBox
 
+    The result is cached using ``id(node)`` rather than in a node attribute,
+    so that a tree whose nodes are mutated between renders (or reused by
+    ``use``) never inherits a stale box.
+
     """
-    if 'bounding_box' not in node and node.tag in BOUNDING_BOX_METHODS:
-        bounding_box = BOUNDING_BOX_METHODS[node.tag](surface, node)
-        if is_non_empty_bounding_box(bounding_box):
-            node['bounding_box'] = bounding_box
-    return node.get('bounding_box')
+    if node.tag in BOUNDING_BOX_METHODS:
+        cache = getattr(surface, 'bounding_boxes', None)
+        if cache is None:
+            cache = surface.bounding_boxes = {}
+        key = (id(node), node.tag)
+        if key not in cache:
+            bounding_box = BOUNDING_BOX_METHODS[node.tag](surface, node)
+            # Keep a reference to the node so that its ``id`` cannot be reused
+            # by another object while the entry is cached.
+            cache[key] = (node, bounding_box)
+        return cache[key][1] if is_non_empty_bounding_box(
+            cache[key][1]) else None
+    return None
 
 
 def bounding_box_rect(surface, node):
@@ -216,8 +235,45 @@ def bounding_box_path(surface, node):
 
 
 def bounding_box_text(surface, node):
-    """Get the bounding box of a ``text`` node."""
-    return node.get('text_bounding_box')
+    """Get the bounding box of a ``text`` node.
+
+    The box is normally computed while the text is laid out (and stored by
+    ``text()``). When it is needed earlier, for a ``transform-box`` reference
+    box, run a measurement pass that lays out the text without painting it.
+    """
+    bounding_box = node.get('text_bounding_box')
+    if bounding_box is not None:
+        return bounding_box
+    if getattr(surface, 'measuring_text', False):
+        return None
+    from .text import text
+
+    surface.measuring_text = True
+    context = surface.context
+    context.save()
+    path = context.copy_path()
+    cursor_position = list(surface.cursor_position)
+    cursor_d_position = list(surface.cursor_d_position)
+    text_path_width = surface.text_path_width
+    stroke_and_fill = surface.stroke_and_fill
+    try:
+        surface.stroke_and_fill = False
+        surface.cursor_position = [0, 0]
+        surface.cursor_d_position = [0, 0]
+        surface.text_path_width = 0
+        context.new_path()
+        text(surface, node)
+        bounding_box = node.get('text_bounding_box')
+    finally:
+        surface.measuring_text = False
+        surface.cursor_position = cursor_position
+        surface.cursor_d_position = cursor_d_position
+        surface.text_path_width = text_path_width
+        surface.stroke_and_fill = stroke_and_fill
+        context.new_path()
+        context.append_path(path)
+        context.restore()
+    return bounding_box
 
 
 def angle(bx, by):
@@ -344,6 +400,186 @@ def bounding_box_use(surface, node):
     if not match_features(tree.xml_tree):
         return None
     return calculate_bounding_box(surface, tree)
+
+
+def stroke_width(surface, node):
+    """Get the painted stroke width of ``node``, or 0 if it has no stroke."""
+    stroke = node.get('stroke')
+    if not stroke or stroke == 'none':
+        return 0
+    source, color = paint(stroke)
+    if source is None and color in (None, 'none'):
+        return 0
+    try:
+        width = size(surface, node.get('stroke-width', '1'))
+    except (TypeError, ValueError):
+        return 0
+    return max(width or 0, 0)
+
+
+def transformed_bounding_box(surface, node, stroke=True, visited=None,
+                             own=False):
+    """Bounding box of ``node`` in the current user space, or ``None``.
+
+    Descendant transforms are applied, like ``getBBox`` on a container. When
+    ``stroke`` is true the box is expanded by half the painted stroke width,
+    which is the ``stroke-box`` reference box used by ``transform-box``.
+
+    ``own`` means the box is the element's own reference box: an inner ``svg``
+    then keeps its contents in its own user (viewBox) coordinates, while an
+    ancestor's box maps them through the viewport mapping.
+    """
+    from .helpers import transform_matrix
+
+    if visited is None:
+        visited = set()
+    key = id(node)
+    if key in visited:
+        return None
+    visited.add(key)
+
+    if node.tag in BOUNDING_BOX_METHODS and node.tag not in (
+            'g', 'use', 'marker'):
+        bounding_box = calculate_bounding_box(surface, node)
+        if not is_valid_bounding_box(bounding_box):
+            return None
+        minx, miny, width, height = bounding_box
+        if stroke:
+            half = stroke_width(surface, node) / 2
+            if half:
+                minx, miny = minx - half, miny - half
+                width, height = width + 2 * half, height + 2 * half
+        return minx, miny, width, height
+
+    if node.tag == 'svg':
+        if not own:
+            # Inside an ancestor's box, an inner ``svg`` occupies its viewport
+            # rectangle: its content is clipped to that viewport and cannot
+            # extend the ancestor beyond it.
+            from .helpers import node_format
+
+            width, height, _ = node_format(surface, node)
+            return (size(surface, node.get('x'), 'x'),
+                    size(surface, node.get('y'), 'y'), width, height)
+        # The element's own reference box: its content, in its own user
+        # coordinate system (the viewBox coordinates). This is the box that
+        # browsers use for ``transform-box`` on an inner ``svg``.
+        result = None
+        for child in node.children:
+            if child.tag in NON_RENDERED_TAGS:
+                continue
+            box = _child_box(surface, child, stroke, visited)
+            result = combine_reference_boxes(result, box)
+        return result
+
+    if node.tag == 'use':
+        href = parse_url(node.get_href()).geturl()
+        try:
+            tree = Tree(
+                url=href, url_fetcher=node.url_fetcher, parent=node,
+                tree_cache=getattr(surface, 'tree_cache', None),
+                unsafe=node.unsafe)
+        except TypeError:
+            return None
+        if not match_features(tree.xml_tree):
+            return None
+        result = None
+        for child in ([tree] if tree.tag in BOUNDING_BOX_METHODS
+                      else tree.children):
+            box = _child_box(surface, child, stroke, visited)
+            result = combine_reference_boxes(result, box)
+        return result
+
+    result = None
+    for child in node.children:
+        if child.tag in NON_RENDERED_TAGS:
+            continue
+        box = _child_box(surface, child, stroke, visited)
+        result = combine_reference_boxes(result, box)
+    return result
+
+
+def _child_box(surface, child, stroke, visited):
+    """Bounding box of ``child`` including its ``x``/``y`` and ``transform``.
+
+    ``x`` and ``y`` are part of the geometry of a child (for ``use``, they
+    translate the referenced content), but they are *not* part of a ``use``
+    element's own reference box: browsers resolve ``transform-origin`` on a
+    ``use`` against the referenced content before that translation.
+    """
+    from .helpers import transform_matrix
+
+    box = transformed_bounding_box(surface, child, stroke, visited)
+    if box is None:
+        return None
+    # The bounding box of a ``use`` is computed from the referenced content
+    # and does not include the translation carried by the ``use`` element
+    # itself, unlike shapes whose box already includes their ``x``/``y``.
+    if child.tag == 'use':
+        dx = size(surface, child.get('x'), 'x')
+        dy = size(surface, child.get('y'), 'y')
+        if dx or dy:
+            box = box[0] + dx, box[1] + dy, box[2], box[3]
+    transform_string = child.get('transform')
+    if not transform_string:
+        return box
+    matrix = transform_matrix(surface, transform_string)
+    if matrix is None:
+        # Invalid child transform: the child is not rendered at all.
+        return None
+    minx, miny, width, height = box
+    points = (
+        (minx, miny), (minx + width, miny),
+        (minx, miny + height), (minx + width, miny + height))
+    xs, ys = [], []
+    for point_ in points:
+        x, y = matrix.transform_point(*point_)
+        xs.append(x)
+        ys.append(y)
+    return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
+
+
+def combine_reference_boxes(box, other):
+    """Union of two reference boxes, ignoring empty ones."""
+    if not is_valid_bounding_box(other):
+        return box
+    if not is_valid_bounding_box(box):
+        return other
+    minx = min(box[0], other[0])
+    miny = min(box[1], other[1])
+    maxx = max(box[0] + box[2], other[0] + other[2])
+    maxy = max(box[1] + box[3], other[1] + other[3])
+    return minx, miny, maxx - minx, maxy - miny
+
+
+def reference_box(surface, node, transform_box):
+    """Return the reference box for ``transform-origin``.
+
+    See https://drafts.csswg.org/css-transforms/#transform-box. The viewport
+    box starts at the viewport origin, as browsers do (the ``viewBox`` offset
+    is not added). ``content-box`` and ``border-box`` map to ``fill-box`` and
+    ``stroke-box``, as only CSS layout boxes define a content and border area.
+    """
+    if transform_box in ('fill-box', 'content-box'):
+        stroke = False
+    elif transform_box in ('stroke-box', 'border-box'):
+        stroke = True
+    else:
+        return view_box(surface)
+    box = transformed_bounding_box(surface, node, stroke=stroke, own=True)
+    if box is None:
+        # No object box (empty content, or text before it is laid out): fall
+        # back to the view box, which keeps percentages meaningful instead of
+        # collapsing everything to the viewport origin.
+        return view_box(surface)
+    return box
+
+
+def view_box(surface):
+    """The ``view-box`` reference box: origin at 0 0, viewBox size."""
+    width = getattr(surface, 'viewbox_width', None) or surface.context_width
+    height = getattr(surface, 'viewbox_height', None) or surface.context_height
+    return 0, 0, width or 0, height or 0
 
 
 def extend_bounding_box(bounding_box, points):

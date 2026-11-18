@@ -5,6 +5,8 @@ This module handles clips, gradients, masks, patterns and external nodes.
 
 """
 
+import copy
+
 from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
 from .features import match_features
 from .helpers import paint, size, transform
@@ -219,6 +221,10 @@ def draw_gradient(surface, node, name, opacity):
 def draw_pattern(surface, node, name, opacity):
     """Draw a pattern image."""
     pattern_node = surface.patterns[name]
+    # Work on a shallow copy: the pattern definition is cached in the surface
+    # and reused for every element, so mutating it would leak the tag change,
+    # the popped width/height and the computed transform into later uses.
+    pattern_node = copy.copy(pattern_node)
     pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
     pattern_node.tag = 'g'
     transform(surface, pattern_node.get('patternTransform'))
@@ -341,35 +347,37 @@ def use(surface, node):
     surface.context.save()
     surface.context.translate(
         size(surface, node.get('x'), 'x'), size(surface, node.get('y'), 'y'))
-    if 'x' in node:
-        del node['x']
-    if 'y' in node:
-        del node['y']
-    if 'viewBox' in node:
-        del node['viewBox']
-    if 'mask' in node:
-        del node['mask']
-    href = parse_url(node.get_href()).geturl()
+    # ``x``, ``y``, ``viewBox`` and ``mask`` are consumed by the referring
+    # element and must not be inherited by the referenced tree (otherwise a
+    # referenced ``use`` would translate twice). Store and restore them instead
+    # of deleting them, so that rendering the same tree twice is idempotent.
+    consumed = {}
+    for attribute in ('x', 'y', 'viewBox', 'mask'):
+        if attribute in node:
+            consumed[attribute] = node.pop(attribute)
     try:
-        tree = Tree(
-            url=href, url_fetcher=node.url_fetcher, parent=node,
-            tree_cache=surface.tree_cache, unsafe=node.unsafe)
-    except TypeError:
+        href = parse_url(node.get_href()).geturl()
+        try:
+            tree = Tree(
+                url=href, url_fetcher=node.url_fetcher, parent=node,
+                tree_cache=surface.tree_cache, unsafe=node.unsafe)
+        except TypeError:
+            return
+
+        if not match_features(tree.xml_tree):
+            return
+
+        if tree.tag in ('svg', 'symbol'):
+            # Explicitely specified
+            # http://www.w3.org/TR/SVG11/struct.html#UseElement
+            tree.tag = 'svg'
+            if 'width' in node and 'height' in node:
+                tree['width'], tree['height'] = node['width'], node['height']
+
+        surface.draw(tree)
+        node.get('fill', None)
+        node.get('stroke', None)
+    finally:
+        node.update(consumed)
         surface.context.restore()
-        return
 
-    if not match_features(tree.xml_tree):
-        surface.context.restore()
-        return
-
-    if tree.tag in ('svg', 'symbol'):
-        # Explicitely specified
-        # http://www.w3.org/TR/SVG11/struct.html#UseElement
-        tree.tag = 'svg'
-        if 'width' in node and 'height' in node:
-            tree['width'], tree['height'] = node['width'], node['height']
-
-    surface.draw(tree)
-    node.get('fill', None)
-    node.get('stroke', None)
-    surface.context.restore()
