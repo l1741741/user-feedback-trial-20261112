@@ -3,6 +3,35 @@
 ======
 
 
+Unreleased
+==========
+
+* Fix SVG filters:
+
+  * ``feOffset`` no longer transforms the host context, so an element's
+    offset is not scaled twice by an outer ``transform`` and later layers
+    are never moved;
+  * ``filterUnits`` and ``primitiveUnits`` are applied independently, and
+    ``objectBoundingBox`` lengths use the bounding box width and height
+    separately, so non-square objects are not squashed on one axis and
+    negative offsets keep their sign;
+  * the filter region is a hard clip on the result, primitive subregions
+    default to the union of their referenced inputs, and pixels outside the
+    declared region are never painted;
+  * filters are evaluated as a chain in document order with ``in``/
+    ``in2``/``result`` references, and ``feBlend``/``feComposite`` no longer
+    leave an operator or path behind for the following elements;
+  * an empty filter or a zero-sized filter region hides only the filtered
+    element, while an unknown filter, an unsupported standard input or
+    ``objectBoundingBox`` units on a bbox-less object keep the unfiltered
+    graphic;
+  * ``use`` keeps its ``x``/``y`` shift when the filter region is computed.
+
+  Supported primitives, applied in document order: ``feOffset``, ``feFlood``,
+  ``feBlend``, ``feComposite`` and ``feMerge``/``feMergeNode``. Other filter
+  primitives are skipped without changing the other layers.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

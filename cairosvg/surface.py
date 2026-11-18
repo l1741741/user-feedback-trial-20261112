@@ -10,9 +10,9 @@ import cairocffi as cairo
 
 from .colors import color, negate_color
 from .defs import (
-    apply_filter_after_painting, apply_filter_before_painting, clip_path,
-    filter_, gradient_or_pattern, linear_gradient, marker, mask, paint_mask,
-    parse_all_defs, pattern, prepare_filter, radial_gradient, use)
+    EMPTY_FILTER, apply_filter, clip_path, filter_, gradient_or_pattern,
+    linear_gradient, marker, mask, paint_mask, parse_all_defs, pattern,
+    radial_gradient, use)
 from .helpers import (
     UNITS, PointError, clip_rect, node_format, normalize, paint,
     preserve_ratio, size, transform)
@@ -319,15 +319,16 @@ class Surface(object):
             self, node.get('transform'),
             transform_origin=node.get('transform-origin'))
 
-        # Find and prepare opacity, masks and filters
+        # Find opacity, masks and filters. Filters are applied after
+        # painting, to a group containing the element and its children; they
+        # never transform the host context. A mask that is not defined does
+        # not create a group.
         mask = parse_url(node.get('mask')).fragment
         filter_ = parse_url(node.get('filter')).fragment
         opacity = float(node.get('opacity', 1))
+        masked = mask in self.masks
 
-        if filter_:
-            prepare_filter(self, node, filter_)
-
-        if filter_ or mask or (opacity < 1 and node.children):
+        if filter_ or masked or (opacity < 1 and node.children):
             self.context.push_group()
 
         # Move to (node.x, node.y)
@@ -411,10 +412,12 @@ class Surface(object):
                 # Error in point parsing, do nothing
                 pass
 
-        # Get stroke and fill opacity
+        # Get stroke and fill opacity. When the element is rendered into a
+        # group (filter, mask or group opacity), the group is composited with
+        # the opacity afterwards: applying it twice would darken the result.
         stroke_opacity = float(node.get('stroke-opacity', 1))
         fill_opacity = float(node.get('fill-opacity', 1))
-        if opacity < 1 and not node.children:
+        if opacity < 1 and not node.children and not filter_ and not masked:
             stroke_opacity *= opacity
             fill_opacity *= opacity
 
@@ -477,16 +480,19 @@ class Surface(object):
                 self.draw(child)
 
         # Apply filter, mask and opacity
-        if filter_ or mask or (opacity < 1 and node.children):
-            self.context.pop_group_to_source()
-            if filter_:
-                apply_filter_before_painting(self, node, filter_)
-            if mask in self.masks:
-                paint_mask(self, node, mask, opacity)
-            else:
-                self.context.paint_with_alpha(opacity)
-            if filter_:
-                apply_filter_after_painting(self, node, filter_)
+        if filter_ or masked or (opacity < 1 and node.children):
+            source = self.context.pop_group()
+            result = (
+                apply_filter(self, node, filter_, source) if filter_ else
+                source)
+            if result is not EMPTY_FILTER:
+                # ``None`` means that the filter is not supported: the
+                # unfiltered source is painted, so other layers never move.
+                self.context.set_source(result or source)
+                if masked:
+                    paint_mask(self, node, mask, opacity)
+                else:
+                    self.context.paint_with_alpha(opacity)
 
         # Clean cursor's position after 'text' tags
         if node.tag == 'text':

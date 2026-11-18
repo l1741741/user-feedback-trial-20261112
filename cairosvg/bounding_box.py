@@ -336,14 +336,27 @@ def bounding_box_group(surface, node):
 
 
 def bounding_box_use(surface, node):
-    """Get the bounding box of a ``use`` node."""
+    """Get the bounding box of a ``use`` node.
+
+    The ``x`` and ``y`` attributes shift the referenced content, so they are
+    added to its bounding box: a filter region defined in object bounding box
+    units has to include that shift.
+
+    """
     href = parse_url(node.get_href()).geturl()
     tree = Tree(
         url=href, url_fetcher=node.url_fetcher, parent=node,
         unsafe=node.unsafe)
     if not match_features(tree.xml_tree):
         return None
-    return calculate_bounding_box(surface, tree)
+    bounding_box = calculate_bounding_box(surface, tree)
+    if not is_valid_bounding_box(bounding_box):
+        return bounding_box
+    minx, miny, width, height = bounding_box
+    return (
+        minx + size(surface, node.get('x'), 'x'),
+        miny + size(surface, node.get('y'), 'y'),
+        width, height)
 
 
 def extend_bounding_box(bounding_box, points):

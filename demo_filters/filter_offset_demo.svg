@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="180"
+     viewBox="0 0 240 180" version="1.1">
+  <title>feOffset, filter region and semi-transparent shadow</title>
+  <desc>
+    Four recognizable layers on a transparent background:
+    an unfiltered dark frame, a red rectangle with a semi-transparent black
+    shadow offset by (24, 12), a green rectangle whose filter region clips
+    its offset, and an unfiltered lime square. Every layer is a flat color,
+    so the expected PNG can be checked with exact pixel probes.
+  </desc>
+
+  <defs>
+    <!-- Shadow: offset alpha, flood black at 50%, keep the source on top. -->
+    <filter id="drop-shadow" x="-50%" y="-50%" width="200%" height="200%"
+            filterUnits="objectBoundingBox" primitiveUnits="userSpaceOnUse">
+      <feOffset in="SourceAlpha" dx="24" dy="12" result="offset-alpha"/>
+      <feFlood flood-color="black" flood-opacity="0.5" result="shadow-color"/>
+      <feComposite in="shadow-color" in2="offset-alpha"
+                   operator="in" result="shadow"/>
+      <feMerge>
+        <feMergeNode in="shadow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Region reduced to the source box: the (16, 8) offset is clipped. -->
+    <filter id="clipped-offset" x="0" y="0" width="100%" height="100%"
+            filterUnits="objectBoundingBox" primitiveUnits="userSpaceOnUse">
+      <feOffset dx="16" dy="8"/>
+    </filter>
+  </defs>
+
+  <!-- 1. Unfiltered border: must never move. -->
+  <rect x="4" y="4" width="232" height="172"
+        fill="none" stroke="#222222" stroke-width="2"/>
+
+  <!-- 2. Source rectangle with a semi-transparent shadow. -->
+  <rect x="40" y="30" width="60" height="30" fill="#cc2222"
+        filter="url(#drop-shadow)"/>
+
+  <!-- 3. Region-clipped offset: only the in-region part is painted. -->
+  <rect x="40" y="100" width="40" height="20" fill="#238823"
+        filter="url(#clipped-offset)"/>
+
+  <!-- 4. Unfiltered sibling: must stay exactly where it is drawn. -->
+  <rect x="190" y="130" width="20" height="20" fill="#88cc22"/>
+</svg>
