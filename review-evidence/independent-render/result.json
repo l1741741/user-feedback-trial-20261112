@@ -1,0 +1,26 @@
+{
+  "slug": "mask-luminance",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-9339-mask-luminance/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 3,
+  "failures": 0,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "black-white-grey-luminance",
+      "passed": true
+    },
+    {
+      "name": "alpha-mask-colour-independent",
+      "passed": true
+    }
+  ],
+  "images": [
+    "ordinary",
+    "mask-luminance",
+    "mask-alpha"
+  ]
+}
