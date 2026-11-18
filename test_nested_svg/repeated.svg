@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="40">
+  <!--
+    The same icon, with a viewBox different from its intrinsic size, is
+    embedded twice at different sizes. Each embedding must be sized from the
+    icon's own viewBox; the first embedding must not change the intrinsic size
+    seen by the second one. The second embedding is letterboxed horizontally
+    (its 20x20 intrinsic content in a 40x20 region, default
+    preserveAspectRatio="xMidYMid meet").
+  -->
+  <rect width="200" height="40" fill="#ffffff"/>
+  <image href="icons/scaled.svg" x="0" y="0" width="40" height="40"/>
+  <image href="icons/scaled.svg" x="100" y="0" width="40" height="20"/>
+</svg>

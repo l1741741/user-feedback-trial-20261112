@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40">
+  <!-- A readable sibling before the broken embedded document. -->
+  <rect x="0" y="0" width="40" height="40" fill="#ff0000"/>
+  <!-- A broken embedded document: must be ignored, not abort the drawing. -->
+  <image href="broken.svg" x="40" y="0" width="40" height="40"/>
+  <!-- The sibling after it must still be drawn. -->
+  <rect x="80" y="0" width="40" height="40" fill="#0000ff"/>
+</svg>

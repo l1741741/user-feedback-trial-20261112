@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 20 10">
+  <!-- Intrinsic size (40x20) differs from the viewBox (20x10) on purpose. -->
+  <defs>
+    <linearGradient id="gradient" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff00ff"/>
+      <stop offset="1" stop-color="#800080"/>
+    </linearGradient>
+  </defs>
+  <!-- A relative resource, resolved against this file's own folder. -->
+  <image href="pixel.png" x="0" y="0" width="10" height="10"/>
+  <rect x="10" y="0" width="10" height="10" fill="url(#gradient)"/>
+</svg>

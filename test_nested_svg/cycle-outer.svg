@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">
+  <!-- Sibling drawn before the cyclic image. -->
+  <rect width="40" height="40" fill="#ff0000"/>
+  <image href="cycle.svg" x="0" y="0" width="40" height="40"/>
+  <!-- Sibling drawn after it, using the outer definitions. -->
+  <rect x="30" y="30" width="10" height="10" fill="#0000ff"/>
+</svg>

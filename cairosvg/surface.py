@@ -146,7 +146,8 @@ class Surface(object):
     def __init__(self, tree, output, dpi, parent_surface=None,
                  parent_width=None, parent_height=None,
                  scale=1, output_width=None, output_height=None,
-                 background_color=None, map_rgba=None, map_image=None):
+                 background_color=None, map_rgba=None, map_image=None,
+                 reference_count=None, embedded_urls=None):
         """Create the surface from a filename or a file-like object.
 
         The rendered content is written to ``output`` which can be a filename,
@@ -163,7 +164,15 @@ class Surface(object):
         self.cursor_d_position = [0, 0]
         self.text_path_width = 0
         self.tree_cache = {(tree.url, tree.get('id')): tree}
-        self.reference_count = 0
+        self.reference_count = (
+            0 if reference_count is None else reference_count)
+        # URLs of the embedded documents currently being rendered, used to
+        # break cycles (an SVG embedding itself, directly or not).  The
+        # document being rendered is part of the chain too.
+        embedded_urls = frozenset() if embedded_urls is None else embedded_urls
+        if tree.url:
+            embedded_urls = embedded_urls | {tree.url}
+        self.embedded_urls = embedded_urls
         if parent_surface:
             self.markers = parent_surface.markers
             self.gradients = parent_surface.gradients
@@ -536,6 +545,36 @@ class PNGSurface(Surface):
         if self.output is not None:
             self.cairo.write_to_png(self.output)
         return super().finish()
+
+
+class EmbeddedSurface(Surface):
+    """A surface used to render an SVG document embedded in an ``<image>``.
+
+    The embedded document is rendered on its own surface so that its own
+    stylesheets, definitions (gradients, patterns, clip paths…) and lifetime
+    never leak into the outer document, and so that its own ``viewBox`` and
+    intrinsic size are resolved in its own coordinate system.  The result is
+    then painted into the outer context by :func:`cairosvg.image.image`.
+
+    Everything is recorded (instead of rasterized) to keep vector output
+    vector-based; a recording surface is replayed as vector operations for
+    the PDF, PS, EPS and SVG targets and rasterized for PNG.
+
+    """
+    device_units_per_user_units = 1
+
+    def _create_surface(self, width, height):
+        """Create and return ``(cairo_surface, width, height)``."""
+        width = max(int(round(width)), 1)
+        height = max(int(round(height)), 1)
+        cairo_surface = cairo.RecordingSurface(
+            cairo.CONTENT_COLOR_ALPHA, (0, 0, width, height))
+        return cairo_surface, width, height
+
+    def finish(self):
+        """Keep the recording alive, it is replayed by the outer surface."""
+        self.cairo.flush()
+        return self.cairo
 
 
 class SVGSurface(Surface):

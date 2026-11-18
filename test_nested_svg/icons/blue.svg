@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40">
+  <defs>
+    <linearGradient id="gradient" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0000ff"/>
+      <stop offset="1" stop-color="#000080"/>
+    </linearGradient>
+    <clipPath id="clip">
+      <circle cx="20" cy="20" r="20"/>
+    </clipPath>
+  </defs>
+  <rect width="40" height="40" fill="url(#gradient)" clip-path="url(#clip)"/>
+</svg>

@@ -3,6 +3,28 @@
 ======
 
 
+Version 2.9.2 (unreleased)
+==========================
+
+* Fix the rendering of SVG documents embedded in ``<image>`` elements. Embedded
+  documents are now rendered on their own surface, so that:
+  - their stylesheets and definitions (gradients, patterns, clip paths, masks…)
+    no longer leak into the outer document, and identically named ids from two
+    embedded documents no longer overwrite each other;
+  - their ``viewBox``, intrinsic size and coordinate system are resolved in
+    their own document, independently of the outer one, and repeated embeddings
+    can use different sizes;
+  - their transparent areas stay transparent when mapped into the image region;
+  - their relative resources (images, stylesheets) are resolved against the
+    document's own source, as before, with the same access policy.
+  Vector output (PDF, PS, EPS, SVG) stays vector-based.
+* Ignore broken embedded SVG documents instead of aborting the whole
+  conversion, so that the following siblings are still drawn.
+* Break cycles of embedded documents (an SVG embedding itself).
+* Bound the number of embedded documents rendered by a single conversion, as
+  already done for ``use`` references.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 
