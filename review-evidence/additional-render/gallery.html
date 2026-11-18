@@ -1,0 +1,92 @@
+<!doctype html><meta charset="utf-8"><title>嵌套文本目标宽度</title><style>body{font:20px system-ui;margin:24px}img{width:1000px;max-width:100%;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>240单位目标宽度：完整文本与等价tspan</h1><p>同字体、字号和内容，增加无样式tspan不应改变目标宽度；蓝色兄弟保持正常。</p><h2>spacing-flat</h2><p>SVG输入</p><img src="spacing-flat.svg"><p>当次PNG</p><img src="spacing-flat.png"><h2>spacing-empty-parent</h2><p>SVG输入</p><img src="spacing-empty-parent.svg"><p>当次PNG</p><img src="spacing-empty-parent.png"><h2>spacing-mixed</h2><p>SVG输入</p><img src="spacing-mixed.svg"><p>当次PNG</p><img src="spacing-mixed.png"><h2>spacingAndGlyphs-flat</h2><p>SVG输入</p><img src="spacingAndGlyphs-flat.svg"><p>当次PNG</p><img src="spacingAndGlyphs-flat.png"><h2>spacingAndGlyphs-empty-parent</h2><p>SVG输入</p><img src="spacingAndGlyphs-empty-parent.svg"><p>当次PNG</p><img src="spacingAndGlyphs-empty-parent.png"><h2>spacingAndGlyphs-mixed</h2><p>SVG输入</p><img src="spacingAndGlyphs-mixed.svg"><p>当次PNG</p><img src="spacingAndGlyphs-mixed.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12586-text-spacing-length/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 8,
+  &quot;passed&quot;: 6,
+  &quot;failed&quot;: 2,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;spacing-empty-parent-same-target-as-flat&quot;,
+      &quot;passed&quot;: true,
+      &quot;actual_red_bbox&quot;: [
+        20,
+        38,
+        258,
+        66
+      ],
+      &quot;reference_red_bbox&quot;: [
+        20,
+        38,
+        258,
+        66
+      ],
+      &quot;changed_pixels&quot;: 0
+    },
+    {
+      &quot;name&quot;: &quot;spacing-empty-parent-blue-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;spacing-mixed-same-target-as-flat&quot;,
+      &quot;passed&quot;: false,
+      &quot;actual_red_bbox&quot;: [
+        20,
+        38,
+        258,
+        65
+      ],
+      &quot;reference_red_bbox&quot;: [
+        20,
+        38,
+        258,
+        66
+      ],
+      &quot;changed_pixels&quot;: 795
+    },
+    {
+      &quot;name&quot;: &quot;spacing-mixed-blue-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;spacingAndGlyphs-empty-parent-same-target-as-flat&quot;,
+      &quot;passed&quot;: true,
+      &quot;actual_red_bbox&quot;: [
+        21,
+        38,
+        254,
+        66
+      ],
+      &quot;reference_red_bbox&quot;: [
+        21,
+        38,
+        254,
+        66
+      ],
+      &quot;changed_pixels&quot;: 0
+    },
+    {
+      &quot;name&quot;: &quot;spacingAndGlyphs-empty-parent-blue-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;spacingAndGlyphs-mixed-same-target-as-flat&quot;,
+      &quot;passed&quot;: false,
+      &quot;actual_red_bbox&quot;: [
+        23,
+        38,
+        400,
+        66
+      ],
+      &quot;reference_red_bbox&quot;: [
+        21,
+        38,
+        254,
+        66
+      ],
+      &quot;changed_pixels&quot;: 4796
+    },
+    {
+      &quot;name&quot;: &quot;spacingAndGlyphs-mixed-blue-sibling&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>

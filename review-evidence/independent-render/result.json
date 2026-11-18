@@ -1,0 +1,33 @@
+{
+  "slug": "text-spacing-length",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12586-text-spacing-length/local-frozen-source/cairosvg/__init__.py",
+  "tests": 4,
+  "passed": 4,
+  "failures": 0,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "textlength-adjusts-visible-width",
+      "passed": true
+    },
+    {
+      "name": "length-does-not-scale-following-text",
+      "passed": true
+    },
+    {
+      "name": "text-repeat-stable",
+      "passed": true
+    }
+  ],
+  "images": [
+    "ordinary",
+    "textlength",
+    "length-sibling",
+    "plain-sibling",
+    "text-repeat-a",
+    "text-repeat-b"
+  ]
+}

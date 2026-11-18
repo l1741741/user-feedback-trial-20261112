@@ -1,0 +1,22 @@
+{
+  "task_id": "rerun15-20261118-12586-text-spacing-length",
+  "final_sha": "5c62c278eeff3ffbb01dfbbe94d42fead61994c5",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-12586-text-spacing-length/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12586-text-spacing-length/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_text_length.py"
+  ],
+  "exit_code": 0,
+  "tests": 39,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T01:10:57.447246+08:00"
+}

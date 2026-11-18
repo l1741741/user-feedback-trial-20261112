@@ -1,0 +1,92 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12586-text-spacing-length/local-frozen-source/cairosvg/__init__.py",
+  "tests": 8,
+  "passed": 6,
+  "failed": 2,
+  "checks": [
+    {
+      "name": "spacing-empty-parent-same-target-as-flat",
+      "passed": true,
+      "actual_red_bbox": [
+        20,
+        38,
+        258,
+        66
+      ],
+      "reference_red_bbox": [
+        20,
+        38,
+        258,
+        66
+      ],
+      "changed_pixels": 0
+    },
+    {
+      "name": "spacing-empty-parent-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "spacing-mixed-same-target-as-flat",
+      "passed": false,
+      "actual_red_bbox": [
+        20,
+        38,
+        258,
+        65
+      ],
+      "reference_red_bbox": [
+        20,
+        38,
+        258,
+        66
+      ],
+      "changed_pixels": 795
+    },
+    {
+      "name": "spacing-mixed-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "spacingAndGlyphs-empty-parent-same-target-as-flat",
+      "passed": true,
+      "actual_red_bbox": [
+        21,
+        38,
+        254,
+        66
+      ],
+      "reference_red_bbox": [
+        21,
+        38,
+        254,
+        66
+      ],
+      "changed_pixels": 0
+    },
+    {
+      "name": "spacingAndGlyphs-empty-parent-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "spacingAndGlyphs-mixed-same-target-as-flat",
+      "passed": false,
+      "actual_red_bbox": [
+        23,
+        38,
+        400,
+        66
+      ],
+      "reference_red_bbox": [
+        21,
+        38,
+        254,
+        66
+      ],
+      "changed_pixels": 4796
+    },
+    {
+      "name": "spacingAndGlyphs-mixed-blue-sibling",
+      "passed": true
+    }
+  ]
+}
