@@ -1,0 +1,22 @@
+{
+  "task_id": "rerun15-20261118-12581-viewbox-slice",
+  "final_sha": "8711986fe884b042eff85317b6866db748a49ddb",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-12581-viewbox-slice/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12581-viewbox-slice/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_viewbox.py"
+  ],
+  "exit_code": 0,
+  "tests": 64,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T00:47:55.847804+08:00"
+}

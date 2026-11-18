@@ -1,0 +1,77 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12581-viewbox-slice/local-frozen-source/cairosvg/__init__.py",
+  "tests": 14,
+  "passed": 14,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "200x100-xMidYMid-meet-origin-10-20",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "200x100-xMidYMid-meet-origin--15--25",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "200x100-xMidYMid-slice-origin-10-20",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "200x100-xMidYMid-slice-origin--15--25",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "200x100-none-origin-10-20",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "200x100-none-origin--15--25",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "100x200-xMidYMid-meet-origin-10-20",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "100x200-xMidYMid-meet-origin--15--25",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "100x200-xMidYMid-slice-origin-10-20",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "100x200-xMidYMid-slice-origin--15--25",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "100x200-none-origin-10-20",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "100x200-none-origin--15--25",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "scale-vs-output-dimensions",
+      "passed": true
+    },
+    {
+      "name": "fresh-call-isolation",
+      "passed": true
+    }
+  ],
+  "oracle": "Adding the same translation to viewBox origin and all geometry preserves the device image"
+}
