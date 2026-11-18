@@ -8,3 +8,6 @@ __pycache__
 .eggs
 .idea
 .pytest_cache
+
+# Local demo output
+/demos/output

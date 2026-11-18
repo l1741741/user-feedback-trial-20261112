@@ -132,6 +132,18 @@ def path(surface, node):
     last_letter = None
     string = normalize(string)
 
+    # Explicit smooth-command state, in absolute coordinates.
+    #
+    # The SVG spec lets an S/s command inherit the reflection of the second
+    # control point of the immediately preceding cubic (C/c/S/s), and a T/t
+    # command the reflected quadratic control point of the preceding Q/q/T/t.
+    # Any other command — line, arc, moveto or closepath — resets the
+    # relevant state so the smooth command falls back to its default tangent
+    # (the current point). Tracking this explicitly avoids relying on the
+    # previous command letter and on variables leaking between branches.
+    previous_cubic_control_point = None
+    previous_quadratic_control_point = None
+
     # Keep the current point because Cairo's get_current_point is not accurate
     # enough. See https://github.com/Kozea/CairoSVG/issues/111.
     if surface.context.has_current_point():
@@ -241,6 +253,9 @@ def path(surface, node):
             arc(xc, yc, rx, angle1, angle2)
             surface.context.restore()
             current_point = current_point[0] + x3, current_point[1] + y3
+            # Arcs are not cubic/quadratic curves: reset smooth state.
+            previous_cubic_control_point = None
+            previous_quadratic_control_point = None
 
         elif letter == 'c':
             # Relative curve
@@ -253,13 +268,9 @@ def path(surface, node):
             surface.context.rel_curve_to(x1, y1, x2, y2, x3, y3)
             current_point = current_point[0] + x3, current_point[1] + y3
 
-            # Save absolute values for x and y, useful if next letter is s or S
-            x1 += x
-            x2 += x
-            x3 += x
-            y1 += y
-            y2 += y
-            y3 += y
+            # Record the second control point in absolute coordinates.
+            previous_cubic_control_point = (x + x2, y + y2)
+            previous_quadratic_control_point = None
 
         elif letter == 'C':
             # Curve
@@ -270,6 +281,8 @@ def path(surface, node):
                 point_angle(x2, y2, x1, y1), point_angle(x2, y2, x3, y3)))
             surface.context.curve_to(x1, y1, x2, y2, x3, y3)
             current_point = x3, y3
+            previous_cubic_control_point = (x2, y2)
+            previous_quadratic_control_point = None
 
         elif letter == 'h':
             # Relative horizontal line
@@ -280,6 +293,8 @@ def path(surface, node):
             x = size(surface, x, 'x')
             surface.context.rel_line_to(x, 0)
             current_point = current_point[0] + x, current_point[1]
+            previous_cubic_control_point = None
+            previous_quadratic_control_point = None
 
         elif letter == 'H':
             # Horizontal line
@@ -290,6 +305,8 @@ def path(surface, node):
             x = size(surface, x, 'x')
             surface.context.line_to(x, old_y)
             current_point = x, current_point[1]
+            previous_cubic_control_point = None
+            previous_quadratic_control_point = None
 
         elif letter == 'l':
             # Relative straight line
@@ -298,6 +315,8 @@ def path(surface, node):
             node.vertices.append((pi - angle, angle))
             surface.context.rel_line_to(x, y)
             current_point = current_point[0] + x, current_point[1] + y
+            previous_cubic_control_point = None
+            previous_quadratic_control_point = None
 
         elif letter == 'L':
             # Straight line
@@ -307,6 +326,8 @@ def path(surface, node):
             node.vertices.append((pi - angle, angle))
             surface.context.line_to(x, y)
             current_point = x, y
+            previous_cubic_control_point = None
+            previous_quadratic_control_point = None
 
         elif letter == 'm':
             # Current point relative move
@@ -315,6 +336,9 @@ def path(surface, node):
                 node.vertices.append(None)
             surface.context.rel_move_to(x, y)
             current_point = current_point[0] + x, current_point[1] + y
+            # A moveto starts a fresh subpath: no state crosses the boundary.
+            previous_cubic_control_point = None
+            previous_quadratic_control_point = None
 
         elif letter == 'M':
             # Current point move
@@ -323,6 +347,9 @@ def path(surface, node):
                 node.vertices.append(None)
             surface.context.move_to(x, y)
             current_point = x, y
+            # A moveto starts a fresh subpath: no state crosses the boundary.
+            previous_cubic_control_point = None
+            previous_quadratic_control_point = None
 
         elif letter == 'q':
             # Relative quadratic curve
@@ -334,6 +361,11 @@ def path(surface, node):
             surface.context.rel_curve_to(xq1, yq1, xq2, yq2, xq3, yq3)
             node.vertices.append((0, 0))
             current_point = current_point[0] + x3, current_point[1] + y3
+            # Store the quadratic control point in absolute coordinates.
+            previous_quadratic_control_point = (
+                current_point[0] - x3 + x2,
+                current_point[1] - y3 + y2)
+            previous_cubic_control_point = None
 
         elif letter == 'Q':
             # Quadratic curve
@@ -345,77 +377,96 @@ def path(surface, node):
             surface.context.curve_to(xq1, yq1, xq2, yq2, xq3, yq3)
             node.vertices.append((0, 0))
             current_point = x3, y3
+            previous_quadratic_control_point = (x2, y2)
+            previous_cubic_control_point = None
 
         elif letter == 's':
             # Relative smooth curve
             x, y = current_point
-            x1 = x3 - x2 if last_letter in 'csCS' else 0
-            y1 = y3 - y2 if last_letter in 'csCS' else 0
+            if previous_cubic_control_point is None:
+                # No eligible preceding cubic: default tangent is the
+                # current point, so the relative first control point is 0.
+                x1, y1 = 0, 0
+            else:
+                # Reflect the previous (absolute) second control point through
+                # the current point, then express it as a relative delta.
+                x1 = x - previous_cubic_control_point[0]
+                y1 = y - previous_cubic_control_point[1]
             x2, y2, string = point(surface, string)
             x3, y3, string = point(surface, string)
             node.vertices.append((
                 point_angle(x2, y2, x1, y1), point_angle(x2, y2, x3, y3)))
             surface.context.rel_curve_to(x1, y1, x2, y2, x3, y3)
             current_point = current_point[0] + x3, current_point[1] + y3
-
-            # Save absolute values for x and y, useful if next letter is s or S
-            x1 += x
-            x2 += x
-            x3 += x
-            y1 += y
-            y2 += y
-            y3 += y
+            # The new second control point, in absolute coordinates.
+            previous_cubic_control_point = (x + x2, y + y2)
+            previous_quadratic_control_point = None
 
         elif letter == 'S':
             # Smooth curve
             x, y = current_point
-            x1 = x3 + (x3 - x2) if last_letter in 'csCS' else x
-            y1 = y3 + (y3 - y2) if last_letter in 'csCS' else y
+            if previous_cubic_control_point is None:
+                # Default tangent: the first control point is the current one.
+                x1, y1 = x, y
+            else:
+                # Reflect the previous second control point about the current.
+                x1 = 2 * x - previous_cubic_control_point[0]
+                y1 = 2 * y - previous_cubic_control_point[1]
             x2, y2, string = point(surface, string)
             x3, y3, string = point(surface, string)
             node.vertices.append((
                 point_angle(x2, y2, x1, y1), point_angle(x2, y2, x3, y3)))
             surface.context.curve_to(x1, y1, x2, y2, x3, y3)
             current_point = x3, y3
+            previous_cubic_control_point = (x2, y2)
+            previous_quadratic_control_point = None
 
         elif letter == 't':
-            # Relative quadratic curve end
-            if last_letter not in 'QqTt':
-                x2, y2, x3, y3 = 0, 0, 0, 0
-            elif last_letter in 'QT':
-                x2 -= x1
-                y2 -= y1
-                x3 -= x1
-                y3 -= y1
-            x2 = x3 - x2
-            y2 = y3 - y2
-            x1, y1 = 0, 0
+            # Relative smooth quadratic curve
             x3, y3, string = point(surface, string)
+            if previous_quadratic_control_point is None:
+                # No eligible preceding quadratic: default control point is
+                # the current point (relative delta (0, 0)).
+                x2, y2 = 0, 0
+            else:
+                # Reflect the previous absolute control point through the
+                # current point, then express it as a relative delta:
+                # reflected absolute point is 2*current - previous, so the
+                # delta from current is current - previous.
+                x, y = current_point
+                x2 = x - previous_quadratic_control_point[0]
+                y2 = y - previous_quadratic_control_point[1]
+            x1, y1 = 0, 0
             xq1, yq1, xq2, yq2, xq3, yq3 = quadratic_points(
                 x1, y1, x2, y2, x3, y3)
             node.vertices.append((0, 0))
             surface.context.rel_curve_to(xq1, yq1, xq2, yq2, xq3, yq3)
             current_point = current_point[0] + x3, current_point[1] + y3
+            # Remember the reflected control point in absolute coordinates.
+            previous_quadratic_control_point = (
+                current_point[0] - x3 + x2,
+                current_point[1] - y3 + y2)
+            previous_cubic_control_point = None
 
         elif letter == 'T':
-            # Quadratic curve end
+            # Smooth quadratic curve
             abs_x, abs_y = current_point
-            if last_letter not in 'QqTt':
-                x2, y2, x3, y3 = abs_x, abs_y, abs_x, abs_y
-            elif last_letter in 'qt':
-                x2 += abs_x
-                y2 += abs_y
-                x3 += abs_x
-                y3 += abs_y
-            x2 = abs_x + (x3 - x2)
-            y2 = abs_y + (y3 - y2)
-            x1, y1 = abs_x, abs_y
             x3, y3, string = point(surface, string)
+            if previous_quadratic_control_point is None:
+                # Default control point is the current point.
+                x2, y2 = abs_x, abs_y
+            else:
+                # Reflect the previous control point about the current point.
+                x2 = 2 * abs_x - previous_quadratic_control_point[0]
+                y2 = 2 * abs_y - previous_quadratic_control_point[1]
+            x1, y1 = abs_x, abs_y
             xq1, yq1, xq2, yq2, xq3, yq3 = quadratic_points(
                 x1, y1, x2, y2, x3, y3)
             node.vertices.append((0, 0))
             surface.context.curve_to(xq1, yq1, xq2, yq2, xq3, yq3)
             current_point = x3, y3
+            previous_quadratic_control_point = (x2, y2)
+            previous_cubic_control_point = None
 
         elif letter == 'v':
             # Relative vertical line
@@ -426,6 +477,8 @@ def path(surface, node):
             y = size(surface, y, 'y')
             surface.context.rel_line_to(0, y)
             current_point = current_point[0], current_point[1] + y
+            previous_cubic_control_point = None
+            previous_quadratic_control_point = None
 
         elif letter == 'V':
             # Vertical line
@@ -436,12 +489,17 @@ def path(surface, node):
             y = size(surface, y, 'y')
             surface.context.line_to(old_x, y)
             current_point = current_point[0], y
+            previous_cubic_control_point = None
+            previous_quadratic_control_point = None
 
         elif letter in 'zZ' and first_path_point:
             # End of path
             node.vertices.append(None)
             surface.context.close_path()
             current_point = first_path_point
+            # Closepath ends the subpath and resets all smooth state.
+            previous_cubic_control_point = None
+            previous_quadratic_control_point = None
 
         if letter not in 'zZ':
             node.vertices.append(current_point)
