@@ -1,0 +1,7 @@
+本目录为被评最终提交之外的补充核验材料。
+
+被评最终SHA：03744f8aa52d51fb41b6cda022abc17dc8c9b773
+
+independent-render与additional-render保存实际SVG、PNG和结果，independent-validation保存真实测试命令与结果。checks内的脚本使用CairoSVG、Pillow及本地字体，运行时将被评最终源码设置为PYTHONPATH，输出目录作为最后参数。macOS使用已安装Cairo的动态库目录。
+
+这些材料属于补充检查，不改变父提交中的最终实现；原题与原始轨迹不在此处改写。

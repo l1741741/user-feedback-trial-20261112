@@ -1,0 +1,56 @@
+<!doctype html><meta charset="utf-8"><title>椭圆弧独立几何</title><style>body{font:20px system-ui;margin:24px}img{width:480px;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>弧与三角函数采样参考</h1><p>普通、长弧、反向和旋转椭圆，采用1px轮廓距离容差；负半径与正值等价，零半径为直线。</p><h2>q1</h2><p>SVG输入</p><img src="q1.svg"><p>当次PNG</p><img src="q1.png"><h2>q1-polyline</h2><p>SVG输入</p><img src="q1-polyline.svg"><p>当次PNG</p><img src="q1-polyline.png"><h2>q1-negative</h2><p>SVG输入</p><img src="q1-negative.svg"><p>当次PNG</p><img src="q1-negative.png"><h2>large</h2><p>SVG输入</p><img src="large.svg"><p>当次PNG</p><img src="large.png"><h2>large-polyline</h2><p>SVG输入</p><img src="large-polyline.svg"><p>当次PNG</p><img src="large-polyline.png"><h2>large-negative</h2><p>SVG输入</p><img src="large-negative.svg"><p>当次PNG</p><img src="large-negative.png"><h2>reverse</h2><p>SVG输入</p><img src="reverse.svg"><p>当次PNG</p><img src="reverse.png"><h2>reverse-polyline</h2><p>SVG输入</p><img src="reverse-polyline.svg"><p>当次PNG</p><img src="reverse-polyline.png"><h2>reverse-negative</h2><p>SVG输入</p><img src="reverse-negative.svg"><p>当次PNG</p><img src="reverse-negative.png"><h2>rotated</h2><p>SVG输入</p><img src="rotated.svg"><p>当次PNG</p><img src="rotated.png"><h2>rotated-polyline</h2><p>SVG输入</p><img src="rotated-polyline.svg"><p>当次PNG</p><img src="rotated-polyline.png"><h2>rotated-negative</h2><p>SVG输入</p><img src="rotated-negative.svg"><p>当次PNG</p><img src="rotated-negative.png"><h2>zero-radius</h2><p>SVG输入</p><img src="zero-radius.svg"><p>当次PNG</p><img src="zero-radius.png"><h2>line-reference</h2><p>SVG输入</p><img src="line-reference.svg"><p>当次PNG</p><img src="line-reference.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/retry504-once-20261118-12591-path-arcs/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 9,
+  &quot;passed&quot;: 9,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;q1-sampled-ellipse-geometry&quot;,
+      &quot;reference_pixels&quot;: 356,
+      &quot;missing_beyond_one_pixel&quot;: 0,
+      &quot;extra_beyond_one_pixel&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;q1-negative-radii-equivalence&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;large-sampled-ellipse-geometry&quot;,
+      &quot;reference_pixels&quot;: 1068,
+      &quot;missing_beyond_one_pixel&quot;: 0,
+      &quot;extra_beyond_one_pixel&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;large-negative-radii-equivalence&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;reverse-sampled-ellipse-geometry&quot;,
+      &quot;reference_pixels&quot;: 356,
+      &quot;missing_beyond_one_pixel&quot;: 0,
+      &quot;extra_beyond_one_pixel&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;reverse-negative-radii-equivalence&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;rotated-sampled-ellipse-geometry&quot;,
+      &quot;reference_pixels&quot;: 350,
+      &quot;missing_beyond_one_pixel&quot;: 0,
+      &quot;extra_beyond_one_pixel&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;rotated-negative-radii-equivalence&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;zero-radius-is-line&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>

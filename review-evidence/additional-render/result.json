@@ -1,0 +1,56 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/retry504-once-20261118-12591-path-arcs/local-frozen-source/cairosvg/__init__.py",
+  "tests": 9,
+  "passed": 9,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "q1-sampled-ellipse-geometry",
+      "reference_pixels": 356,
+      "missing_beyond_one_pixel": 0,
+      "extra_beyond_one_pixel": 0,
+      "passed": true
+    },
+    {
+      "name": "q1-negative-radii-equivalence",
+      "passed": true
+    },
+    {
+      "name": "large-sampled-ellipse-geometry",
+      "reference_pixels": 1068,
+      "missing_beyond_one_pixel": 0,
+      "extra_beyond_one_pixel": 0,
+      "passed": true
+    },
+    {
+      "name": "large-negative-radii-equivalence",
+      "passed": true
+    },
+    {
+      "name": "reverse-sampled-ellipse-geometry",
+      "reference_pixels": 356,
+      "missing_beyond_one_pixel": 0,
+      "extra_beyond_one_pixel": 0,
+      "passed": true
+    },
+    {
+      "name": "reverse-negative-radii-equivalence",
+      "passed": true
+    },
+    {
+      "name": "rotated-sampled-ellipse-geometry",
+      "reference_pixels": 350,
+      "missing_beyond_one_pixel": 0,
+      "extra_beyond_one_pixel": 0,
+      "passed": true
+    },
+    {
+      "name": "rotated-negative-radii-equivalence",
+      "passed": true
+    },
+    {
+      "name": "zero-radius-is-line",
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+from pathlib import Path
+from io import BytesIO
+from math import sin,cos,pi
+import sys,json,html
+import cairosvg
+from PIL import Image
+OUT=Path(sys.argv[1]);OUT.mkdir(parents=True,exist_ok=True);checks=[];names=[]
+def render(n,body):
+ names.append(n);s='<svg xmlns="http://www.w3.org/2000/svg" width="240" height="220">'+body+'<rect x="210" y="10" width="20" height="30" fill="blue"/></svg>';(OUT/(n+'.svg')).write_text(s);p=cairosvg.svg2png(bytestring=s.encode());(OUT/(n+'.png')).write_bytes(p);return Image.open(BytesIO(p)).convert('RGBA')
+for label,rx,ry,rotation,large,sweep in [('q1',70,40,0,0,1),('large',70,40,0,1,1),('reverse',70,40,0,0,0),('rotated',70,40,30,0,1)]:
+ phi=rotation*pi/180;point=lambda t:(110+rx*cos(t)*cos(phi)-ry*sin(t)*sin(phi),100+rx*cos(t)*sin(phi)+ry*sin(t)*cos(phi));start=0;end=pi/2 if not large and sweep else -3*pi/2 if large and not sweep else 3*pi/2 if large else -pi/2;x1,y1=point(start);x2,y2=point(end);path=f'M{x1} {y1} A{rx} {ry} {rotation} {large} {sweep} {x2} {y2}';a=render(label,f'<path d="{path}" fill="none" stroke="red" stroke-width="4"/>');pts=[point(start+(end-start)*i/1000) for i in range(1001)];coords=' '.join(str(x)+','+str(y) for x,y in pts);b=render(label+'-polyline',f'<polyline points="{coords}" fill="none" stroke="red" stroke-width="4"/>')
+ mask=lambda im:{(x,y) for y in range(220) for x in range(200) if (lambda p:p[0]>180 and p[1]<50 and p[2]<50 and p[3]>128)(im.getpixel((x,y)))};am,bm=mask(a),mask(b);miss=sum(not any((x+dx,y+dy) in am for dx in [-1,0,1] for dy in [-1,0,1]) for x,y in bm);extra=sum(not any((x+dx,y+dy) in bm for dx in [-1,0,1] for dy in [-1,0,1]) for x,y in am);checks.append({'name':label+'-sampled-ellipse-geometry','reference_pixels':len(bm),'missing_beyond_one_pixel':miss,'extra_beyond_one_pixel':extra,'passed':bool(am) and miss==0 and extra==0})
+ neg=render(label+'-negative',f'<path d="{path.replace("A"+str(rx)+" "+str(ry),"A-"+str(rx)+" -"+str(ry))}" fill="none" stroke="red" stroke-width="4"/>');checks.append({'name':label+'-negative-radii-equivalence','passed':a.tobytes()==neg.tobytes()})
+a=render('zero-radius','<path d="M20 40A0 20 0 0 1 180 80" fill="none" stroke="red" stroke-width="4"/>');b=render('line-reference','<path d="M20 40L180 80" fill="none" stroke="red" stroke-width="4"/>');checks.append({'name':'zero-radius-is-line','passed':a.tobytes()==b.tobytes()})
+r={'source':cairosvg.__file__,'tests':len(checks),'passed':sum(c['passed'] for c in checks),'failed':sum(not c['passed'] for c in checks),'checks':checks};(OUT/'result.json').write_text(json.dumps(r,ensure_ascii=False,indent=2)+'\n');print(json.dumps(r,ensure_ascii=False,indent=2));(OUT/'gallery.html').write_text('<!doctype html><meta charset="utf-8"><title>椭圆弧独立几何</title><style>body{font:20px system-ui;margin:24px}img{width:480px;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>弧与三角函数采样参考</h1><p>普通、长弧、反向和旋转椭圆，采用1px轮廓距离容差；负半径与正值等价，零半径为直线。</p>'+''.join('<h2>'+n+'</h2><p>SVG输入</p><img src="'+n+'.svg"><p>当次PNG</p><img src="'+n+'.png">' for n in names)+'<pre>'+html.escape(json.dumps(r,ensure_ascii=False,indent=2))+'</pre>');sys.exit(bool(r['failed']))
