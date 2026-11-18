@@ -1,0 +1,68 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12580-viewport-percent/local-frozen-source/cairosvg/__init__.py",
+  "tests": 15,
+  "passed": 15,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "meet-explicit-geometry",
+      "passed": true
+    },
+    {
+      "name": "meet-symbol-equivalence",
+      "passed": true
+    },
+    {
+      "name": "meet-outer-sibling",
+      "passed": true
+    },
+    {
+      "name": "slice-explicit-geometry",
+      "passed": true
+    },
+    {
+      "name": "slice-symbol-equivalence",
+      "passed": true
+    },
+    {
+      "name": "slice-outer-sibling",
+      "passed": true
+    },
+    {
+      "name": "none-explicit-geometry",
+      "passed": true
+    },
+    {
+      "name": "none-symbol-equivalence",
+      "passed": true
+    },
+    {
+      "name": "none-outer-sibling",
+      "passed": true
+    },
+    {
+      "name": "zero-width-empty",
+      "passed": true
+    },
+    {
+      "name": "zero-width-outer-sibling",
+      "passed": true
+    },
+    {
+      "name": "zero-height-empty",
+      "passed": true
+    },
+    {
+      "name": "zero-height-outer-sibling",
+      "passed": true
+    },
+    {
+      "name": "zero-both-empty",
+      "passed": true
+    },
+    {
+      "name": "zero-both-outer-sibling",
+      "passed": true
+    }
+  ]
+}

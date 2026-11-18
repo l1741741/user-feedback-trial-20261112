@@ -1,0 +1,140 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12580-viewport-percent/local-frozen-source/cairosvg/__init__.py",
+  "tests": 9,
+  "passed": 9,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "zero-width-root-zero-viewbox-suppresses-content",
+      "point": [
+        10,
+        10
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "zero-width-nested-zero-viewbox-suppresses-content",
+      "point": [
+        20,
+        20
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "zero-width-nested-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "zero-height-root-zero-viewbox-suppresses-content",
+      "point": [
+        10,
+        10
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "zero-height-nested-zero-viewbox-suppresses-content",
+      "point": [
+        20,
+        20
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "zero-height-nested-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "zero-both-root-zero-viewbox-suppresses-content",
+      "point": [
+        10,
+        10
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "zero-both-nested-zero-viewbox-suppresses-content",
+      "point": [
+        20,
+        20
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "zero-both-nested-blue-sibling",
+      "passed": true
+    }
+  ]
+}
