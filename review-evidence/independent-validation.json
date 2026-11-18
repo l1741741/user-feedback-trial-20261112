@@ -1,0 +1,22 @@
+{
+  "task_id": "rerun15-20261118-11718-dash-stroke",
+  "final_sha": "e4a899ae4fdf9b07d7ec7b3ed5be6c1610da2ee0",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-11718-dash-stroke/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11718-dash-stroke/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_dash.py"
+  ],
+  "exit_code": 0,
+  "tests": 48,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T00:47:55.358986+08:00"
+}

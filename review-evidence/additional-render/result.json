@@ -1,0 +1,40 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11718-dash-stroke/local-frozen-source/cairosvg/__init__.py",
+  "tests": 7,
+  "passed": 6,
+  "failed": 1,
+  "checks": [
+    {
+      "name": "all-zero-keeps-solid-stroke",
+      "passed": false,
+      "changed_pixels": 1760
+    },
+    {
+      "name": "negative-array-falls-back-without-context-error",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "odd-list-matches-explicit-double",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "scientific-notation-equals-decimal",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "all-zero-blue-sibling-solid",
+      "passed": true
+    },
+    {
+      "name": "negative-array-blue-sibling-solid",
+      "passed": true
+    },
+    {
+      "name": "odd-offset-blue-sibling-solid",
+      "passed": true
+    }
+  ]
+}

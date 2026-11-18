@@ -1,0 +1,40 @@
+<!doctype html><meta charset="utf-8"><title>虚线边界与相位核验</title><style>body{font:19px system-ui;margin:24px}img{width:700px;max-width:100%;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>全零数组应保留实线，奇数数组应等于显式倍增</h1><p>每张图上方红线为测试对象，下方蓝线检查后续实线状态。</p><h2>solid</h2><h3>SVG输入</h3><img src="solid.svg"><h3>本次PNG</h3><img src="solid.png"><details><summary>SVG源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;280&quot; height=&quot;130&quot;&gt;&lt;path d=&quot;M20 30H240&quot; stroke=&quot;red&quot; stroke-width=&quot;8&quot; /&gt;&lt;path d=&quot;M20 95H240&quot; stroke=&quot;blue&quot; stroke-width=&quot;8&quot;/&gt;&lt;/svg&gt;</pre></details><h2>all-zero</h2><h3>SVG输入</h3><img src="all-zero.svg"><h3>本次PNG</h3><img src="all-zero.png"><details><summary>SVG源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;280&quot; height=&quot;130&quot;&gt;&lt;path d=&quot;M20 30H240&quot; stroke=&quot;red&quot; stroke-width=&quot;8&quot; stroke-dasharray=&quot;0 0&quot;/&gt;&lt;path d=&quot;M20 95H240&quot; stroke=&quot;blue&quot; stroke-width=&quot;8&quot;/&gt;&lt;/svg&gt;</pre></details><h2>negative-invalid</h2><h3>SVG输入</h3><img src="negative-invalid.svg"><h3>本次PNG</h3><img src="negative-invalid.png"><details><summary>SVG源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;280&quot; height=&quot;130&quot;&gt;&lt;path d=&quot;M20 30H240&quot; stroke=&quot;red&quot; stroke-width=&quot;8&quot; stroke-dasharray=&quot;5 -2&quot;/&gt;&lt;path d=&quot;M20 95H240&quot; stroke=&quot;blue&quot; stroke-width=&quot;8&quot;/&gt;&lt;/svg&gt;</pre></details><h2>odd-negative-offset</h2><h3>SVG输入</h3><img src="odd-negative-offset.svg"><h3>本次PNG</h3><img src="odd-negative-offset.png"><details><summary>SVG源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;280&quot; height=&quot;130&quot;&gt;&lt;path d=&quot;M20 30H240&quot; stroke=&quot;red&quot; stroke-width=&quot;8&quot; stroke-dasharray=&quot;10 5 15&quot; stroke-dashoffset=&quot;-7&quot;/&gt;&lt;path d=&quot;M20 95H240&quot; stroke=&quot;blue&quot; stroke-width=&quot;8&quot;/&gt;&lt;/svg&gt;</pre></details><h2>expanded-reference</h2><h3>SVG输入</h3><img src="expanded-reference.svg"><h3>本次PNG</h3><img src="expanded-reference.png"><details><summary>SVG源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;280&quot; height=&quot;130&quot;&gt;&lt;path d=&quot;M20 30H240&quot; stroke=&quot;red&quot; stroke-width=&quot;8&quot; stroke-dasharray=&quot;10 5 15 10 5 15&quot; stroke-dashoffset=&quot;-7&quot;/&gt;&lt;path d=&quot;M20 95H240&quot; stroke=&quot;blue&quot; stroke-width=&quot;8&quot;/&gt;&lt;/svg&gt;</pre></details><h2>scientific</h2><h3>SVG输入</h3><img src="scientific.svg"><h3>本次PNG</h3><img src="scientific.png"><details><summary>SVG源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;280&quot; height=&quot;130&quot;&gt;&lt;path d=&quot;M20 30H240&quot; stroke=&quot;red&quot; stroke-width=&quot;8&quot; stroke-dasharray=&quot;1e1 5e0&quot;/&gt;&lt;path d=&quot;M20 95H240&quot; stroke=&quot;blue&quot; stroke-width=&quot;8&quot;/&gt;&lt;/svg&gt;</pre></details><h2>scientific-reference</h2><h3>SVG输入</h3><img src="scientific-reference.svg"><h3>本次PNG</h3><img src="scientific-reference.png"><details><summary>SVG源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;280&quot; height=&quot;130&quot;&gt;&lt;path d=&quot;M20 30H240&quot; stroke=&quot;red&quot; stroke-width=&quot;8&quot; stroke-dasharray=&quot;10 5&quot;/&gt;&lt;path d=&quot;M20 95H240&quot; stroke=&quot;blue&quot; stroke-width=&quot;8&quot;/&gt;&lt;/svg&gt;</pre></details><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11718-dash-stroke/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 7,
+  &quot;passed&quot;: 6,
+  &quot;failed&quot;: 1,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;all-zero-keeps-solid-stroke&quot;,
+      &quot;passed&quot;: false,
+      &quot;changed_pixels&quot;: 1760
+    },
+    {
+      &quot;name&quot;: &quot;negative-array-falls-back-without-context-error&quot;,
+      &quot;passed&quot;: true,
+      &quot;changed_pixels&quot;: 0
+    },
+    {
+      &quot;name&quot;: &quot;odd-list-matches-explicit-double&quot;,
+      &quot;passed&quot;: true,
+      &quot;changed_pixels&quot;: 0
+    },
+    {
+      &quot;name&quot;: &quot;scientific-notation-equals-decimal&quot;,
+      &quot;passed&quot;: true,
+      &quot;changed_pixels&quot;: 0
+    },
+    {
+      &quot;name&quot;: &quot;all-zero-blue-sibling-solid&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;negative-array-blue-sibling-solid&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;odd-offset-blue-sibling-solid&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>

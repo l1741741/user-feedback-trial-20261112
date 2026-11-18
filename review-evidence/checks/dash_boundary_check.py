@@ -1,0 +1,12 @@
+from pathlib import Path
+from io import BytesIO
+import json,html,sys
+import cairosvg
+from PIL import Image
+OUT=Path(sys.argv[1]);OUT.mkdir(parents=True,exist_ok=True);checks=[];names=[]
+def render(n,attrs,more=''):
+ names.append(n);text='<svg xmlns="http://www.w3.org/2000/svg" width="280" height="130"><path d="M20 30H240" stroke="red" stroke-width="8" '+attrs+'/><path d="M20 95H240" stroke="blue" stroke-width="8"/>'+more+'</svg>';(OUT/(n+'.svg')).write_text(text);data=cairosvg.svg2png(bytestring=text.encode());(OUT/(n+'.png')).write_bytes(data);return Image.open(BytesIO(data)).convert('RGBA')
+solid=render('solid','');zero=render('all-zero','stroke-dasharray="0 0"');neg=render('negative-invalid','stroke-dasharray="5 -2"');odd=render('odd-negative-offset','stroke-dasharray="10 5 15" stroke-dashoffset="-7"');even=render('expanded-reference','stroke-dasharray="10 5 15 10 5 15" stroke-dashoffset="-7"');sci=render('scientific','stroke-dasharray="1e1 5e0"');normal=render('scientific-reference','stroke-dasharray="10 5"')
+for n,a,b in [('all-zero-keeps-solid-stroke',zero,solid),('negative-array-falls-back-without-context-error',neg,solid),('odd-list-matches-explicit-double',odd,even),('scientific-notation-equals-decimal',sci,normal)]:checks.append({'name':n,'passed':a.tobytes()==b.tobytes(),'changed_pixels':sum(x!=y for x,y in zip(a.getdata(),b.getdata()))})
+for n,a in [('all-zero',zero),('negative-array',neg),('odd-offset',odd)]:checks.append({'name':n+'-blue-sibling-solid','passed':a.getpixel((100,95))==(0,0,255,255)})
+r={'source':cairosvg.__file__,'tests':len(checks),'passed':sum(c['passed'] for c in checks),'failed':sum(not c['passed'] for c in checks),'checks':checks};(OUT/'result.json').write_text(json.dumps(r,ensure_ascii=False,indent=2)+'\n');print(json.dumps(r,ensure_ascii=False,indent=2));(OUT/'gallery.html').write_text('<!doctype html><meta charset="utf-8"><title>虚线边界与相位核验</title><style>body{font:19px system-ui;margin:24px}img{width:700px;max-width:100%;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>全零数组应保留实线，奇数数组应等于显式倍增</h1><p>每张图上方红线为测试对象，下方蓝线检查后续实线状态。</p>'+''.join('<h2>'+n+'</h2><h3>SVG输入</h3><img src="'+n+'.svg"><h3>本次PNG</h3><img src="'+n+'.png"><details><summary>SVG源码</summary><pre>'+html.escape((OUT/(n+'.svg')).read_text())+'</pre></details>' for n in names)+'<pre>'+html.escape(json.dumps(r,ensure_ascii=False,indent=2))+'</pre>');sys.exit(bool(r['failed']))
