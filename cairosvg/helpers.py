@@ -59,17 +59,84 @@ def node_format(surface, node, reference=True):
     If ``reference`` is ``True``, we can rely on surface size to resolve
     percentages.
 
+    A malformed ``viewBox`` (wrong number of values or non-numeric values)
+    raises a ``ValueError``. A present but degenerate viewBox (width or
+    height of zero) is treated as an absent viewBox: the SVG specification
+    says such a viewBox disables rendering, and zeroes must never reach the
+    scale computation.
+
     """
     reference_size = 'xy' if reference else (0, 0)
     width = size(surface, node.get('width', '100%'), reference_size[0])
     height = size(surface, node.get('height', '100%'), reference_size[1])
-    viewbox = node.get('viewBox')
-    if viewbox:
-        viewbox = re.sub('[ \n\r\t,]+', ' ', viewbox)
-        viewbox = tuple(float(position) for position in viewbox.split())
+    viewbox = parse_viewbox(node.get('viewBox'))
+    if viewbox is not None:
         width = width or viewbox[2]
         height = height or viewbox[3]
     return width, height, viewbox
+
+
+def parse_viewbox(value):
+    """Parse a ``viewBox`` attribute into a 4-number tuple.
+
+    Return ``None`` when the attribute is absent or empty. A malformed value
+    raises a ``ValueError``. A degenerate viewBox (zero or negative width or
+    height) also returns ``None`` so that callers use the identity mapping
+    instead of dividing by zero or scaling by zero.
+
+    """
+    if not value:
+        return None
+    numbers = re.sub('[ \n\r\t,]+', ' ', value.strip()).split()
+    if len(numbers) != 4:
+        raise ValueError(
+            f'viewBox must contain 4 numbers, got {len(numbers)}: {value!r}')
+    try:
+        min_x, min_y, vb_width, vb_height = (
+            float(number) for number in numbers)
+    except ValueError:
+        raise ValueError(f'invalid viewBox value: {value!r}') from None
+    if vb_width <= 0 or vb_height <= 0:
+        # Degenerate viewBox: rendering is disabled, never scale by zero.
+        return None
+    return min_x, min_y, vb_width, vb_height
+
+
+# Valid preserveAspectRatio alignment values, see
+# https://www.w3.org/TR/SVG11/coords.html#PreserveAspectRatioAttribute
+_PRESERVE_ALIGN_VALUES = frozenset((
+    'none',
+    'xMinYMin', 'xMidYMin', 'xMaxYMin',
+    'xMinYMid', 'xMidYMid', 'xMaxYMid',
+    'xMinYMax', 'xMidYMax', 'xMaxYMax',
+))
+
+
+def parse_preserve_aspect_ratio(value):
+    """Parse a ``preserveAspectRatio`` attribute.
+
+    Return ``(align, meet_or_slice)`` where ``align`` is one of the nine
+    ``xMinYMin``-style values or ``'none'``, and ``meet_or_slice`` is
+    ``'meet'`` or ``'slice'``. Invalid or empty values fall back to the
+    specification default ``('xMidYMid', 'meet')``. The optional ``defer``
+    keyword of SVG 1.1 is accepted and ignored.
+
+    """
+    default = 'xMidYMid', 'meet'
+    if not value:
+        return default
+    tokens = value.strip().split()
+    if tokens and tokens[0] == 'defer':
+        tokens = tokens[1:]
+    if not tokens:
+        return default
+    align = tokens[0]
+    if align not in _PRESERVE_ALIGN_VALUES:
+        return default
+    meet_or_slice = tokens[1] if len(tokens) > 1 else 'meet'
+    if meet_or_slice not in ('meet', 'slice'):
+        meet_or_slice = 'meet'
+    return align, meet_or_slice
 
 
 def normalize(string):
@@ -120,13 +187,12 @@ def preserve_ratio(surface, node, width=None, height=None):
     scale_x = width / viewbox_width if viewbox_width > 0 else 1
     scale_y = height / viewbox_height if viewbox_height > 0 else 1
 
-    aspect_ratio = node.get('preserveAspectRatio', 'xMidYMid').split()
-    align = aspect_ratio[0]
+    align, meet_or_slice = parse_preserve_aspect_ratio(
+        node.get('preserveAspectRatio'))
     if align == 'none':
         x_position = 'min'
         y_position = 'min'
     else:
-        meet_or_slice = aspect_ratio[1] if len(aspect_ratio) > 1 else None
         if meet_or_slice == 'slice':
             scale_value = max(scale_x, scale_y)
         else:
@@ -161,7 +227,8 @@ def clip_marker_box(surface, node, scale_x, scale_y):
     _, _, viewbox = node_format(surface, node)
     viewbox_width, viewbox_height = viewbox[2:]
 
-    align = node.get('preserveAspectRatio', 'xMidYMid').split(' ')[0]
+    align, _ = parse_preserve_aspect_ratio(
+        node.get('preserveAspectRatio'))
     x_position = 'min' if align == 'none' else align[1:4].lower()
     y_position = 'min' if align == 'none' else align[5:].lower()
 

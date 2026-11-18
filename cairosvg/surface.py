@@ -313,7 +313,21 @@ class Surface(object):
 
         self.font_size = size(self, node.get('font-size', '12pt'))
         self.context.save()
+        try:
+            self._draw(node)
+        finally:
+            # Whatever happens while drawing (including a bad viewBox or
+            # transform on a nested viewport), always pop the context state
+            # saved above so the cairo drawing state stays balanced for the
+            # next element and for the following conversion call.
+            self.context.restore()
+            self.parent_node = old_parent_node
+            self.font_size = old_font_size
+            self.context_width, self.context_height = old_context_size
 
+    def _draw(self, node):
+        """Actually draw ``node``; the surrounding ``draw`` call manages the
+        save/restore of the cairo drawing state."""
         # Apply transformations
         transform(
             self, node.get('transform'),
@@ -493,11 +507,6 @@ class Surface(object):
             self.cursor_position = [0, 0]
             self.cursor_d_position = [0, 0]
             self.text_path_width = 0
-
-        self.context.restore()
-        self.parent_node = old_parent_node
-        self.font_size = old_font_size
-        self.context_width, self.context_height = old_context_size
 
 
 class PDFSurface(Surface):
