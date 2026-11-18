@@ -1,0 +1,22 @@
+{
+  "slug": "image-aspect",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12589-image-aspect/local-frozen-source/cairosvg/__init__.py",
+  "tests": 2,
+  "passed": 2,
+  "failures": 0,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "image-slice-clips-and-meet-letterboxes",
+      "passed": true
+    }
+  ],
+  "images": [
+    "ordinary",
+    "image-slice",
+    "image-meet"
+  ]
+}

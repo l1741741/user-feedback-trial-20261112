@@ -1,0 +1,432 @@
+<!doctype html><meta charset="utf-8"><title>图像视口对照</title><style>body{font:20px system-ui;margin:24px}img{width:450px;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>栅格和非零viewBox SVG：meet、slice、none</h1><p>meet上下留白；右对齐slice仅保留蓝半；none红蓝各半，绿色兄弟独立。</p><h2>raster-meet</h2><p>SVG输入</p><img src="raster-meet.svg"><p>当次PNG</p><img src="raster-meet.png"><h2>raster-slice</h2><p>SVG输入</p><img src="raster-slice.svg"><p>当次PNG</p><img src="raster-slice.png"><h2>raster-none</h2><p>SVG输入</p><img src="raster-none.svg"><p>当次PNG</p><img src="raster-none.png"><h2>svg-meet</h2><p>SVG输入</p><img src="svg-meet.svg"><p>当次PNG</p><img src="svg-meet.png"><h2>svg-slice</h2><p>SVG输入</p><img src="svg-slice.svg"><p>当次PNG</p><img src="svg-slice.png"><h2>svg-none</h2><p>SVG输入</p><img src="svg-none.svg"><p>当次PNG</p><img src="svg-none.png"><h2>raster-zero</h2><p>SVG输入</p><img src="raster-zero.svg"><p>当次PNG</p><img src="raster-zero.png"><h2>svg-zero</h2><p>SVG输入</p><img src="svg-zero.svg"><p>当次PNG</p><img src="svg-zero.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12589-image-aspect/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 28,
+  &quot;passed&quot;: 28,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;raster-meet-(20, 20)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;raster-meet-(25, 45)&quot;,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;raster-meet-(75, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;raster-meet-(100, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;raster-meet-(120, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;raster-slice-(20, 20)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;raster-slice-(75, 75)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;raster-slice-(100, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;raster-slice-(120, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;raster-none-(25, 45)&quot;,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;raster-none-(75, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;raster-none-(100, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;raster-none-(120, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;svg-meet-(20, 20)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;svg-meet-(25, 45)&quot;,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;svg-meet-(75, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;svg-meet-(100, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;svg-meet-(120, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;svg-slice-(20, 20)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;svg-slice-(75, 75)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;svg-slice-(100, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;svg-slice-(120, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;svg-none-(25, 45)&quot;,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;svg-none-(75, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;svg-none-(100, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;svg-none-(120, 45)&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;raster-zero-empty-image&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;svg-zero-empty-image&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>

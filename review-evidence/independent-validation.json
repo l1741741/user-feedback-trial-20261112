@@ -1,0 +1,22 @@
+{
+  "task_id": "rerun15-20261118-12589-image-aspect",
+  "final_sha": "f4371383788ce74dd600de8b134d4529aa1282f3",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-12589-image-aspect/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12589-image-aspect/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_image.py"
+  ],
+  "exit_code": 0,
+  "tests": 33,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T05:22:37.451625+08:00"
+}
