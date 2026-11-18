@@ -1,0 +1,22 @@
+{
+  "task_id": "rerun15-20261118-12582-transform-origin",
+  "final_sha": "04bc8ce04e77adf4fb3e0b07814099b8e6696a3e",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-12582-transform-origin/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12582-transform-origin/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_transform_origin.py"
+  ],
+  "exit_code": 0,
+  "tests": 41,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T07:33:33.168751+08:00"
+}

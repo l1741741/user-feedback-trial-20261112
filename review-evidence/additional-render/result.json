@@ -1,0 +1,57 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12582-transform-origin/local-frozen-source/cairosvg/__init__.py",
+  "tests": 10,
+  "passed": 10,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "fill-box-centre",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "fill-box-corner",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "explicit-length-centre",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "view-box-centre",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "list-order",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "nested-order",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "group-box-centre",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "invalid-origin-fallback",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "singular-no-sibling-leak",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "same-tree-repeat",
+      "passed": true
+    }
+  ]
+}
