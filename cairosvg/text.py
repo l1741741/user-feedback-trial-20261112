@@ -147,8 +147,12 @@ def text(surface, node, draw_as_text=False):
     if text_path:
         surface.context.new_path()
         surface.stroke_and_fill = False
-        surface.draw(text_path)
-        surface.stroke_and_fill = True
+        try:
+            surface.draw(text_path)
+        finally:
+            # Never let a failed text-path drawing leak the suppressed
+            # fill/stroke flag into sibling nodes or later calls.
+            surface.stroke_and_fill = True
         cairo_path = surface.context.copy_path_flat()
         surface.context.new_path()
         length = path_length(cairo_path) + x_bearing

@@ -211,23 +211,56 @@ class Surface(object):
             height * self.device_units_per_user_units)
 
         if 0 in (self.width, self.height):
+            # No context exists yet, but the cairo surface already does:
+            # release it deterministically instead of waiting for the GC.
+            self._finish_cairo()
             raise ValueError('The SVG size is undefined')
 
         self.context = cairo.Context(self.cairo)
-        # We must scale the context as the surface size is using physical units
-        self.context.scale(
-            self.device_units_per_user_units, self.device_units_per_user_units)
-        # Initial, non-rounded dimensions
-        self.set_context_size(width, height, viewbox, tree)
-        self.context.move_to(0, 0)
+        try:
+            # We must scale the context as the surface size is using
+            # physical units
+            self.context.scale(
+                self.device_units_per_user_units,
+                self.device_units_per_user_units)
+            # Initial, non-rounded dimensions
+            self.set_context_size(width, height, viewbox, tree)
+            self.context.move_to(0, 0)
 
-        if background_color:
-            self.context.set_source_rgba(*color(background_color))
-            self.context.paint()
+            if background_color:
+                self.context.set_source_rgba(*color(background_color))
+                self.context.paint()
 
-        self.map_rgba = map_rgba
-        self.map_image = map_image
-        self.draw(tree)
+            self.map_rgba = map_rgba
+            self.map_image = map_image
+            self.draw(tree)
+        except BaseException:
+            # The drawing failed (or was interrupted). Close the cairo surface
+            # and drop its context at this call boundary so that no native
+            # surface, output stream or half-open group survives into a
+            # sibling node or a later export reusing this instance. The
+            # original exception is re-raised unchanged: real errors keep
+            # propagating through the existing API.
+            self._abort()
+            raise
+
+    def _finish_cairo(self):
+        """Finalize the underlying cairo surface, tolerating repeated calls."""
+        cairo_surface = self.__dict__.get('cairo')
+        if cairo_surface is not None:
+            try:
+                cairo_surface.finish()
+            except cairo.Error:
+                # A surface already in an error state must still be
+                # releasable; never mask the caller's original exception.
+                pass
+
+    def _abort(self):
+        """Release every native resource held by a failed render."""
+        # Drop the context first: it keeps the (grouped) target surface
+        # alive until its own cairo object is finalized.
+        self.__dict__.pop('context', None)
+        self._finish_cairo()
 
     @property
     def points_per_pixel(self):
@@ -299,10 +332,16 @@ class Surface(object):
                 ('height' in node and size(self, node['height']) == 0)):
             return
 
-        # Save context and related attributes
+        # Save context and related attributes. Everything that follows until
+        # the matching ``context.restore()`` is wrapped in a try/finally so
+        # that an exception raised while drawing the node (or any of its
+        # children) can never leave this frame's transform, clip, operator,
+        # source or transparency group on the context stack of a sibling
+        # node or of a later call reusing this surface.
         old_parent_node = self.parent_node
         old_font_size = self.font_size
         old_context_size = self.context_width, self.context_height
+        old_stroke_and_fill = self.stroke_and_fill
         self.parent_node = node
 
         if "font" in node:
@@ -314,190 +353,224 @@ class Surface(object):
         self.font_size = size(self, node.get('font-size', '12pt'))
         self.context.save()
 
-        # Apply transformations
-        transform(
-            self, node.get('transform'),
-            transform_origin=node.get('transform-origin'))
+        # A transparency group is only pushed when the node needs one, and
+        # the finally block must pop exactly the groups this frame pushed.
+        group_pushed = False
+        try:
+            # Apply transformations
+            transform(
+                self, node.get('transform'),
+                transform_origin=node.get('transform-origin'))
 
-        # Find and prepare opacity, masks and filters
-        mask = parse_url(node.get('mask')).fragment
-        filter_ = parse_url(node.get('filter')).fragment
-        opacity = float(node.get('opacity', 1))
+            # Find and prepare opacity, masks and filters
+            mask = parse_url(node.get('mask')).fragment
+            filter_ = parse_url(node.get('filter')).fragment
+            opacity = float(node.get('opacity', 1))
 
-        if filter_:
-            prepare_filter(self, node, filter_)
+            if filter_:
+                prepare_filter(self, node, filter_)
 
-        if filter_ or mask or (opacity < 1 and node.children):
-            self.context.push_group()
+            if filter_ or mask or (opacity < 1 and node.children):
+                self.context.push_group()
+                group_pushed = True
 
-        # Move to (node.x, node.y)
-        self.context.move_to(
-            size(self, node.get('x'), 'x'),
-            size(self, node.get('y'), 'y'))
+            # Move to (node.x, node.y)
+            self.context.move_to(
+                size(self, node.get('x'), 'x'),
+                size(self, node.get('y'), 'y'))
 
-        # Set node's drawing informations if the ``node.tag`` method exists
-        line_cap = node.get('stroke-linecap')
-        if line_cap == 'square':
-            self.context.set_line_cap(cairo.LINE_CAP_SQUARE)
-        if line_cap == 'round':
-            self.context.set_line_cap(cairo.LINE_CAP_ROUND)
+            # Set node's drawing informations if the ``node.tag`` method exists
+            line_cap = node.get('stroke-linecap')
+            if line_cap == 'square':
+                self.context.set_line_cap(cairo.LINE_CAP_SQUARE)
+            if line_cap == 'round':
+                self.context.set_line_cap(cairo.LINE_CAP_ROUND)
 
-        join_cap = node.get('stroke-linejoin')
-        if join_cap == 'round':
-            self.context.set_line_join(cairo.LINE_JOIN_ROUND)
-        if join_cap == 'bevel':
-            self.context.set_line_join(cairo.LINE_JOIN_BEVEL)
+            join_cap = node.get('stroke-linejoin')
+            if join_cap == 'round':
+                self.context.set_line_join(cairo.LINE_JOIN_ROUND)
+            if join_cap == 'bevel':
+                self.context.set_line_join(cairo.LINE_JOIN_BEVEL)
 
-        dash_array = normalize(node.get('stroke-dasharray', '')).split()
-        if dash_array:
-            dashes = [size(self, dash) for dash in dash_array]
-            if sum(dashes):
-                offset = size(self, node.get('stroke-dashoffset'))
-                self.context.set_dash(dashes, offset)
+            dash_array = normalize(node.get('stroke-dasharray', '')).split()
+            if dash_array:
+                dashes = [size(self, dash) for dash in dash_array]
+                if sum(dashes):
+                    offset = size(self, node.get('stroke-dashoffset'))
+                    self.context.set_dash(dashes, offset)
 
-        miter_limit = float(node.get('stroke-miterlimit', 4))
-        self.context.set_miter_limit(miter_limit)
+            miter_limit = float(node.get('stroke-miterlimit', 4))
+            self.context.set_miter_limit(miter_limit)
 
-        # Clip
-        rect_values = clip_rect(node.get('clip'))
-        if len(rect_values) == 4:
-            top = size(self, rect_values[0], 'y')
-            right = size(self, rect_values[1], 'x')
-            bottom = size(self, rect_values[2], 'y')
-            left = size(self, rect_values[3], 'x')
-            x = size(self, node.get('x'), 'x')
-            y = size(self, node.get('y'), 'y')
-            width = size(self, node.get('width'), 'x')
-            height = size(self, node.get('height'), 'y')
-            self.context.save()
-            self.context.translate(x, y)
-            self.context.rectangle(
-                left, top, width - left - right, height - top - bottom)
-            self.context.restore()
-            self.context.clip()
-        clip_path = parse_url(node.get('clip-path')).fragment
-        if clip_path:
-            path = self.paths.get(clip_path)
-            if path:
+            # Clip
+            rect_values = clip_rect(node.get('clip'))
+            if len(rect_values) == 4:
+                top = size(self, rect_values[0], 'y')
+                right = size(self, rect_values[1], 'x')
+                bottom = size(self, rect_values[2], 'y')
+                left = size(self, rect_values[3], 'x')
+                x = size(self, node.get('x'), 'x')
+                y = size(self, node.get('y'), 'y')
+                width = size(self, node.get('width'), 'x')
+                height = size(self, node.get('height'), 'y')
                 self.context.save()
-                if path.get('clipPathUnits') == 'objectBoundingBox':
-                    x = size(self, node.get('x'), 'x')
-                    y = size(self, node.get('y'), 'y')
-                    width = size(self, node.get('width'), 'x')
-                    height = size(self, node.get('height'), 'y')
-                    self.context.translate(x, y)
-                    self.context.scale(width, height)
-                path.tag = 'g'
-                self.stroke_and_fill = False
-                self.draw(path)
-                self.stroke_and_fill = True
-                path.tag = 'clipPath'
+                self.context.translate(x, y)
+                self.context.rectangle(
+                    left, top, width - left - right, height - top - bottom)
                 self.context.restore()
-                # TODO: fill rules are not handled by cairo for clips
-                # if node.get('clip-rule') == 'evenodd':
-                #     self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
                 self.context.clip()
-                self.context.set_fill_rule(cairo.FILL_RULE_WINDING)
+            clip_path = parse_url(node.get('clip-path')).fragment
+            if clip_path:
+                path = self.paths.get(clip_path)
+                if path:
+                    self.context.save()
+                    clip_drew = False
+                    try:
+                        if path.get('clipPathUnits') == 'objectBoundingBox':
+                            x = size(self, node.get('x'), 'x')
+                            y = size(self, node.get('y'), 'y')
+                            width = size(self, node.get('width'), 'x')
+                            height = size(self, node.get('height'), 'y')
+                            self.context.translate(x, y)
+                            self.context.scale(width, height)
+                        path.tag = 'g'
+                        self.stroke_and_fill = False
+                        try:
+                            self.draw(path)
+                        finally:
+                            # Restore the shared definition even if drawing
+                            # it failed, so later calls still find the clip.
+                            self.stroke_and_fill = True
+                            path.tag = 'clipPath'
+                        clip_drew = True
+                    finally:
+                        # Balance the save() above on every outcome. The clip
+                        # is applied after this restore, exactly matching the
+                        # success-path ordering: a cairo clip region does not
+                        # survive restore(), so the path must be drawn inside
+                        # the frame and the clip installed on the outer one.
+                        self.context.restore()
+                    if clip_drew:
+                        # TODO: fill rules are not handled by cairo for clips
+                        # if node.get('clip-rule') == 'evenodd':
+                        #     self.context.set_fill_rule(
+                        #         cairo.FILL_RULE_EVEN_ODD)
+                        self.context.clip()
+                        self.context.set_fill_rule(cairo.FILL_RULE_WINDING)
 
-        save_cursor = copy.deepcopy(
-            (self.cursor_position, self.cursor_d_position,
-             self.text_path_width))
+            save_cursor = copy.deepcopy(
+                (self.cursor_position, self.cursor_d_position,
+                 self.text_path_width))
 
-        # Only draw known tags
-        if node.tag in TAGS:
-            try:
-                TAGS[node.tag](self, node)
-            except PointError:
-                # Error in point parsing, do nothing
-                pass
+            # Only draw known tags
+            if node.tag in TAGS:
+                try:
+                    TAGS[node.tag](self, node)
+                except PointError:
+                    # Error in point parsing, do nothing
+                    pass
 
-        # Get stroke and fill opacity
-        stroke_opacity = float(node.get('stroke-opacity', 1))
-        fill_opacity = float(node.get('fill-opacity', 1))
-        if opacity < 1 and not node.children:
-            stroke_opacity *= opacity
-            fill_opacity *= opacity
+            # Get stroke and fill opacity
+            stroke_opacity = float(node.get('stroke-opacity', 1))
+            fill_opacity = float(node.get('fill-opacity', 1))
+            if opacity < 1 and not node.children:
+                stroke_opacity *= opacity
+                fill_opacity *= opacity
 
-        # Manage display and visibility
-        display = node.get('display', 'inline') != 'none'
-        visible = display and (node.get('visibility', 'visible') != 'hidden')
+            # Manage display and visibility
+            display = node.get('display', 'inline') != 'none'
+            visible = (
+                display and (node.get('visibility', 'visible') != 'hidden'))
 
-        # Set font rendering properties
-        self.context.set_antialias(SHAPE_ANTIALIAS.get(
-            node.get('shape-rendering'), cairo.ANTIALIAS_DEFAULT))
+            # Set font rendering properties
+            self.context.set_antialias(SHAPE_ANTIALIAS.get(
+                node.get('shape-rendering'), cairo.ANTIALIAS_DEFAULT))
 
-        font_options = self.context.get_font_options()
-        font_options.set_antialias(TEXT_ANTIALIAS.get(
-            node.get('text-rendering'), cairo.ANTIALIAS_DEFAULT))
-        font_options.set_hint_style(TEXT_HINT_STYLE.get(
-            node.get('text-rendering'), cairo.HINT_STYLE_DEFAULT))
-        font_options.set_hint_metrics(TEXT_HINT_METRICS.get(
-            node.get('text-rendering'), cairo.HINT_METRICS_DEFAULT))
-        self.context.set_font_options(font_options)
+            font_options = self.context.get_font_options()
+            font_options.set_antialias(TEXT_ANTIALIAS.get(
+                node.get('text-rendering'), cairo.ANTIALIAS_DEFAULT))
+            font_options.set_hint_style(TEXT_HINT_STYLE.get(
+                node.get('text-rendering'), cairo.HINT_STYLE_DEFAULT))
+            font_options.set_hint_metrics(TEXT_HINT_METRICS.get(
+                node.get('text-rendering'), cairo.HINT_METRICS_DEFAULT))
+            self.context.set_font_options(font_options)
 
-        # Fill and stroke
-        if self.stroke_and_fill and visible and node.tag in TAGS:
-            # Fill
-            self.context.save()
-            paint_source, paint_color = paint(node.get('fill', 'black'))
-            if node.get('fill-rule') == 'evenodd':
-                self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
-            if not gradient_or_pattern(self, node, paint_source, fill_opacity):
-                self.context.set_source_rgba(
-                    *self.map_color(paint_color, fill_opacity))
-            if TAGS[node.tag] == text:
-                self.cursor_position = save_cursor[0]
-                self.cursor_d_position = save_cursor[1]
-                self.text_path_width = save_cursor[2]
-                text(self, node, draw_as_text=True)
-            else:
-                self.context.fill_preserve()
+            # Fill and stroke
+            if self.stroke_and_fill and visible and node.tag in TAGS:
+                # Fill
+                self.context.save()
+                try:
+                    paint_source, paint_color = paint(
+                        node.get('fill', 'black'))
+                    if node.get('fill-rule') == 'evenodd':
+                        self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+                    if not gradient_or_pattern(
+                            self, node, paint_source, fill_opacity):
+                        self.context.set_source_rgba(
+                            *self.map_color(paint_color, fill_opacity))
+                    if TAGS[node.tag] == text:
+                        self.cursor_position = save_cursor[0]
+                        self.cursor_d_position = save_cursor[1]
+                        self.text_path_width = save_cursor[2]
+                        text(self, node, draw_as_text=True)
+                    else:
+                        self.context.fill_preserve()
+                finally:
+                    self.context.restore()
+
+                # Stroke
+                self.context.save()
+                try:
+                    self.context.set_line_width(
+                        size(self, node.get('stroke-width', '1')))
+                    paint_source, paint_color = paint(node.get('stroke'))
+                    if not gradient_or_pattern(
+                            self, node, paint_source, stroke_opacity):
+                        self.context.set_source_rgba(
+                            *self.map_color(paint_color, stroke_opacity))
+                    self.context.stroke()
+                finally:
+                    self.context.restore()
+            elif not visible:
+                self.context.new_path()
+
+            # Draw path markers
+            draw_markers(self, node)
+
+            # Draw children
+            if display and node.tag not in INVISIBLE_TAGS:
+                for child in node.children:
+                    self.draw(child)
+
+            # Apply filter, mask and opacity
+            if group_pushed:
+                self.context.pop_group_to_source()
+                group_pushed = False
+                if filter_:
+                    apply_filter_before_painting(self, node, filter_)
+                if mask in self.masks:
+                    paint_mask(self, node, mask, opacity)
+                else:
+                    self.context.paint_with_alpha(opacity)
+                if filter_:
+                    apply_filter_after_painting(self, node, filter_)
+
+            # Clean cursor's position after 'text' tags
+            if node.tag == 'text':
+                self.cursor_position = [0, 0]
+                self.cursor_d_position = [0, 0]
+                self.text_path_width = 0
+        finally:
+            if group_pushed:
+                # An exception interrupted the node before its group was
+                # painted: discard the group content but unwind the cairo
+                # group stack before restoring the frame.
+                self.context.pop_group()
             self.context.restore()
-
-            # Stroke
-            self.context.save()
-            self.context.set_line_width(
-                size(self, node.get('stroke-width', '1')))
-            paint_source, paint_color = paint(node.get('stroke'))
-            if not gradient_or_pattern(
-                    self, node, paint_source, stroke_opacity):
-                self.context.set_source_rgba(
-                    *self.map_color(paint_color, stroke_opacity))
-            self.context.stroke()
-            self.context.restore()
-        elif not visible:
-            self.context.new_path()
-
-        # Draw path markers
-        draw_markers(self, node)
-
-        # Draw children
-        if display and node.tag not in INVISIBLE_TAGS:
-            for child in node.children:
-                self.draw(child)
-
-        # Apply filter, mask and opacity
-        if filter_ or mask or (opacity < 1 and node.children):
-            self.context.pop_group_to_source()
-            if filter_:
-                apply_filter_before_painting(self, node, filter_)
-            if mask in self.masks:
-                paint_mask(self, node, mask, opacity)
-            else:
-                self.context.paint_with_alpha(opacity)
-            if filter_:
-                apply_filter_after_painting(self, node, filter_)
-
-        # Clean cursor's position after 'text' tags
-        if node.tag == 'text':
-            self.cursor_position = [0, 0]
-            self.cursor_d_position = [0, 0]
-            self.text_path_width = 0
-
-        self.context.restore()
-        self.parent_node = old_parent_node
-        self.font_size = old_font_size
-        self.context_width, self.context_height = old_context_size
+            self.parent_node = old_parent_node
+            self.font_size = old_font_size
+            self.stroke_and_fill = old_stroke_and_fill
+            self.context_width, self.context_height = old_context_size
 
 
 class PDFSurface(Surface):

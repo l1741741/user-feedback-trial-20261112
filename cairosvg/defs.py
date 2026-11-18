@@ -339,37 +339,38 @@ def use(surface, node):
         raise ValueError(
             'Abort rendering: more than 100 000 referenced elements')
     surface.context.save()
-    surface.context.translate(
-        size(surface, node.get('x'), 'x'), size(surface, node.get('y'), 'y'))
-    if 'x' in node:
-        del node['x']
-    if 'y' in node:
-        del node['y']
-    if 'viewBox' in node:
-        del node['viewBox']
-    if 'mask' in node:
-        del node['mask']
-    href = parse_url(node.get_href()).geturl()
     try:
-        tree = Tree(
-            url=href, url_fetcher=node.url_fetcher, parent=node,
-            tree_cache=surface.tree_cache, unsafe=node.unsafe)
-    except TypeError:
+        surface.context.translate(
+            size(surface, node.get('x'), 'x'),
+            size(surface, node.get('y'), 'y'))
+        if 'x' in node:
+            del node['x']
+        if 'y' in node:
+            del node['y']
+        if 'viewBox' in node:
+            del node['viewBox']
+        if 'mask' in node:
+            del node['mask']
+        href = parse_url(node.get_href()).geturl()
+        try:
+            tree = Tree(
+                url=href, url_fetcher=node.url_fetcher, parent=node,
+                tree_cache=surface.tree_cache, unsafe=node.unsafe)
+        except TypeError:
+            return
+
+        if not match_features(tree.xml_tree):
+            return
+
+        if tree.tag in ('svg', 'symbol'):
+            # Explicitely specified
+            # http://www.w3.org/TR/SVG11/struct.html#UseElement
+            tree.tag = 'svg'
+            if 'width' in node and 'height' in node:
+                tree['width'], tree['height'] = node['width'], node['height']
+
+        surface.draw(tree)
+        node.get('fill', None)
+        node.get('stroke', None)
+    finally:
         surface.context.restore()
-        return
-
-    if not match_features(tree.xml_tree):
-        surface.context.restore()
-        return
-
-    if tree.tag in ('svg', 'symbol'):
-        # Explicitely specified
-        # http://www.w3.org/TR/SVG11/struct.html#UseElement
-        tree.tag = 'svg'
-        if 'width' in node and 'height' in node:
-            tree['width'], tree['height'] = node['width'], node['height']
-
-    surface.draw(tree)
-    node.get('fill', None)
-    node.get('stroke', None)
-    surface.context.restore()
