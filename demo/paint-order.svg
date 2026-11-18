@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="160"
+     viewBox="0 0 560 160">
+  <!--
+    paint-order demo. The three first panels use exactly the same geometry,
+    stroke width and marker; only the paint order changes. The panels are
+    only translated to lay them out side by side, the icon geometry is
+    identical everywhere.
+  -->
+  <defs>
+    <marker id="arrow" markerUnits="userSpaceOnUse" markerWidth="32"
+            markerHeight="32" refX="16" refY="16" viewBox="0 0 32 32"
+            orient="0">
+      <rect width="32" height="32" fill="#00aa00"/>
+    </marker>
+  </defs>
+
+  <!-- Default order: fill, stroke, markers. -->
+  <g id="default">
+    <path d="M20 20 L100 20 L100 100 L20 100 L20 20"
+          fill="#0000ff" stroke="#ff0000" stroke-width="16"
+          marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- Stroke first, then fill, then markers. -->
+  <g id="stroke-first" transform="translate(140 0)" paint-order="stroke">
+    <path d="M20 20 L100 20 L100 100 L20 100 L20 20"
+          fill="#0000ff" stroke="#ff0000" stroke-width="16"
+          marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- Markers first, then fill and stroke. -->
+  <g id="markers-first" transform="translate(280 0)" paint-order="markers">
+    <path d="M20 20 L100 20 L100 100 L20 100 L20 20"
+          fill="#0000ff" stroke="#ff0000" stroke-width="16"
+          marker-end="url(#arrow)"/>
+  </g>
+
+  <!--
+    Inheritance: the group sets the order for both icons, the second icon
+    overrides it locally back to the default order.
+  -->
+  <g id="inheritance" transform="translate(420 0)" paint-order="stroke">
+    <path d="M20 20 L60 20 L60 100 L20 100 L20 20"
+          fill="#0000ff" stroke="#ff0000" stroke-width="16"/>
+    <path d="M80 20 L120 20 L120 100 L80 100 L80 20"
+          fill="#0000ff" stroke="#ff0000" stroke-width="16"
+          paint-order="fill"/>
+  </g>
+</svg>

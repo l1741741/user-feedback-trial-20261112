@@ -3,6 +3,13 @@
 ======
 
 
+Unreleased
+==========
+
+* Support the ``paint-order`` property for fills, strokes and markers,
+  including inheritance and ``normal``/``initial``/``inherit`` values
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

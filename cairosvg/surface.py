@@ -14,7 +14,7 @@ from .defs import (
     filter_, gradient_or_pattern, linear_gradient, marker, mask, paint_mask,
     parse_all_defs, pattern, prepare_filter, radial_gradient, use)
 from .helpers import (
-    UNITS, PointError, clip_rect, node_format, normalize, paint,
+    UNITS, PointError, clip_rect, node_format, normalize, paint, paint_order,
     preserve_ratio, size, transform)
 from .image import image, invert_image
 from .parser import Tree
@@ -435,41 +435,54 @@ class Surface(object):
             node.get('text-rendering'), cairo.HINT_METRICS_DEFAULT))
         self.context.set_font_options(font_options)
 
-        # Fill and stroke
-        if self.stroke_and_fill and visible and node.tag in TAGS:
-            # Fill
-            self.context.save()
-            paint_source, paint_color = paint(node.get('fill', 'black'))
-            if node.get('fill-rule') == 'evenodd':
-                self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
-            if not gradient_or_pattern(self, node, paint_source, fill_opacity):
-                self.context.set_source_rgba(
-                    *self.map_color(paint_color, fill_opacity))
-            if TAGS[node.tag] == text:
-                self.cursor_position = save_cursor[0]
-                self.cursor_d_position = save_cursor[1]
-                self.text_path_width = save_cursor[2]
-                text(self, node, draw_as_text=True)
-            else:
-                self.context.fill_preserve()
-            self.context.restore()
-
-            # Stroke
-            self.context.save()
-            self.context.set_line_width(
-                size(self, node.get('stroke-width', '1')))
-            paint_source, paint_color = paint(node.get('stroke'))
-            if not gradient_or_pattern(
-                    self, node, paint_source, stroke_opacity):
-                self.context.set_source_rgba(
-                    *self.map_color(paint_color, stroke_opacity))
-            self.context.stroke()
-            self.context.restore()
+        # Fill and stroke, in the order given by the paint-order property.
+        # Painting the stroke removes the current path, so keep a copy when
+        # the stroke comes first, to be able to paint the same geometry again
+        # for the fill.
+        needs_paint = self.stroke_and_fill and visible and node.tag in TAGS
+        order = paint_order(node)
+        saved_path = None
+        if (needs_paint and
+                order.index('stroke') < order.index('fill')):
+            saved_path = self.context.copy_path()
+        for operation in order:
+            if operation == 'fill' and needs_paint:
+                self._restore_path(saved_path)
+                self.context.save()
+                paint_source, paint_color = paint(node.get('fill', 'black'))
+                if node.get('fill-rule') == 'evenodd':
+                    self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+                if not gradient_or_pattern(
+                        self, node, paint_source, fill_opacity):
+                    self.context.set_source_rgba(
+                        *self.map_color(paint_color, fill_opacity))
+                if TAGS[node.tag] == text:
+                    self.cursor_position = save_cursor[0]
+                    self.cursor_d_position = save_cursor[1]
+                    self.text_path_width = save_cursor[2]
+                    text(self, node, draw_as_text=True)
+                else:
+                    self.context.fill_preserve()
+                self.context.restore()
+            elif operation == 'stroke' and needs_paint:
+                self._restore_path(saved_path)
+                self.context.save()
+                self.context.set_line_width(
+                    size(self, node.get('stroke-width', '1')))
+                paint_source, paint_color = paint(node.get('stroke'))
+                if not gradient_or_pattern(
+                        self, node, paint_source, stroke_opacity):
+                    self.context.set_source_rgba(
+                        *self.map_color(paint_color, stroke_opacity))
+                self.context.stroke()
+                self.context.restore()
+            elif operation == 'markers':
+                draw_markers(self, node)
+        if needs_paint and saved_path is not None:
+            # Don’t leak the geometry of this node to its siblings.
+            self.context.new_path()
         elif not visible:
             self.context.new_path()
-
-        # Draw path markers
-        draw_markers(self, node)
 
         # Draw children
         if display and node.tag not in INVISIBLE_TAGS:
@@ -498,6 +511,12 @@ class Surface(object):
         self.parent_node = old_parent_node
         self.font_size = old_font_size
         self.context_width, self.context_height = old_context_size
+
+    def _restore_path(self, saved_path):
+        """Restore ``saved_path`` as the current path, if it was saved."""
+        if saved_path is not None:
+            self.context.new_path()
+            self.context.append_path(saved_path)
 
 
 class PDFSurface(Surface):

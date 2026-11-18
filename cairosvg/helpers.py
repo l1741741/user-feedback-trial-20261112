@@ -22,6 +22,9 @@ PAINT_URL = re.compile(r'(url\(.+\)) *(.*)')
 PATH_LETTERS = 'achlmqstvzACHLMQSTVZ'
 RECT = re.compile(r'rect\( ?(.+?) ?\)')
 
+# Default paint order, as defined by the SVG paint-order property.
+PAINT_ORDER = ('fill', 'stroke', 'markers')
+
 
 class PointError(Exception):
     """Exception raised when parsing a point fails."""
@@ -51,6 +54,57 @@ def paint(value):
         color = value or None
 
     return (source, color)
+
+
+def parse_paint_order(value):
+    """Parse a ``paint-order`` value and return the painting operations.
+
+    The result is always a permutation of ``PAINT_ORDER``: the listed
+    operations come first, in the given order, and the omitted ones are
+    appended in their default order. ``None`` is returned for invalid values.
+
+    See https://www.w3.org/TR/SVG2/painting.html#PaintOrderProperty
+
+    """
+    if not isinstance(value, str):
+        return None
+    keywords = value.strip().lower().split()
+    if not keywords:
+        return None
+    if keywords == ['normal']:
+        return PAINT_ORDER
+    # Each keyword may only be given once, and unknown keywords are invalid.
+    if len(set(keywords)) != len(keywords):
+        return None
+    if any(keyword not in PAINT_ORDER for keyword in keywords):
+        return None
+    return tuple(keywords) + tuple(
+        keyword for keyword in PAINT_ORDER if keyword not in keywords)
+
+
+def paint_order(node):
+    """Return the effective paint order of ``node``.
+
+    ``paint-order`` is inherited. Invalid and unknown declarations are
+    ignored, so the closest valid value found in the parent chain is used
+    instead of making the painted element disappear.
+
+    """
+    while node is not None:
+        value = node.get('paint-order')
+        if value is not None:
+            keyword = value.strip().lower()
+            if keyword == 'initial':
+                return PAINT_ORDER
+            if keyword in ('inherit', 'unset'):
+                # Use the parent's effective value.
+                node = node.parent
+                continue
+            order = parse_paint_order(value)
+            if order is not None:
+                return order
+        node = node.parent
+    return PAINT_ORDER
 
 
 def node_format(surface, node, reference=True):
