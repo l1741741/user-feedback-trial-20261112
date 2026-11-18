@@ -1,0 +1,26 @@
+{
+  "slug": "currentcolor-inherit",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12583-currentcolor-inherit/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 3,
+  "failures": 0,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "same-symbol-two-currentcolor-themes",
+      "passed": true
+    },
+    {
+      "name": "currentcolor-gradient-stops",
+      "passed": true
+    }
+  ],
+  "images": [
+    "ordinary",
+    "theme-use",
+    "stop-color"
+  ]
+}

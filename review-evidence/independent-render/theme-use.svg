@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="120" ><defs><symbol id="s"><rect width="50" height="50" fill="currentColor"/></symbol></defs><use xlink:href="#s" color="red"/><use xlink:href="#s" x="100" color="blue"/></svg>

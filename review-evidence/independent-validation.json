@@ -1,0 +1,22 @@
+{
+  "task_id": "rerun15-20261118-12583-currentcolor-inherit",
+  "final_sha": "8b7c89688cea606b7bc9e8ede15f6efc4acf5003",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-12583-currentcolor-inherit/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12583-currentcolor-inherit/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_color_inheritance.py"
+  ],
+  "exit_code": 0,
+  "tests": 28,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T01:45:40.334409+08:00"
+}
