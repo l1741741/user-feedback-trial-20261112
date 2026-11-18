@@ -1,0 +1,120 @@
+<!doctype html><meta charset="utf-8"><title>颜色与透明度</title><style>body{font:20px system-ui;margin:24px}img{width:600px;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>颜色语法、透明度合成及非法值</h1><h2>short-hex</h2><p>SVG输入</p><img src="short-hex.svg"><p>当次PNG</p><img src="short-hex.png"><h2>long-hex</h2><p>SVG输入</p><img src="long-hex.svg"><p>当次PNG</p><img src="long-hex.png"><h2>modern</h2><p>SVG输入</p><img src="modern.svg"><p>当次PNG</p><img src="modern.png"><h2>legacy</h2><p>SVG输入</p><img src="legacy.svg"><p>当次PNG</p><img src="legacy.png"><h2>percent</h2><p>SVG输入</p><img src="percent.svg"><p>当次PNG</p><img src="percent.png"><h2>composite</h2><p>SVG输入</p><img src="composite.svg"><p>当次PNG</p><img src="composite.png"><h2>bad-count</h2><p>SVG输入</p><img src="bad-count.svg"><p>当次PNG</p><img src="bad-count.png"><h2>bad-token</h2><p>SVG输入</p><img src="bad-token.svg"><p>当次PNG</p><img src="bad-token.png"><h2>mixed</h2><p>SVG输入</p><img src="mixed.svg"><p>当次PNG</p><img src="mixed.png"><h2>negate</h2><p>SVG输入</p><img src="negate.svg"><p>当次PNG</p><img src="negate.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-9337-css-colour-alpha/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 10,
+  &quot;passed&quot;: 10,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;short-hex-rgba&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        136
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        136
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;long-hex-rgba&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        128
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        128
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;modern-rgba&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        128
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        128
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;legacy-rgba&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        128
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        128
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;percent-rgba&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        128
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        128
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;color-fill-group-alpha-once&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        32
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;bad-count-fallback-and-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;bad-token-fallback-and-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;mixed-fallback-and-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;negate-keeps-alpha&quot;,
+      &quot;actual&quot;: [
+        255,
+        0,
+        255,
+        136
+      ],
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>

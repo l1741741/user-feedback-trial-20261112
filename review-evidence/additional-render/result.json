@@ -1,0 +1,120 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-9337-css-colour-alpha/local-frozen-source/cairosvg/__init__.py",
+  "tests": 10,
+  "passed": 10,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "short-hex-rgba",
+      "actual": [
+        0,
+        255,
+        0,
+        136
+      ],
+      "expected": [
+        0,
+        255,
+        0,
+        136
+      ],
+      "passed": true
+    },
+    {
+      "name": "long-hex-rgba",
+      "actual": [
+        0,
+        255,
+        0,
+        128
+      ],
+      "expected": [
+        0,
+        255,
+        0,
+        128
+      ],
+      "passed": true
+    },
+    {
+      "name": "modern-rgba",
+      "actual": [
+        0,
+        255,
+        0,
+        128
+      ],
+      "expected": [
+        0,
+        255,
+        0,
+        128
+      ],
+      "passed": true
+    },
+    {
+      "name": "legacy-rgba",
+      "actual": [
+        0,
+        255,
+        0,
+        128
+      ],
+      "expected": [
+        0,
+        255,
+        0,
+        128
+      ],
+      "passed": true
+    },
+    {
+      "name": "percent-rgba",
+      "actual": [
+        0,
+        255,
+        0,
+        128
+      ],
+      "expected": [
+        0,
+        255,
+        0,
+        128
+      ],
+      "passed": true
+    },
+    {
+      "name": "color-fill-group-alpha-once",
+      "actual": [
+        0,
+        255,
+        0,
+        32
+      ],
+      "passed": true
+    },
+    {
+      "name": "bad-count-fallback-and-sibling",
+      "passed": true
+    },
+    {
+      "name": "bad-token-fallback-and-sibling",
+      "passed": true
+    },
+    {
+      "name": "mixed-fallback-and-sibling",
+      "passed": true
+    },
+    {
+      "name": "negate-keeps-alpha",
+      "actual": [
+        255,
+        0,
+        255,
+        136
+      ],
+      "passed": true
+    }
+  ]
+}
