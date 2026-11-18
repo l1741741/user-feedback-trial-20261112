@@ -1,0 +1,22 @@
+{
+  "task_id": "rerun15-20261118-9339-mask-luminance",
+  "final_sha": "bd1effef08f66371ef9a71dbaafc123914cef38c",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-9339-mask-luminance/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-9339-mask-luminance/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_mask.py"
+  ],
+  "exit_code": 0,
+  "tests": 19,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T00:47:54.213412+08:00"
+}
