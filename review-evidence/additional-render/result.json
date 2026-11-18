@@ -1,0 +1,216 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12599-output-viewport/local-frozen-source/cairosvg/__init__.py",
+  "tests": 14,
+  "passed": 14,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "width-fraction-stored-size",
+      "actual": [
+        26,
+        13
+      ],
+      "expected": [
+        26,
+        13
+      ],
+      "passed": true
+    },
+    {
+      "name": "width-fraction-opaque-edge-corners",
+      "actual": [
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "name": "height-fraction-stored-size",
+      "actual": [
+        26,
+        13
+      ],
+      "expected": [
+        26,
+        13
+      ],
+      "passed": true
+    },
+    {
+      "name": "height-fraction-opaque-edge-corners",
+      "actual": [
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "name": "scale-stored-size",
+      "actual": [
+        26,
+        13
+      ],
+      "expected": [
+        26,
+        13
+      ],
+      "passed": true
+    },
+    {
+      "name": "scale-opaque-edge-corners",
+      "actual": [
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "name": "both-stored-size",
+      "actual": [
+        80,
+        40
+      ],
+      "expected": [
+        80,
+        40
+      ],
+      "passed": true
+    },
+    {
+      "name": "both-opaque-edge-corners",
+      "actual": [
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "name": "tiny-stored-size",
+      "actual": [
+        1,
+        1
+      ],
+      "expected": [
+        1,
+        1
+      ],
+      "passed": true
+    },
+    {
+      "name": "zero-reject-before-file",
+      "error": "ValueError",
+      "file_created": false,
+      "passed": true
+    },
+    {
+      "name": "negative-reject-before-file",
+      "error": "ValueError",
+      "file_created": false,
+      "passed": true
+    },
+    {
+      "name": "nan-reject-before-file",
+      "error": "ValueError",
+      "file_created": false,
+      "passed": true
+    },
+    {
+      "name": "infinite-reject-before-file",
+      "error": "ValueError",
+      "file_created": false,
+      "passed": true
+    },
+    {
+      "name": "physical-inch-dpi120",
+      "passed": true
+    }
+  ]
+}

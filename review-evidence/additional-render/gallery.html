@@ -1,0 +1,216 @@
+<!doctype html><meta charset="utf-8"><title>输出尺寸与贴边像素</title><style>body{font:20px system-ui;margin:24px}img{width:600px;image-rendering:pixelated;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>小数、单尺寸、scale与物理单位</h1><p>红色贴边矩形四角不应出现透明线；非法尺寸在创建文件前拒绝。</p><h2>width-fraction</h2><p>SVG输入</p><img src="width-fraction.svg"><p>当次PNG</p><img src="width-fraction.png"><h2>height-fraction</h2><p>SVG输入</p><img src="height-fraction.svg"><p>当次PNG</p><img src="height-fraction.png"><h2>scale</h2><p>SVG输入</p><img src="scale.svg"><p>当次PNG</p><img src="scale.png"><h2>both</h2><p>SVG输入</p><img src="both.svg"><p>当次PNG</p><img src="both.png"><h2>tiny</h2><p>SVG输入</p><img src="tiny.svg"><p>当次PNG</p><img src="tiny.png"><h2>physical-dpi</h2><p>SVG输入</p><img src="physical-dpi.svg"><p>当次PNG</p><img src="physical-dpi.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12599-output-viewport/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 14,
+  &quot;passed&quot;: 14,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;width-fraction-stored-size&quot;,
+      &quot;actual&quot;: [
+        26,
+        13
+      ],
+      &quot;expected&quot;: [
+        26,
+        13
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;width-fraction-opaque-edge-corners&quot;,
+      &quot;actual&quot;: [
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ]
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;height-fraction-stored-size&quot;,
+      &quot;actual&quot;: [
+        26,
+        13
+      ],
+      &quot;expected&quot;: [
+        26,
+        13
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;height-fraction-opaque-edge-corners&quot;,
+      &quot;actual&quot;: [
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ]
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;scale-stored-size&quot;,
+      &quot;actual&quot;: [
+        26,
+        13
+      ],
+      &quot;expected&quot;: [
+        26,
+        13
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;scale-opaque-edge-corners&quot;,
+      &quot;actual&quot;: [
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ]
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;both-stored-size&quot;,
+      &quot;actual&quot;: [
+        80,
+        40
+      ],
+      &quot;expected&quot;: [
+        80,
+        40
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;both-opaque-edge-corners&quot;,
+      &quot;actual&quot;: [
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ],
+        [
+          255,
+          0,
+          0,
+          255
+        ]
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;tiny-stored-size&quot;,
+      &quot;actual&quot;: [
+        1,
+        1
+      ],
+      &quot;expected&quot;: [
+        1,
+        1
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;zero-reject-before-file&quot;,
+      &quot;error&quot;: &quot;ValueError&quot;,
+      &quot;file_created&quot;: false,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;negative-reject-before-file&quot;,
+      &quot;error&quot;: &quot;ValueError&quot;,
+      &quot;file_created&quot;: false,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;nan-reject-before-file&quot;,
+      &quot;error&quot;: &quot;ValueError&quot;,
+      &quot;file_created&quot;: false,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;infinite-reject-before-file&quot;,
+      &quot;error&quot;: &quot;ValueError&quot;,
+      &quot;file_created&quot;: false,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;physical-inch-dpi120&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>

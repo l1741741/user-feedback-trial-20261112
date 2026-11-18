@@ -1,0 +1,31 @@
+{
+  "slug": "output-viewport",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12599-output-viewport/local-frozen-source/cairosvg/__init__.py",
+  "tests": 4,
+  "passed": 4,
+  "failures": 0,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "width-only-preserves-ratio-and-edge-pixels",
+      "passed": true
+    },
+    {
+      "name": "physical-units-dpi-edge-coverage",
+      "passed": true
+    },
+    {
+      "name": "explicit-width-height-exact-raster-size",
+      "passed": true
+    }
+  ],
+  "images": [
+    "ordinary",
+    "width-only",
+    "physical-dpi",
+    "both-size"
+  ]
+}
