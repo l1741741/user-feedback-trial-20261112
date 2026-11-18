@@ -1,0 +1,26 @@
+{
+  "slug": "group-compositing",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11711-group-compositing/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 3,
+  "failures": 0,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "overlap-alpha-applied-once",
+      "passed": true
+    },
+    {
+      "name": "nested-alpha-and-sibling-isolation",
+      "passed": true
+    }
+  ],
+  "images": [
+    "ordinary",
+    "group-alpha",
+    "nested-alpha"
+  ]
+}

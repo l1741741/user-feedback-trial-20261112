@@ -1,0 +1,208 @@
+<!doctype html><meta charset="utf-8"><title>组透明度独立像素核验</title><style>body{font:19px system-ui;margin:24px}img{width:640px;max-width:100%;border:1px solid #999;background:#eee}pre{white-space:pre-wrap}</style><h1>组整体透明与逐元素透明的区别</h1><p>组重叠区alpha应128，逐元素重叠区应192；嵌套0.5×0.5为64，白色mask不得再重复乘透明度。</p><h2>group-half</h2><h3>SVG输入</h3><img src="group-half.svg"><h3>本次PNG</h3><img src="group-half.png"><details><summary>实际输入源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;g opacity=&quot;.5&quot;&gt;&lt;rect x=&quot;20&quot; y=&quot;20&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot;/&gt;&lt;rect x=&quot;70&quot; y=&quot;20&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot;/&gt;&lt;/g&gt;&lt;/svg&gt;</pre></details><h2>children-half</h2><h3>SVG输入</h3><img src="children-half.svg"><h3>本次PNG</h3><img src="children-half.png"><details><summary>实际输入源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;rect x=&quot;20&quot; y=&quot;20&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot; opacity=&quot;.5&quot;/&gt;&lt;rect x=&quot;70&quot; y=&quot;20&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot; opacity=&quot;.5&quot;/&gt;&lt;/svg&gt;</pre></details><h2>nested</h2><h3>SVG输入</h3><img src="nested.svg"><h3>本次PNG</h3><img src="nested.png"><details><summary>实际输入源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;g opacity=&quot;.5&quot;&gt;&lt;g opacity=&quot;.5&quot;&gt;&lt;rect x=&quot;20&quot; y=&quot;20&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot;/&gt;&lt;rect x=&quot;70&quot; y=&quot;20&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot;/&gt;&lt;/g&gt;&lt;/g&gt;&lt;/svg&gt;</pre></details><h2>mask-leaf</h2><h3>SVG输入</h3><img src="mask-leaf.svg"><h3>本次PNG</h3><img src="mask-leaf.png"><details><summary>实际输入源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;defs&gt;&lt;mask id=&quot;white&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;320&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;/mask&gt;&lt;/defs&gt;&lt;rect x=&quot;20&quot; y=&quot;20&quot; width=&quot;150&quot; height=&quot;100&quot; fill=&quot;red&quot; mask=&quot;url(#white)&quot; opacity=&quot;.5&quot;/&gt;&lt;/svg&gt;</pre></details><h2>mask-nested</h2><h3>SVG输入</h3><img src="mask-nested.svg"><h3>本次PNG</h3><img src="mask-nested.png"><details><summary>实际输入源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;defs&gt;&lt;mask id=&quot;white&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;rect width=&quot;320&quot; height=&quot;180&quot; fill=&quot;white&quot;/&gt;&lt;/mask&gt;&lt;/defs&gt;&lt;g opacity=&quot;.5&quot;&gt;&lt;g mask=&quot;url(#white)&quot; opacity=&quot;.5&quot;&gt;&lt;rect x=&quot;20&quot; y=&quot;20&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot;/&gt;&lt;rect x=&quot;70&quot; y=&quot;20&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot;/&gt;&lt;/g&gt;&lt;/g&gt;&lt;/svg&gt;</pre></details><h2>use-half</h2><h3>SVG输入</h3><img src="use-half.svg"><h3>本次PNG</h3><img src="use-half.png"><details><summary>实际输入源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;defs&gt;&lt;g id=&quot;icon&quot;&gt;&lt;rect x=&quot;20&quot; y=&quot;20&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot;/&gt;&lt;rect x=&quot;70&quot; y=&quot;20&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot;/&gt;&lt;/g&gt;&lt;/defs&gt;&lt;use href=&quot;#icon&quot; opacity=&quot;.5&quot;/&gt;&lt;/svg&gt;</pre></details><h2>empty-transparent-sibling</h2><h3>SVG输入</h3><img src="empty-transparent-sibling.svg"><h3>本次PNG</h3><img src="empty-transparent-sibling.png"><details><summary>实际输入源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;320&quot; height=&quot;180&quot;&gt;&lt;g opacity=&quot;0&quot;&gt;&lt;g opacity=&quot;.5&quot;&gt;&lt;rect x=&quot;20&quot; y=&quot;20&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot;/&gt;&lt;rect x=&quot;70&quot; y=&quot;20&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot;/&gt;&lt;/g&gt;&lt;/g&gt;&lt;g opacity=&quot;.5&quot;/&gt;&lt;rect x=&quot;210&quot; y=&quot;20&quot; width=&quot;70&quot; height=&quot;70&quot; fill=&quot;blue&quot;/&gt;&lt;/svg&gt;</pre></details><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11711-group-compositing/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 10,
+  &quot;passed&quot;: 10,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;group-nonoverlap&quot;,
+      &quot;point&quot;: [
+        40,
+        60
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;group-overlap-once&quot;,
+      &quot;point&quot;: [
+        90,
+        60
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;children-overlap&quot;,
+      &quot;point&quot;: [
+        90,
+        60
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        192
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        192
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;children-nonoverlap&quot;,
+      &quot;point&quot;: [
+        40,
+        60
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;nested-quarter&quot;,
+      &quot;point&quot;: [
+        90,
+        60
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        64
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        64
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;mask-leaf-once&quot;,
+      &quot;point&quot;: [
+        90,
+        60
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;mask-nested-quarter&quot;,
+      &quot;point&quot;: [
+        90,
+        60
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        64
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        64
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;use-overlap-once&quot;,
+      &quot;point&quot;: [
+        90,
+        60
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;transparent-content-absent&quot;,
+      &quot;point&quot;: [
+        90,
+        60
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;sibling-after-empty&quot;,
+      &quot;point&quot;: [
+        240,
+        50
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>

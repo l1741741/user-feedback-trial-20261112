@@ -1,0 +1,17 @@
+........................                                                 [100%]
+=============================== warnings summary ===============================
+cairosvg/test_group_compositing.py::test_empty_and_transparent_groups_leave_no_residue
+cairosvg/test_group_compositing.py::test_empty_and_transparent_groups_leave_no_residue
+cairosvg/test_group_compositing.py::test_empty_and_transparent_groups_leave_no_residue
+cairosvg/test_group_compositing.py::test_empty_and_transparent_groups_leave_no_residue
+cairosvg/test_group_compositing.py::test_empty_and_transparent_groups_leave_no_residue
+cairosvg/test_group_compositing.py::test_empty_and_transparent_groups_leave_no_residue
+  /Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11711-group-compositing/local-frozen-source/cairosvg/test_group_compositing.py:232: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+    assert list(image.getdata()) == list(baseline.getdata())
+
+cairosvg/test_group_compositing.py: 12 warnings
+  /Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11711-group-compositing/local-frozen-source/cairosvg/test_group_compositing.py:481: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+    for a, e in zip(actual.getdata(), expected.getdata())
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+24 passed, 18 warnings in 0.22s

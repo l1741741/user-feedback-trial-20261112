@@ -1,0 +1,208 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11711-group-compositing/local-frozen-source/cairosvg/__init__.py",
+  "tests": 10,
+  "passed": 10,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "group-nonoverlap",
+      "point": [
+        40,
+        60
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "passed": true
+    },
+    {
+      "name": "group-overlap-once",
+      "point": [
+        90,
+        60
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "passed": true
+    },
+    {
+      "name": "children-overlap",
+      "point": [
+        90,
+        60
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        192
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        192
+      ],
+      "passed": true
+    },
+    {
+      "name": "children-nonoverlap",
+      "point": [
+        40,
+        60
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "passed": true
+    },
+    {
+      "name": "nested-quarter",
+      "point": [
+        90,
+        60
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        64
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        64
+      ],
+      "passed": true
+    },
+    {
+      "name": "mask-leaf-once",
+      "point": [
+        90,
+        60
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "passed": true
+    },
+    {
+      "name": "mask-nested-quarter",
+      "point": [
+        90,
+        60
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        64
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        64
+      ],
+      "passed": true
+    },
+    {
+      "name": "use-overlap-once",
+      "point": [
+        90,
+        60
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "passed": true
+    },
+    {
+      "name": "transparent-content-absent",
+      "point": [
+        90,
+        60
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "sibling-after-empty",
+      "point": [
+        240,
+        50
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "task_id": "rerun15-20261118-11711-group-compositing",
+  "final_sha": "492aa699399b8b44b66c555f0af3d1e453de0cfd",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-11711-group-compositing/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11711-group-compositing/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_group_compositing.py"
+  ],
+  "exit_code": 0,
+  "tests": 24,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T00:47:54.878684+08:00"
+}
