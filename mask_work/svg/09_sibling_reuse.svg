@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="120" viewBox="0 0 300 120">
+  <defs>
+    <mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="300" height="120">
+      <rect x="10" y="10" width="80" height="100" fill="white"/>
+    </mask>
+  </defs>
+  <rect x="0" y="0" width="150" height="120" fill="red" mask="url(#m)"/>
+  <rect x="150" y="0" width="150" height="120" fill="blue" mask="url(#m)"/>
+</svg>

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200" viewBox="0 0 300 200">
+  <defs>
+    <mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="300" height="200">
+      <circle cx="60" cy="60" r="40" fill="white"/>
+    </mask>
+  </defs>
+  <!-- rotated, translated, non-square object reusing a userSpace mask -->
+  <rect x="0" y="0" width="120" height="80" fill="red"
+        transform="translate(90,20) rotate(30)" mask="url(#m)"/>
+  <!-- second object with a different transform and aspect ratio -->
+  <ellipse cx="0" cy="0" rx="100" ry="30" fill="blue"
+           transform="translate(60,150)" mask="url(#m)"/>
+</svg>

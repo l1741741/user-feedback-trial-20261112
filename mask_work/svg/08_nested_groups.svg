@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="150" viewBox="0 0 300 150">
+  <defs>
+    <mask id="outer" maskUnits="userSpaceOnUse" x="0" y="0" width="300" height="150">
+      <rect x="10" y="10" width="280" height="130" fill="white" opacity="0.8"/>
+    </mask>
+    <mask id="inner" maskUnits="userSpaceOnUse" x="0" y="0" width="300" height="150">
+      <circle cx="150" cy="75" r="60" fill="white"/>
+    </mask>
+  </defs>
+  <g mask="url(#outer)" opacity="0.75">
+    <g mask="url(#inner)">
+      <rect x="0" y="0" width="300" height="150" fill="red"/>
+    </g>
+    <rect x="220" y="100" width="60" height="40" fill="blue"/>
+  </g>
+</svg>

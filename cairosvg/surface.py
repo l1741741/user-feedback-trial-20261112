@@ -11,12 +11,13 @@ import cairocffi as cairo
 from .colors import color, negate_color
 from .defs import (
     apply_filter_after_painting, apply_filter_before_painting, clip_path,
-    filter_, gradient_or_pattern, linear_gradient, marker, mask, paint_mask,
+    filter_, gradient_or_pattern, linear_gradient, marker, mask,
     parse_all_defs, pattern, prepare_filter, radial_gradient, use)
 from .helpers import (
     UNITS, PointError, clip_rect, node_format, normalize, paint,
     preserve_ratio, size, transform)
 from .image import image, invert_image
+from .mask import paint_mask
 from .parser import Tree
 from .path import draw_markers, path
 from .shapes import circle, ellipse, line, polygon, polyline, rect
@@ -327,7 +328,7 @@ class Surface(object):
         if filter_:
             prepare_filter(self, node, filter_)
 
-        if filter_ or mask or (opacity < 1 and node.children):
+        if filter_ or mask or opacity < 1:
             self.context.push_group()
 
         # Move to (node.x, node.y)
@@ -414,9 +415,9 @@ class Surface(object):
         # Get stroke and fill opacity
         stroke_opacity = float(node.get('stroke-opacity', 1))
         fill_opacity = float(node.get('fill-opacity', 1))
-        if opacity < 1 and not node.children:
-            stroke_opacity *= opacity
-            fill_opacity *= opacity
+        # Element opacity is applied once when the group is composited
+        # below (push_group happens for any opacity < 1), so it must not be
+        # folded into fill/stroke opacity here.
 
         # Manage display and visibility
         display = node.get('display', 'inline') != 'none'
@@ -477,7 +478,7 @@ class Surface(object):
                 self.draw(child)
 
         # Apply filter, mask and opacity
-        if filter_ or mask or (opacity < 1 and node.children):
+        if filter_ or mask or opacity < 1:
             self.context.pop_group_to_source()
             if filter_:
                 apply_filter_before_painting(self, node, filter_)

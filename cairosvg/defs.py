@@ -116,45 +116,6 @@ def clip_path(surface, node):
         surface.paths[node['id']] = node
 
 
-def paint_mask(surface, node, name, opacity):
-    """Paint the mask of the current surface."""
-    mask_node = surface.masks[name]
-    mask_node.tag = 'g'
-    mask_node['opacity'] = opacity
-
-    if mask_node.get('maskUnits') == 'userSpaceOnUse':
-        width_ref, height_ref = 'x', 'y'
-    else:
-        x = size(surface, node.get('x'), 'x')
-        y = size(surface, node.get('y'), 'y')
-        width = size(surface, node.get('width'), 'x')
-        height = size(surface, node.get('height'), 'y')
-        width_ref = width or surface.width
-        height_ref = height or surface.height
-
-    mask_node['x'] = size(surface, mask_node.get('x', '-10%'), width_ref)
-    mask_node['y'] = size(surface, mask_node.get('y', '-10%'), height_ref)
-    mask_node['height'] = size(
-        surface, mask_node.get('height', '120%'), height_ref)
-    mask_node['width'] = size(
-        surface, mask_node.get('width', '120%'), width_ref)
-
-    if mask_node.get('maskUnits') == 'userSpaceOnUse':
-        x = mask_node['x']
-        y = mask_node['y']
-        mask_node['viewBox'] = '{x} {y} {width} {height}'.format(**mask_node)
-
-    from .surface import SVGSurface  # circular import
-    mask_surface = SVGSurface(mask_node, None, surface.dpi, surface)
-    surface.context.save()
-    surface.context.translate(x, y)
-    surface.context.scale(
-        mask_node['width'] / mask_surface.width,
-        mask_node['height'] / mask_surface.height)
-    surface.context.mask_surface(mask_surface.cairo)
-    surface.context.restore()
-
-
 def draw_gradient(surface, node, name, opacity):
     """Gradients colors."""
     gradient_node = surface.gradients[name]

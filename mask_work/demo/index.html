@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CairoSVG mask semantics demo</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; background:#fafafa; }
+  h1 { margin-bottom: .25rem; }
+  .meta { color:#555; margin-top:0; }
+  .card { background:#fff; border:1px solid #ddd; border-radius:8px;
+           padding:1rem 1.25rem; margin:1.25rem 0; }
+  .panes { display:flex; gap:1.5rem; align-items:flex-start; flex-wrap:wrap; }
+  figure { margin:0; flex:1; min-width:280px; }
+  figcaption { font-weight:600; margin-bottom:.4rem; }
+  pre { background:#111; color:#eee; padding:.75rem; border-radius:6px;
+         font-size:11px; overflow:auto; max-height:340px; }
+  img { max-width:100%; border:1px solid #ccc; background:
+         repeating-conic-gradient(#eee 0 25%, #fff 0 50%) 0 0/16px 16px; }
+  .caption { color:#444; }
+</style>
+</head>
+<body>
+  <h1>CairoSVG <code>&lt;mask&gt;</code> semantics</h1>
+  <p class="meta">Rendered on demand with CairoSVG 2.9.1.
+     Each PNG next to its input was generated during this demo run.</p>
+  
+        <section class="card">
+          <h2>01_luminance</h2>
+          <p class="caption">Luminance mask: black hides, gray 50% is half, white shows.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;300&quot; height=&quot;100&quot; viewBox=&quot;0 0 300 100&quot;&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;m&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;300&quot; height=&quot;100&quot;&gt;
+      &lt;rect x=&quot;0&quot;   y=&quot;0&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;black&quot;/&gt;
+      &lt;rect x=&quot;100&quot; y=&quot;0&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;rgb(128,128,128)&quot;/&gt;
+      &lt;rect x=&quot;200&quot; y=&quot;0&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;white&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;300&quot; height=&quot;100&quot; fill=&quot;red&quot; mask=&quot;url(#m)&quot;/&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="01_luminance.png" alt="01_luminance render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>02_color_luminance</h2>
+          <p class="caption">Color luminance: red/green/blue differ by Rec.709 luma.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;300&quot; height=&quot;100&quot; viewBox=&quot;0 0 300 100&quot;&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;m&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;300&quot; height=&quot;100&quot;&gt;
+      &lt;rect x=&quot;0&quot;   y=&quot;0&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot;/&gt;
+      &lt;rect x=&quot;100&quot; y=&quot;0&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;lime&quot;/&gt;
+      &lt;rect x=&quot;200&quot; y=&quot;0&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;blue&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;300&quot; height=&quot;100&quot; fill=&quot;white&quot; mask=&quot;url(#m)&quot;/&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="02_color_luminance.png" alt="02_color_luminance render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>03_mask_alpha</h2>
+          <p class="caption">Mask content opacity scales coverage (0.25/0.5/0.75).</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;300&quot; height=&quot;100&quot; viewBox=&quot;0 0 300 100&quot;&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;m&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;300&quot; height=&quot;100&quot;&gt;
+      &lt;rect x=&quot;0&quot;   y=&quot;0&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;white&quot; opacity=&quot;0.25&quot;/&gt;
+      &lt;rect x=&quot;100&quot; y=&quot;0&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;white&quot; opacity=&quot;0.5&quot;/&gt;
+      &lt;rect x=&quot;200&quot; y=&quot;0&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;white&quot; opacity=&quot;0.75&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;300&quot; height=&quot;100&quot; fill=&quot;red&quot; mask=&quot;url(#m)&quot;/&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="03_mask_alpha.png" alt="03_mask_alpha render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>04_reuse_userspace</h2>
+          <p class="caption">One userSpace mask reused by a transformed second object.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;400&quot; height=&quot;200&quot; viewBox=&quot;0 0 400 200&quot;&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;m&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;400&quot; height=&quot;200&quot;&gt;
+      &lt;circle cx=&quot;120&quot; cy=&quot;100&quot; r=&quot;60&quot; fill=&quot;white&quot;/&gt;
+      &lt;rect x=&quot;250&quot; y=&quot;40&quot; width=&quot;100&quot; height=&quot;120&quot; fill=&quot;white&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;!-- large object at origin --&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;400&quot; height=&quot;200&quot; fill=&quot;red&quot; mask=&quot;url(#m)&quot;/&gt;
+  &lt;!-- small object reusing the same mask, shifted and scaled via transform --&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;80&quot; height=&quot;80&quot; fill=&quot;blue&quot;
+        transform=&quot;translate(200,60) scale(0.5)&quot; mask=&quot;url(#m)&quot;/&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="04_reuse_userspace.png" alt="04_reuse_userspace render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>05_outside_transparent</h2>
+          <p class="caption">Outside the mask region stays fully transparent.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;200&quot; height=&quot;200&quot; viewBox=&quot;0 0 200 200&quot;&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;m&quot;&gt;
+      &lt;rect x=&quot;50&quot; y=&quot;50&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;white&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;!-- object bigger than mask area: outside the mask must be fully transparent --&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;200&quot; height=&quot;200&quot; fill=&quot;red&quot; mask=&quot;url(#m)&quot;/&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="05_outside_transparent.png" alt="05_outside_transparent render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>06_group_opacity</h2>
+          <p class="caption">Group opacity 0.5 x mask alpha 0.5 = 0.25, applied once.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;200&quot; height=&quot;100&quot; viewBox=&quot;0 0 200 100&quot;&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;m&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;200&quot; height=&quot;100&quot;&gt;
+      &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;200&quot; height=&quot;100&quot; fill=&quot;white&quot; opacity=&quot;0.5&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;!-- group opacity 0.5 combined with mask alpha 0.5: final alpha must be 0.25 --&gt;
+  &lt;g opacity=&quot;0.5&quot; mask=&quot;url(#m)&quot;&gt;
+    &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;200&quot; height=&quot;100&quot; fill=&quot;red&quot;/&gt;
+  &lt;/g&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="06_group_opacity.png" alt="06_group_opacity render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>07_gradient</h2>
+          <p class="caption">A gradient mask gives a matching smooth alpha ramp.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;200&quot; height=&quot;100&quot; viewBox=&quot;0 0 200 100&quot;&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;m&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;200&quot; height=&quot;100&quot;&gt;
+      &lt;linearGradient id=&quot;g&quot; x1=&quot;0&quot; y1=&quot;0&quot; x2=&quot;1&quot; y2=&quot;0&quot;&gt;
+        &lt;stop offset=&quot;0&quot; stop-color=&quot;black&quot;/&gt;
+        &lt;stop offset=&quot;1&quot; stop-color=&quot;white&quot;/&gt;
+      &lt;/linearGradient&gt;
+      &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;200&quot; height=&quot;100&quot; fill=&quot;url(#g)&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;200&quot; height=&quot;100&quot; fill=&quot;red&quot; mask=&quot;url(#m)&quot;/&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="07_gradient.png" alt="07_gradient render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>08_nested_groups</h2>
+          <p class="caption">Nested masked groups; each mask and opacity stays distinct.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;300&quot; height=&quot;150&quot; viewBox=&quot;0 0 300 150&quot;&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;outer&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;300&quot; height=&quot;150&quot;&gt;
+      &lt;rect x=&quot;10&quot; y=&quot;10&quot; width=&quot;280&quot; height=&quot;130&quot; fill=&quot;white&quot; opacity=&quot;0.8&quot;/&gt;
+    &lt;/mask&gt;
+    &lt;mask id=&quot;inner&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;300&quot; height=&quot;150&quot;&gt;
+      &lt;circle cx=&quot;150&quot; cy=&quot;75&quot; r=&quot;60&quot; fill=&quot;white&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;g mask=&quot;url(#outer)&quot; opacity=&quot;0.75&quot;&gt;
+    &lt;g mask=&quot;url(#inner)&quot;&gt;
+      &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;300&quot; height=&quot;150&quot; fill=&quot;red&quot;/&gt;
+    &lt;/g&gt;
+    &lt;rect x=&quot;220&quot; y=&quot;100&quot; width=&quot;60&quot; height=&quot;40&quot; fill=&quot;blue&quot;/&gt;
+  &lt;/g&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="08_nested_groups.png" alt="08_nested_groups render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>09_sibling_reuse</h2>
+          <p class="caption">Sibling elements reuse one mask without node mutation.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;300&quot; height=&quot;120&quot; viewBox=&quot;0 0 300 120&quot;&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;m&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;300&quot; height=&quot;120&quot;&gt;
+      &lt;rect x=&quot;10&quot; y=&quot;10&quot; width=&quot;80&quot; height=&quot;100&quot; fill=&quot;white&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;150&quot; height=&quot;120&quot; fill=&quot;red&quot; mask=&quot;url(#m)&quot;/&gt;
+  &lt;rect x=&quot;150&quot; y=&quot;0&quot; width=&quot;150&quot; height=&quot;120&quot; fill=&quot;blue&quot; mask=&quot;url(#m)&quot;/&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="09_sibling_reuse.png" alt="09_sibling_reuse render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>10_bbox_reuse</h2>
+          <p class="caption">objectBoundingBox mask re-fits each object of different size.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;400&quot; height=&quot;200&quot; viewBox=&quot;0 0 400 200&quot;&gt;
+  &lt;defs&gt;
+    &lt;!-- objectBoundingBox: same mask reused by objects of different
+         size and position; each must get its own centered 50% region --&gt;
+    &lt;mask id=&quot;m&quot; maskContentUnits=&quot;objectBoundingBox&quot;&gt;
+      &lt;rect x=&quot;0.25&quot; y=&quot;0.25&quot; width=&quot;0.5&quot; height=&quot;0.5&quot; fill=&quot;white&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;200&quot; height=&quot;200&quot; fill=&quot;red&quot; mask=&quot;url(#m)&quot;/&gt;
+  &lt;rect x=&quot;220&quot; y=&quot;50&quot; width=&quot;160&quot; height=&quot;100&quot; fill=&quot;blue&quot; mask=&quot;url(#m)&quot;/&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="10_bbox_reuse.png" alt="10_bbox_reuse render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>11_alpha_vs_luminance</h2>
+          <p class="caption">mask-type alpha vs luminance produce different results.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;300&quot; height=&quot;100&quot; viewBox=&quot;0 0 300 100&quot;&gt;
+  &lt;defs&gt;
+    &lt;!-- alpha mask: colors are ignored, only alpha matters --&gt;
+    &lt;mask id=&quot;a&quot; mask-type=&quot;alpha&quot; maskUnits=&quot;userSpaceOnUse&quot;
+          x=&quot;0&quot; y=&quot;0&quot; width=&quot;300&quot; height=&quot;100&quot;&gt;
+      &lt;rect x=&quot;0&quot;   y=&quot;0&quot; width=&quot;150&quot; height=&quot;100&quot; fill=&quot;black&quot; opacity=&quot;1&quot;/&gt;
+      &lt;rect x=&quot;150&quot; y=&quot;0&quot; width=&quot;150&quot; height=&quot;100&quot; fill=&quot;white&quot; opacity=&quot;0.5&quot;/&gt;
+    &lt;/mask&gt;
+    &lt;!-- luminance mask with the same geometry but different colors --&gt;
+    &lt;mask id=&quot;l&quot; mask-type=&quot;luminance&quot; maskUnits=&quot;userSpaceOnUse&quot;
+          x=&quot;0&quot; y=&quot;0&quot; width=&quot;300&quot; height=&quot;100&quot;&gt;
+      &lt;rect x=&quot;0&quot;   y=&quot;0&quot; width=&quot;150&quot; height=&quot;100&quot; fill=&quot;black&quot; opacity=&quot;1&quot;/&gt;
+      &lt;rect x=&quot;150&quot; y=&quot;0&quot; width=&quot;150&quot; height=&quot;100&quot; fill=&quot;white&quot; opacity=&quot;0.5&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;300&quot; height=&quot;50&quot; fill=&quot;red&quot; mask=&quot;url(#a)&quot;/&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;50&quot; width=&quot;300&quot; height=&quot;50&quot; fill=&quot;red&quot; mask=&quot;url(#l)&quot;/&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="11_alpha_vs_luminance.png" alt="11_alpha_vs_luminance render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>12_transform_nonsquare</h2>
+          <p class="caption">Rotated/translated non-square objects, shared mask.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;300&quot; height=&quot;200&quot; viewBox=&quot;0 0 300 200&quot;&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;m&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;300&quot; height=&quot;200&quot;&gt;
+      &lt;circle cx=&quot;60&quot; cy=&quot;60&quot; r=&quot;40&quot; fill=&quot;white&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;!-- rotated, translated, non-square object reusing a userSpace mask --&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;120&quot; height=&quot;80&quot; fill=&quot;red&quot;
+        transform=&quot;translate(90,20) rotate(30)&quot; mask=&quot;url(#m)&quot;/&gt;
+  &lt;!-- second object with a different transform and aspect ratio --&gt;
+  &lt;ellipse cx=&quot;0&quot; cy=&quot;0&quot; rx=&quot;100&quot; ry=&quot;30&quot; fill=&quot;blue&quot;
+           transform=&quot;translate(60,150)&quot; mask=&quot;url(#m)&quot;/&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="12_transform_nonsquare.png" alt="12_transform_nonsquare render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>13_linear_rgb</h2>
+          <p class="caption">color-interpolation=linearRGB changes the gray coverage.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;200&quot; height=&quot;100&quot; viewBox=&quot;0 0 200 100&quot;&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;m&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;200&quot; height=&quot;100&quot;
+          color-interpolation=&quot;linearRGB&quot;&gt;
+      &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;rgb(128,128,128)&quot;/&gt;
+      &lt;rect x=&quot;100&quot; y=&quot;0&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;rgb(128,128,128)&quot;
+            color-interpolation=&quot;sRGB&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;200&quot; height=&quot;100&quot; fill=&quot;red&quot; mask=&quot;url(#m)&quot;/&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="13_linear_rgb.png" alt="13_linear_rgb render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>14_mask_gradient_group</h2>
+          <p class="caption">Gradient plus a translucent group inside the mask.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;240&quot; height=&quot;120&quot; viewBox=&quot;0 0 240 120&quot;&gt;
+  &lt;defs&gt;
+    &lt;linearGradient id=&quot;fade&quot; x1=&quot;0&quot; y1=&quot;0&quot; x2=&quot;1&quot; y2=&quot;0&quot;&gt;
+      &lt;stop offset=&quot;0&quot; stop-color=&quot;black&quot;/&gt;
+      &lt;stop offset=&quot;0.5&quot; stop-color=&quot;rgb(128,128,128)&quot;/&gt;
+      &lt;stop offset=&quot;1&quot; stop-color=&quot;white&quot;/&gt;
+    &lt;/linearGradient&gt;
+    &lt;mask id=&quot;gm&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;240&quot; height=&quot;120&quot;&gt;
+      &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;240&quot; height=&quot;120&quot; fill=&quot;url(#fade)&quot;/&gt;
+      &lt;!-- a semi-transparent group inside the mask: alpha multiplies luma --&gt;
+      &lt;g opacity=&quot;0.5&quot;&gt;
+        &lt;rect x=&quot;120&quot; y=&quot;0&quot; width=&quot;120&quot; height=&quot;120&quot; fill=&quot;white&quot;/&gt;
+      &lt;/g&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;240&quot; height=&quot;120&quot; fill=&quot;green&quot; mask=&quot;url(#gm)&quot;/&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="14_mask_gradient_group.png" alt="14_mask_gradient_group render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>15_mask_use</h2>
+          <p class="caption">Mask content referenced through &lt;use&gt;.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;200&quot; height=&quot;100&quot; viewBox=&quot;0 0 200 100&quot;&gt;
+  &lt;defs&gt;
+    &lt;rect id=&quot;slot&quot; x=&quot;30&quot; y=&quot;20&quot; width=&quot;140&quot; height=&quot;60&quot; fill=&quot;white&quot;/&gt;
+    &lt;mask id=&quot;um&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;200&quot; height=&quot;100&quot;&gt;
+      &lt;use href=&quot;#slot&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;200&quot; height=&quot;100&quot; fill=&quot;purple&quot; mask=&quot;url(#um)&quot;/&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="15_mask_use.png" alt="15_mask_use render">
+            </figure>
+          </div>
+        </section>
+        <section class="card">
+          <h2>16_leaf_opacity_mask</h2>
+          <p class="caption">Leaf opacity and mask alpha each applied exactly once.</p>
+          <div class="panes">
+            <figure>
+              <figcaption>Input SVG</figcaption>
+              <pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;200&quot; height=&quot;100&quot; viewBox=&quot;0 0 200 100&quot;&gt;
+  &lt;defs&gt;
+    &lt;mask id=&quot;m&quot; maskUnits=&quot;userSpaceOnUse&quot; x=&quot;0&quot; y=&quot;0&quot; width=&quot;200&quot; height=&quot;100&quot;&gt;
+      &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;200&quot; height=&quot;100&quot; fill=&quot;white&quot; opacity=&quot;0.5&quot;/&gt;
+    &lt;/mask&gt;
+  &lt;/defs&gt;
+  &lt;!-- leaf element with its own opacity AND a mask alpha: result 0.5*0.5 --&gt;
+  &lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot;
+        opacity=&quot;0.5&quot; mask=&quot;url(#m)&quot;/&gt;
+  &lt;!-- control: mask only --&gt;
+  &lt;rect x=&quot;100&quot; y=&quot;0&quot; width=&quot;100&quot; height=&quot;100&quot; fill=&quot;red&quot; mask=&quot;url(#m)&quot;/&gt;
+&lt;/svg&gt;
+</pre>
+            </figure>
+            <figure>
+              <figcaption>Rendered this run (PNG)</figcaption>
+              <img src="16_leaf_opacity_mask.png" alt="16_leaf_opacity_mask render">
+            </figure>
+          </div>
+        </section>
+</body>
+</html>

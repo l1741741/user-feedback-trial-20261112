@@ -3,6 +3,21 @@
 ======
 
 
+Unreleased
+==========
+
+* Rework SVG ``<mask>`` rendering:
+  luminance masks now follow the SVG compositing rules (coverage =
+  luminance × content alpha) instead of being treated as plain alpha masks,
+  and ``mask-type="alpha"`` is handled as a distinct mode.
+* Fix the mask region and content coordinate spaces, including
+  ``maskUnits`` and ``maskContentUnits``, so the same mask can be reused by
+  objects of different sizes and positions.
+* Apply element and group opacity exactly once when masking, and never
+  mutate the shared mask definition node.
+* See ``MASKING.md`` for the supported and unsupported mask features.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 
