@@ -119,40 +119,58 @@ def clip_path(surface, node):
 def paint_mask(surface, node, name, opacity):
     """Paint the mask of the current surface."""
     mask_node = surface.masks[name]
-    mask_node.tag = 'g'
-    mask_node['opacity'] = opacity
 
-    if mask_node.get('maskUnits') == 'userSpaceOnUse':
-        width_ref, height_ref = 'x', 'y'
-    else:
-        x = size(surface, node.get('x'), 'x')
-        y = size(surface, node.get('y'), 'y')
-        width = size(surface, node.get('width'), 'x')
-        height = size(surface, node.get('height'), 'y')
-        width_ref = width or surface.width
-        height_ref = height or surface.height
+    # The mask is rendered through a temporary group node. Don't mutate
+    # the shared definition: it can be referenced by other elements with
+    # other positions, sizes and opacities. Save and restore every
+    # attribute that is overridden below.
+    overridden = ('opacity', 'x', 'y', 'width', 'height', 'viewBox')
+    saved_attributes = {
+        key: mask_node[key] for key in overridden if key in mask_node}
+    saved_tag = mask_node.tag
+    try:
+        mask_node.tag = 'g'
+        mask_node['opacity'] = float(mask_node.get('opacity', 1)) * opacity
 
-    mask_node['x'] = size(surface, mask_node.get('x', '-10%'), width_ref)
-    mask_node['y'] = size(surface, mask_node.get('y', '-10%'), height_ref)
-    mask_node['height'] = size(
-        surface, mask_node.get('height', '120%'), height_ref)
-    mask_node['width'] = size(
-        surface, mask_node.get('width', '120%'), width_ref)
+        if mask_node.get('maskUnits') == 'userSpaceOnUse':
+            width_ref, height_ref = 'x', 'y'
+        else:
+            x = size(surface, node.get('x'), 'x')
+            y = size(surface, node.get('y'), 'y')
+            width = size(surface, node.get('width'), 'x')
+            height = size(surface, node.get('height'), 'y')
+            width_ref = width or surface.width
+            height_ref = height or surface.height
 
-    if mask_node.get('maskUnits') == 'userSpaceOnUse':
-        x = mask_node['x']
-        y = mask_node['y']
-        mask_node['viewBox'] = '{x} {y} {width} {height}'.format(**mask_node)
+        mask_node['x'] = size(surface, mask_node.get('x', '-10%'), width_ref)
+        mask_node['y'] = size(surface, mask_node.get('y', '-10%'), height_ref)
+        mask_node['height'] = size(
+            surface, mask_node.get('height', '120%'), height_ref)
+        mask_node['width'] = size(
+            surface, mask_node.get('width', '120%'), width_ref)
 
-    from .surface import SVGSurface  # circular import
-    mask_surface = SVGSurface(mask_node, None, surface.dpi, surface)
-    surface.context.save()
-    surface.context.translate(x, y)
-    surface.context.scale(
-        mask_node['width'] / mask_surface.width,
-        mask_node['height'] / mask_surface.height)
-    surface.context.mask_surface(mask_surface.cairo)
-    surface.context.restore()
+        if mask_node.get('maskUnits') == 'userSpaceOnUse':
+            x = mask_node['x']
+            y = mask_node['y']
+            mask_node['viewBox'] = '{x} {y} {width} {height}'.format(
+                **mask_node)
+
+        from .surface import SVGSurface  # circular import
+        mask_surface = SVGSurface(mask_node, None, surface.dpi, surface)
+        surface.context.save()
+        surface.context.translate(x, y)
+        surface.context.scale(
+            mask_node['width'] / mask_surface.width,
+            mask_node['height'] / mask_surface.height)
+        surface.context.mask_surface(mask_surface.cairo)
+        surface.context.restore()
+    finally:
+        mask_node.tag = saved_tag
+        for key in overridden:
+            if key in saved_attributes:
+                mask_node[key] = saved_attributes[key]
+            else:
+                mask_node.pop(key, None)
 
 
 def draw_gradient(surface, node, name, opacity):
@@ -219,51 +237,70 @@ def draw_gradient(surface, node, name, opacity):
 def draw_pattern(surface, node, name, opacity):
     """Draw a pattern image."""
     pattern_node = surface.patterns[name]
-    pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
-    pattern_node.tag = 'g'
-    transform(surface, pattern_node.get('patternTransform'))
 
-    if pattern_node.get('viewBox'):
-        if not (size(surface, pattern_node.get('width', 1), 1) and
-                size(surface, pattern_node.get('height', 1), 1)):
+    # Don't mutate the shared definition while rendering: the same
+    # pattern can be referenced by other elements with other opacities
+    # and bounding boxes. Save and restore every attribute that is
+    # overridden below.
+    overridden = ('opacity', 'width', 'height', 'transform')
+    saved_attributes = {
+        key: pattern_node[key] for key in overridden if key in pattern_node}
+    saved_tag = pattern_node.tag
+    try:
+        pattern_node['opacity'] = (
+            float(pattern_node.get('opacity', 1)) * opacity)
+        pattern_node.tag = 'g'
+        transform(surface, pattern_node.get('patternTransform'))
+
+        if pattern_node.get('viewBox'):
+            if not (size(surface, pattern_node.get('width', 1), 1) and
+                    size(surface, pattern_node.get('height', 1), 1)):
+                return False
+        else:
+            if not (size(surface, pattern_node.get('width', 0), 1) and
+                    size(surface, pattern_node.get('height', 0), 1)):
+                return False
+
+        if pattern_node.get('patternUnits') == 'userSpaceOnUse':
+            x = size(surface, pattern_node.get('x'), 'x')
+            y = size(surface, pattern_node.get('y'), 'y')
+            pattern_width = size(surface, pattern_node.get('width', 0), 1)
+            pattern_height = size(surface, pattern_node.get('height', 0), 1)
+        else:
+            _, _, width, height = calculate_bounding_box(surface, node)
+            x = size(surface, pattern_node.get('x'), 1) * width
+            y = size(surface, pattern_node.get('y'), 1) * height
+            pattern_width = (
+                size(surface, pattern_node.pop('width', '1'), 1) * width)
+            pattern_height = (
+                size(surface, pattern_node.pop('height', '1'), 1) * height)
+            if 'viewBox' not in pattern_node:
+                pattern_node['width'] = pattern_width
+                pattern_node['height'] = pattern_height
+                if (pattern_node.get('patternContentUnits') ==
+                        'objectBoundingBox'):
+                    pattern_node['transform'] = f'scale({width}, {height})'
+
+        # Fail if pattern has an invalid size
+        if pattern_width == 0.0 or pattern_height == 0.0:
             return False
-    else:
-        if not (size(surface, pattern_node.get('width', 0), 1) and
-                size(surface, pattern_node.get('height', 0), 1)):
-            return False
 
-    if pattern_node.get('patternUnits') == 'userSpaceOnUse':
-        x = size(surface, pattern_node.get('x'), 'x')
-        y = size(surface, pattern_node.get('y'), 'y')
-        pattern_width = size(surface, pattern_node.get('width', 0), 1)
-        pattern_height = size(surface, pattern_node.get('height', 0), 1)
-    else:
-        _, _, width, height = calculate_bounding_box(surface, node)
-        x = size(surface, pattern_node.get('x'), 1) * width
-        y = size(surface, pattern_node.get('y'), 1) * height
-        pattern_width = (
-            size(surface, pattern_node.pop('width', '1'), 1) * width)
-        pattern_height = (
-            size(surface, pattern_node.pop('height', '1'), 1) * height)
-        if 'viewBox' not in pattern_node:
-            pattern_node['width'] = pattern_width
-            pattern_node['height'] = pattern_height
-            if pattern_node.get('patternContentUnits') == 'objectBoundingBox':
-                pattern_node['transform'] = f'scale({width}, {height})'
-
-    # Fail if pattern has an invalid size
-    if pattern_width == 0.0 or pattern_height == 0.0:
-        return False
-
-    from .surface import SVGSurface  # circular import
-    pattern_surface = SVGSurface(pattern_node, None, surface.dpi, surface)
-    pattern_pattern = cairo.SurfacePattern(pattern_surface.cairo)
-    pattern_pattern.set_extend(cairo.EXTEND_REPEAT)
-    pattern_pattern.set_matrix(cairo.Matrix(
-        pattern_surface.width / pattern_width, 0, 0,
-        pattern_surface.height / pattern_height, -x, -y))
-    surface.context.set_source(pattern_pattern)
-    return True
+        from .surface import SVGSurface  # circular import
+        pattern_surface = SVGSurface(pattern_node, None, surface.dpi, surface)
+        pattern_pattern = cairo.SurfacePattern(pattern_surface.cairo)
+        pattern_pattern.set_extend(cairo.EXTEND_REPEAT)
+        pattern_pattern.set_matrix(cairo.Matrix(
+            pattern_surface.width / pattern_width, 0, 0,
+            pattern_surface.height / pattern_height, -x, -y))
+        surface.context.set_source(pattern_pattern)
+        return True
+    finally:
+        pattern_node.tag = saved_tag
+        for key in overridden:
+            if key in saved_attributes:
+                pattern_node[key] = saved_attributes[key]
+            else:
+                pattern_node.pop(key, None)
 
 
 def prepare_filter(surface, node, name):

@@ -34,6 +34,14 @@ def image(surface, node):
     width = size(surface, node.get('width'), 'x')
     height = size(surface, node.get('height'), 'y')
 
+    # When the element is painted through a mask or a filter, surface.draw
+    # composites it (including its opacity) as a group: don't apply the
+    # opacity a second time here.
+    opacity = float(node.get('opacity', 1))
+    if (parse_url(node.get('mask')).fragment or
+            parse_url(node.get('filter')).fragment):
+        opacity = 1
+
     if image_bytes.startswith(b'\x89PNG') and not surface.map_image:
         png_file = BytesIO(image_bytes)
     elif (
@@ -72,7 +80,12 @@ def image(surface, node):
         surface.context.translate(*surface.context.get_current_point())
         surface.context.scale(scale_x * tree_scale_x, scale_y * tree_scale_y)
         surface.context.translate(translate_x, translate_y)
+        if opacity < 1:
+            surface.context.push_group()
         surface.draw(tree)
+        if opacity < 1:
+            surface.context.pop_group_to_source()
+            surface.context.paint_with_alpha(opacity)
         surface.context.restore()
         return
     else:
@@ -107,7 +120,6 @@ def image(surface, node):
         surface.context.clip()
 
     # Paint raster image
-    opacity = float(node.get('opacity', 1))
     surface.context.save()
     surface.context.translate(x, y)
     surface.context.scale(scale_x, scale_y)

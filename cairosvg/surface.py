@@ -327,7 +327,15 @@ class Surface(object):
         if filter_:
             prepare_filter(self, node, filter_)
 
-        if filter_ or mask or (opacity < 1 and node.children):
+        # Elements whose opacity is applied when their content is
+        # composited back as a whole (and not per fill/stroke): anything
+        # going through a mask or a filter, and elements painting more
+        # than a single fill/stroke (groups and other elements with
+        # children, ``use`` elements painting referenced content).
+        composite_opacity = (
+            filter_ or mask or
+            (opacity < 1 and (node.children or node.tag == 'use')))
+        if composite_opacity:
             self.context.push_group()
 
         # Move to (node.x, node.y)
@@ -414,7 +422,9 @@ class Surface(object):
         # Get stroke and fill opacity
         stroke_opacity = float(node.get('stroke-opacity', 1))
         fill_opacity = float(node.get('fill-opacity', 1))
-        if opacity < 1 and not node.children:
+        if opacity < 1 and not composite_opacity:
+            # The element paints a single fill/stroke and is not
+            # composited as a group: fold its opacity into the paint.
             stroke_opacity *= opacity
             fill_opacity *= opacity
 
@@ -477,7 +487,7 @@ class Surface(object):
                 self.draw(child)
 
         # Apply filter, mask and opacity
-        if filter_ or mask or (opacity < 1 and node.children):
+        if composite_opacity:
             self.context.pop_group_to_source()
             if filter_:
                 apply_filter_before_painting(self, node, filter_)
