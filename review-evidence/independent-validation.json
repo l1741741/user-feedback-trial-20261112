@@ -1,0 +1,22 @@
+{
+  "task_id": "retry504-once-20261118-12592-path-smooth",
+  "final_sha": "07961e5d8c071f8eb7fff1612beac8a29a2a1613",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/retry504-once-20261118-12592-path-smooth/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/retry504-once-20261118-12592-path-smooth/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_path_smooth.py"
+  ],
+  "exit_code": 0,
+  "tests": 23,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T05:53:03.620188+08:00"
+}

@@ -1,0 +1,62 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/retry504-once-20261118-12592-path-smooth/local-frozen-source/cairosvg/__init__.py",
+  "tests": 12,
+  "passed": 12,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "cubic-reflect-explicit-control-equivalence",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "cubic-reflect-sibling",
+      "passed": true
+    },
+    {
+      "name": "line-reset-explicit-control-equivalence",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "line-reset-sibling",
+      "passed": true
+    },
+    {
+      "name": "quadratic-reflect-explicit-control-equivalence",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "quadratic-reflect-sibling",
+      "passed": true
+    },
+    {
+      "name": "family-switch-explicit-control-equivalence",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "family-switch-sibling",
+      "passed": true
+    },
+    {
+      "name": "subpath-reset-explicit-control-equivalence",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "subpath-reset-sibling",
+      "passed": true
+    },
+    {
+      "name": "relative-reflect-explicit-control-equivalence",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "relative-reflect-sibling",
+      "passed": true
+    }
+  ]
+}
