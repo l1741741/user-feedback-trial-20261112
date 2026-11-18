@@ -313,6 +313,40 @@ class Node(dict):
     def get_href(self):
         return self.get('{http://www.w3.org/1999/xlink}href', self.get('href'))
 
+    @staticmethod
+    def _keyword(value):
+        """Normalize a CSS keyword value."""
+        if not isinstance(value, str):
+            return None
+        return value.strip().lower()
+
+    def is_rendered(self):
+        """Whether the element takes part in direct rendering.
+
+        ``display`` is not inherited: its value only applies to the element
+        itself. Descendants are excluded from the rendering tree when one of
+        their ancestors is not rendered, because :meth:`Surface.draw` stops
+        walking the children of a non-rendered element.
+
+        Referenced elements (through ``use``, ``textPath``, ``clip-path``,
+        ``mask``, gradients, patterns or markers) can still be used as
+        resources, as ``display`` “only affects the direct rendering of a
+        given element”.
+
+        """
+        return self._keyword(self.get('display', 'inline')) != 'none'
+
+    def is_visible(self):
+        """Whether painting operations for the element are visible.
+
+        ``visibility`` is inherited, but descendants may override it, unlike
+        ``display``. The ``collapse`` value behaves like ``hidden`` outside
+        of table layout.
+
+        """
+        return self._keyword(
+            self.get('visibility', 'visible')) not in ('hidden', 'collapse')
+
 
 class Tree(Node):
     """SVG tree."""

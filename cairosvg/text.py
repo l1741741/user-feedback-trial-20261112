@@ -146,9 +146,13 @@ def text(surface, node, draw_as_text=False):
     bounding_box = EMPTY_BOUNDING_BOX
     if text_path:
         surface.context.new_path()
-        surface.stroke_and_fill = False
+        # Only the outline of the referenced path is needed. ``display`` and
+        # ``visibility`` do not prevent an element from being referenced, so
+        # the geometry is built whatever their values.
+        old_render_geometry = surface.render_geometry
+        surface.render_geometry = True
         surface.draw(text_path)
-        surface.stroke_and_fill = True
+        surface.render_geometry = old_render_geometry
         cairo_path = surface.context.copy_path_flat()
         surface.context.new_path()
         length = path_length(cairo_path) + x_bearing

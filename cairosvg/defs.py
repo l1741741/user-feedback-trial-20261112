@@ -74,9 +74,16 @@ def gradient_or_pattern(surface, node, name, opacity):
     """Gradient or pattern color."""
     if name in surface.gradients:
         update_def_href(surface, name, surface.gradients)
+        if not surface.gradients[name].is_rendered():
+            # ``display: none`` on the paint server element makes the
+            # reference invalid, so the fallback color of the ``fill`` or
+            # ``stroke`` value is used instead.
+            return False
         return draw_gradient(surface, node, name, opacity)
     elif name in surface.patterns:
         update_def_href(surface, name, surface.patterns)
+        if not surface.patterns[name].is_rendered():
+            return False
         return draw_pattern(surface, node, name, opacity)
 
 
@@ -341,14 +348,11 @@ def use(surface, node):
     surface.context.save()
     surface.context.translate(
         size(surface, node.get('x'), 'x'), size(surface, node.get('y'), 'y'))
-    if 'x' in node:
-        del node['x']
-    if 'y' in node:
-        del node['y']
-    if 'viewBox' in node:
-        del node['viewBox']
-    if 'mask' in node:
-        del node['mask']
+    # The ``x`` and ``y`` translation is applied here. Neither these
+    # attributes nor ``viewBox`` or ``mask`` are inherited by the referenced
+    # tree, so nothing else needs to be stripped from ``node``. Leave it
+    # untouched: a later ``use`` (or another render of the same tree) has to
+    # see the original attributes.
     href = parse_url(node.get_href()).geturl()
     try:
         tree = Tree(

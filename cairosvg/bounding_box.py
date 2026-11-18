@@ -23,6 +23,10 @@ def calculate_bounding_box(surface, node):
     See https://www.w3.org/TR/SVG/coords.html#ObjectBoundingBox
 
     """
+    # ``display: none`` removes the element and its subtree from the rendering
+    # tree, so it contributes no geometry to bounding boxes either.
+    if not node.is_rendered():
+        return None
     if 'bounding_box' not in node and node.tag in BOUNDING_BOX_METHODS:
         bounding_box = BOUNDING_BOX_METHODS[node.tag](surface, node)
         if is_non_empty_bounding_box(bounding_box):
@@ -330,6 +334,9 @@ def bounding_box_group(surface, node):
     """Get the bounding box of a ``g`` node."""
     bounding_box = EMPTY_BOUNDING_BOX
     for child in node.children:
+        # ``display: none`` children are not rendered and take no space.
+        if not child.is_rendered():
+            continue
         bounding_box = combine_bounding_box(
             bounding_box, calculate_bounding_box(surface, child))
     return bounding_box

@@ -3,6 +3,46 @@
 ======
 
 
+Next version
+============
+
+``display`` and ``visibility`` now follow their distinct CSS and SVG
+semantics instead of being handled as the same flag:
+
+* ``display: none`` removes the element **and its whole subtree** from the
+  rendering tree. Descendants cannot override it, and the hidden branch no
+  longer affects the output: its transform, clip, mask, filter and opacity
+  group are not applied, it produces no marker, and it does not influence
+  later siblings. Elements are still usable as resources (``use``,
+  ``textPath``, ``clip-path``, ``mask``, gradients, patterns, markers),
+  because ``display`` only controls *direct* rendering. An element whose own
+  ``display`` is ``none`` is not rendered through ``use``, while a
+  ``display: none`` ancestor does not prevent the reference.
+* ``visibility`` remains inherited, and a descendant can set
+  ``visibility: visible`` to paint itself inside a hidden ancestor. Hidden
+  elements are still laid out: text keeps its space for ``tspan``,
+  ``textPath`` and ``a`` descendants, and their geometry still contributes
+  to clip paths and bounding boxes. ``visibility: collapse`` is handled like
+  ``hidden``.
+* Both properties keep the regular cascade for presentation attributes,
+  ``style`` attributes and stylesheets, including ``!important`` rules.
+* A ``clipPath`` element or child whose ``display`` is ``none`` contributes
+  no clip geometry and no longer discards the geometry collected from its
+  siblings. ``visibility`` inside a clip path follows the same override rules
+  as anywhere else. A ``display: none`` ``mask``, gradient or pattern makes
+  its reference invalid, so the element is painted without the mask or with
+  the fallback paint color.
+* Markers of hidden or non-displayed elements are no longer painted, and
+  raster or nested-SVG ``image`` elements now honor ``visibility`` and
+  ``display``.
+* Repeated renders and multiple references no longer mutate the parsed tree
+  (``use`` used to strip attributes from its own node), so rendering the
+  same tree several times gives identical images.
+
+The same rules apply whether the value comes from an attribute, an inline
+``style`` or a stylesheet, and to reused content, nested text and references.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

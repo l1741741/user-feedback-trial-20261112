@@ -78,6 +78,11 @@ INVISIBLE_TAGS = frozenset((
     'clipPath', 'filter', 'linearGradient', 'marker', 'mask', 'pattern',
     'radialGradient', 'symbol'))
 
+# Tags that are processed even for hidden elements, because they lay out
+# descendants (which may be visible again) or install a viewport rather than
+# painting something themselves.
+LAYOUT_TAGS = frozenset(('a', 'svg', 'text', 'textPath', 'tspan', 'use'))
+
 
 class Surface(object):
     """Abstract base class for CairoSVG surfaces.
@@ -185,6 +190,16 @@ class Surface(object):
         self.dpi = dpi
         self.font_size = size(self, '12pt')
         self.stroke_and_fill = True
+        # Whether the current walk only builds geometry (the path referenced
+        # by a ``textPath``): nothing is painted and ``display`` or
+        # ``visibility`` on the referenced element do not matter.
+        self.render_geometry = False
+        # Whether the current walk collects the geometry of a ``clipPath``.
+        self.collecting_clip = False
+        # Whether the node currently drawn is the ``clipPath`` element itself.
+        # Its own ``visibility`` is inherited by its children instead of
+        # pruning the whole group.
+        self.clip_root = False
         width, height, viewbox = node_format(self, tree)
         if viewbox is None:
             viewbox = (0, 0, width, height)
@@ -284,14 +299,52 @@ class Surface(object):
         return self.map_rgba(rgba) if self.map_rgba else rgba
 
     def draw(self, node):
-        """Draw ``node`` and its children."""
+        """Draw ``node`` and its children.
 
+        ``display`` and ``visibility`` have deliberately different semantics:
+
+        * ``display: none`` removes the element *and its whole subtree* from
+          the rendering tree. Descendants cannot override it, so nothing is
+          built for it: no transform, clip, mask, filter, marker or text
+          layout. It remains usable as a resource (``use``, ``textPath``,
+          ``clip-path``, ``mask``, gradient, pattern, marker), because the
+          property only controls the *direct* rendering of an element.
+        * ``visibility`` is inherited but descendants may override it. A
+          hidden element is still laid out (text keeps its space, clip
+          geometry and bounding boxes keep its shapes); only painting is
+          skipped.
+
+        The values come from the regular cascade (presentation attribute,
+        ``style`` or stylesheet with their usual priorities). They are read
+        from the parsed node and never written back, so repeated renders and
+        later references see the same tree.
+
+        """
         # Parse definitions first
         if node.tag == 'svg':
             parse_all_defs(self, node)
 
         # Do not draw defs
         if node.tag == 'defs':
+            return
+
+        # Geometry-only walks (the path of a ``textPath``) need the geometry of
+        # the element whatever its own ``display`` or ``visibility``, since
+        # ``display`` and ``visibility`` do not prevent an element from being
+        # referenced.
+        geometry = self.render_geometry
+        # The caller sets ``clip_root`` when drawing the ``clipPath`` element
+        # itself, which must not be pruned by its own properties.
+        is_clip_root = self.clip_root
+
+        # ``display: none`` removes the element and its descendants from the
+        # rendering tree. This happens before touching the Cairo context
+        # (transform, mask, filter, nested viewport), so a hidden branch can
+        # neither paint nor affect later siblings. While collecting clip
+        # geometry, a hidden child is pruned too, so that it contributes no
+        # clip shape and cannot disturb the shapes collected from its
+        # siblings.
+        if not geometry and not node.is_rendered():
             return
 
         # Do not draw elements with width or height of 0
@@ -303,7 +356,14 @@ class Surface(object):
         old_parent_node = self.parent_node
         old_font_size = self.font_size
         old_context_size = self.context_width, self.context_height
+        old_render_geometry = self.render_geometry
+        old_collecting_clip = self.collecting_clip
+        old_clip_root = self.clip_root
         self.parent_node = node
+        # The clip root status only applies to the element that received it.
+        self.clip_root = False
+        # Descendants of a clipPath are collected as clip geometry, not drawn.
+        self.collecting_clip = is_clip_root or self.collecting_clip
 
         if "font" in node:
             font = parse_font(node["font"])
@@ -378,7 +438,11 @@ class Surface(object):
         clip_path = parse_url(node.get('clip-path')).fragment
         if clip_path:
             path = self.paths.get(clip_path)
-            if path:
+            # ``display: none`` on the ``clipPath`` element makes the clipping
+            # reference invalid, exactly like an unknown identifier. Its own
+            # ``visibility``, if hidden, is inherited by its children; a child
+            # may still set ``visibility: visible`` to contribute geometry.
+            if path and path.is_rendered():
                 self.context.save()
                 if path.get('clipPathUnits') == 'objectBoundingBox':
                     x = size(self, node.get('x'), 'x')
@@ -387,11 +451,16 @@ class Surface(object):
                     height = size(self, node.get('height'), 'y')
                     self.context.translate(x, y)
                     self.context.scale(width, height)
+                # Draw a shallow copy as a group: the tag change and the clip
+                # flags are per-instance, the input tree stays untouched.
+                path = copy.copy(path)
                 path.tag = 'g'
-                self.stroke_and_fill = False
+                old_collecting_clip = self.collecting_clip
+                self.collecting_clip = True
+                self.clip_root = True
                 self.draw(path)
-                self.stroke_and_fill = True
-                path.tag = 'clipPath'
+                self.collecting_clip = old_collecting_clip
+                self.clip_root = old_clip_root
                 self.context.restore()
                 # TODO: fill rules are not handled by cairo for clips
                 # if node.get('clip-rule') == 'evenodd':
@@ -403,8 +472,33 @@ class Surface(object):
             (self.cursor_position, self.cursor_d_position,
              self.text_path_width))
 
-        # Only draw known tags
-        if node.tag in TAGS:
+        # ``visibility: hidden`` prevents painting, not layout or geometry.
+        # Text is still laid out so that visible descendants (tspan, textPath,
+        # a) keep their positions, and a hidden path can still be referenced
+        # by a textPath. While collecting clip geometry, a hidden node takes
+        # no part in the clip, but the ``clipPath`` element itself passes its
+        # visibility to its children instead of hiding the whole group.
+        if geometry or is_clip_root:
+            visible = True
+        else:
+            visible = node.is_visible()
+            if self.collecting_clip and not visible:
+                self.context.restore()
+                self.parent_node = old_parent_node
+                self.font_size = old_font_size
+                self.context_width, self.context_height = old_context_size
+                self.render_geometry = old_render_geometry
+                self.collecting_clip = old_collecting_clip
+                self.clip_root = old_clip_root
+                return
+
+        # Only draw known tags. Hidden paint-only tags are skipped: their
+        # path would add an invisible sub-path that a later fill or marker
+        # pass could pick up, and markers belong to the element's painting.
+        # Tags that lay out descendants (text, use, a, svg) still run,
+        # because descendants may set ``visibility: visible`` to paint
+        # themselves.
+        if node.tag in TAGS and (visible or node.tag in LAYOUT_TAGS):
             try:
                 TAGS[node.tag](self, node)
             except PointError:
@@ -417,10 +511,6 @@ class Surface(object):
         if opacity < 1 and not node.children:
             stroke_opacity *= opacity
             fill_opacity *= opacity
-
-        # Manage display and visibility
-        display = node.get('display', 'inline') != 'none'
-        visible = display and (node.get('visibility', 'visible') != 'hidden')
 
         # Set font rendering properties
         self.context.set_antialias(SHAPE_ANTIALIAS.get(
@@ -435,44 +525,59 @@ class Surface(object):
             node.get('text-rendering'), cairo.HINT_METRICS_DEFAULT))
         self.context.set_font_options(font_options)
 
-        # Fill and stroke
-        if self.stroke_and_fill and visible and node.tag in TAGS:
-            # Fill
-            self.context.save()
-            paint_source, paint_color = paint(node.get('fill', 'black'))
-            if node.get('fill-rule') == 'evenodd':
-                self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
-            if not gradient_or_pattern(self, node, paint_source, fill_opacity):
-                self.context.set_source_rgba(
-                    *self.map_color(paint_color, fill_opacity))
-            if TAGS[node.tag] == text:
-                self.cursor_position = save_cursor[0]
-                self.cursor_d_position = save_cursor[1]
-                self.text_path_width = save_cursor[2]
-                text(self, node, draw_as_text=True)
-            else:
-                self.context.fill_preserve()
-            self.context.restore()
+        # Fill and stroke. In geometry-only and clip-collecting walks, the
+        # path built by the tag function is kept for the caller and nothing
+        # is painted.
+        if not geometry and not self.collecting_clip:
+            if self.stroke_and_fill and visible and node.tag in TAGS:
+                # Fill
+                self.context.save()
+                paint_source, paint_color = paint(node.get('fill', 'black'))
+                if node.get('fill-rule') == 'evenodd':
+                    self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+                if not gradient_or_pattern(
+                        self, node, paint_source, fill_opacity):
+                    self.context.set_source_rgba(
+                        *self.map_color(paint_color, fill_opacity))
+                if TAGS[node.tag] == text:
+                    self.cursor_position = save_cursor[0]
+                    self.cursor_d_position = save_cursor[1]
+                    self.text_path_width = save_cursor[2]
+                    text(self, node, draw_as_text=True)
+                else:
+                    self.context.fill_preserve()
+                self.context.restore()
 
-            # Stroke
-            self.context.save()
-            self.context.set_line_width(
-                size(self, node.get('stroke-width', '1')))
-            paint_source, paint_color = paint(node.get('stroke'))
-            if not gradient_or_pattern(
-                    self, node, paint_source, stroke_opacity):
-                self.context.set_source_rgba(
-                    *self.map_color(paint_color, stroke_opacity))
-            self.context.stroke()
-            self.context.restore()
-        elif not visible:
-            self.context.new_path()
+                # Stroke
+                self.context.save()
+                self.context.set_line_width(
+                    size(self, node.get('stroke-width', '1')))
+                paint_source, paint_color = paint(node.get('stroke'))
+                if not gradient_or_pattern(
+                        self, node, paint_source, stroke_opacity):
+                    self.context.set_source_rgba(
+                        *self.map_color(paint_color, stroke_opacity))
+                self.context.stroke()
+                self.context.restore()
+            elif not visible:
+                # Drop the path built by the tag function (or the current
+                # point) so that neither a later fill nor the markers can
+                # paint it.
+                self.context.new_path()
 
-        # Draw path markers
-        draw_markers(self, node)
+        # Draw path markers. Markers are painted as part of the element they
+        # belong to, so hidden elements skip them, and walks that only build
+        # geometry (textPath, clipPath) do too: markers are painting-only.
+        if self.stroke_and_fill and visible and not geometry and (
+                not self.collecting_clip):
+            draw_markers(self, node)
 
-        # Draw children
-        if display and node.tag not in INVISIBLE_TAGS:
+        # Draw children. ``display: none`` returned before this point, so its
+        # descendants are not in the rendering tree and cannot override it.
+        # ``visibility: hidden`` does not stop the walk: children may set
+        # ``visibility: visible`` to paint themselves. Definitions are
+        # walked through by the code using them, never here.
+        if node.tag not in INVISIBLE_TAGS:
             for child in node.children:
                 self.draw(child)
 
@@ -481,9 +586,11 @@ class Surface(object):
             self.context.pop_group_to_source()
             if filter_:
                 apply_filter_before_painting(self, node, filter_)
-            if mask in self.masks:
+            if mask in self.masks and self.masks[mask].is_rendered():
                 paint_mask(self, node, mask, opacity)
             else:
+                # A mask element with ``display: none`` makes the reference
+                # invalid, so the element is painted without a mask.
                 self.context.paint_with_alpha(opacity)
             if filter_:
                 apply_filter_after_painting(self, node, filter_)
@@ -498,6 +605,9 @@ class Surface(object):
         self.parent_node = old_parent_node
         self.font_size = old_font_size
         self.context_width, self.context_height = old_context_size
+        self.render_geometry = old_render_geometry
+        self.collecting_clip = old_collecting_clip
+        self.clip_root = old_clip_root
 
 
 class PDFSurface(Surface):
