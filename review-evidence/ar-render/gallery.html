@@ -1,0 +1,132 @@
+<!doctype html><meta charset="utf-8"><title>嵌入文档隔离</title><style>body{font:20px system-ui;margin:24px}img{width:650px;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>两个同id图标、外层同id定义与透明区</h1><p>红蓝图标各保留一半透明，外层绿色不变，反转顺序或加入损坏图标不影响正常内容。</p><h2>two-icons</h2><p>SVG输入</p><img src="two-icons.svg"><p>当次PNG</p><img src="two-icons.png"><h2>reverse-icons</h2><p>SVG输入</p><img src="reverse-icons.svg"><p>当次PNG</p><img src="reverse-icons.png"><h2>broken-before-icons</h2><p>SVG输入</p><img src="broken-before-icons.svg"><p>当次PNG</p><img src="broken-before-icons.png"><h2>relative</h2><p>SVG输入</p><img src="relative.svg"><p>当次PNG</p><img src="relative.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12590-nested-svg-image/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 11,
+  &quot;passed&quot;: 11,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;red-icon&quot;,
+      &quot;point&quot;: [
+        30,
+        50
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;red-transparent-half&quot;,
+      &quot;point&quot;: [
+        70,
+        50
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;blue-icon&quot;,
+      &quot;point&quot;: [
+        130,
+        50
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;blue-transparent-half&quot;,
+      &quot;point&quot;: [
+        170,
+        50
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;outer-same-id-remains-green&quot;,
+      &quot;point&quot;: [
+        230,
+        50
+      ],
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;same-ids-independent-of-reference-order&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;broken-embed-does-not-block-siblings&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;default-local-resource-policy-remains-restricted&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;explicit-trusted-local-resource-resolves-source-directory&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;repeated-same-tree-export-identical&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;outer-input-tree-unchanged&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre><h2>显式受信任本地输入参数的当次PNG</h2><img src="relative-trusted.png"><p>默认访问策略仍限制本地相对资源；仅这份固定本地输入显式unsafe=True验证原有API，不修改策略。</p>

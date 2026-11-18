@@ -1,0 +1,132 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12590-nested-svg-image/local-frozen-source/cairosvg/__init__.py",
+  "tests": 11,
+  "passed": 11,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "red-icon",
+      "point": [
+        30,
+        50
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "red-transparent-half",
+      "point": [
+        70,
+        50
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "blue-icon",
+      "point": [
+        130,
+        50
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "blue-transparent-half",
+      "point": [
+        170,
+        50
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "passed": true
+    },
+    {
+      "name": "outer-same-id-remains-green",
+      "point": [
+        230,
+        50
+      ],
+      "actual": [
+        0,
+        255,
+        0,
+        255
+      ],
+      "expected": [
+        0,
+        255,
+        0,
+        255
+      ],
+      "passed": true
+    },
+    {
+      "name": "same-ids-independent-of-reference-order",
+      "passed": true
+    },
+    {
+      "name": "broken-embed-does-not-block-siblings",
+      "passed": true
+    },
+    {
+      "name": "default-local-resource-policy-remains-restricted",
+      "passed": true
+    },
+    {
+      "name": "explicit-trusted-local-resource-resolves-source-directory",
+      "passed": true
+    },
+    {
+      "name": "repeated-same-tree-export-identical",
+      "passed": true
+    },
+    {
+      "name": "outer-input-tree-unchanged",
+      "passed": true
+    }
+  ]
+}

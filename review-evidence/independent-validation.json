@@ -1,0 +1,22 @@
+{
+  "task_id": "rerun15-20261118-12590-nested-svg-image",
+  "final_sha": "cb4a1e8d5525dc7f712f491532c0445e57e132c4",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-12590-nested-svg-image/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12590-nested-svg-image/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_embedded_image.py"
+  ],
+  "exit_code": 0,
+  "tests": 23,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T05:39:21.229599+08:00"
+}
