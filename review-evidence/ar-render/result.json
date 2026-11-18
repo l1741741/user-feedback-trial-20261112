@@ -1,0 +1,113 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11715-paint-order/local-frozen-source/cairosvg/__init__.py",
+  "tests": 8,
+  "passed": 8,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "all-three-orders-match-independent-explicit-layers",
+      "passed": true,
+      "changed_pixels": 0
+    },
+    {
+      "name": "normal-stroke-fill",
+      "passed": true,
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "name": "normal-marker-corner",
+      "passed": true,
+      "actual": [
+        0,
+        255,
+        0,
+        255
+      ],
+      "expected": [
+        0,
+        255,
+        0,
+        255
+      ]
+    },
+    {
+      "name": "stroke-stroke-fill",
+      "passed": true,
+      "actual": [
+        0,
+        0,
+        255,
+        255
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        255
+      ]
+    },
+    {
+      "name": "stroke-marker-corner",
+      "passed": true,
+      "actual": [
+        0,
+        255,
+        0,
+        255
+      ],
+      "expected": [
+        0,
+        255,
+        0,
+        255
+      ]
+    },
+    {
+      "name": "markers-stroke-fill",
+      "passed": true,
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "name": "markers-marker-corner",
+      "passed": true,
+      "actual": [
+        255,
+        0,
+        0,
+        255
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      "name": "black-sibling-unchanged",
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,113 @@
+<!doctype html><meta charset="utf-8"><title>绘制顺序独立对照</title><style>body{font:19px system-ui;margin:24px}img{width:1000px;max-width:100%;border:1px solid #999;background:#eee}pre{white-space:pre-wrap}</style><h1>填充、描边、marker顺序与显式分层对照</h1><p>每行从左到右：normal、stroke优先、markers优先。应与下方独立分层一致。</p><h2>actual</h2><h3>SVG输入</h3><img src="actual.svg"><h3>本次PNG</h3><img src="actual.png"><details><summary>源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;400&quot; height=&quot;140&quot;&gt;&lt;defs&gt;&lt;marker id=&quot;m&quot; markerWidth=&quot;12&quot; markerHeight=&quot;12&quot; viewBox=&quot;-6 -6 12 12&quot; refX=&quot;0&quot; refY=&quot;0&quot; markerUnits=&quot;userSpaceOnUse&quot; orient=&quot;0&quot;&gt;&lt;rect x=&quot;-6&quot; y=&quot;-6&quot; width=&quot;12&quot; height=&quot;12&quot; fill=&quot;lime&quot;/&gt;&lt;/marker&gt;&lt;/defs&gt;&lt;g transform=&quot;translate(0 10)&quot;&gt;&lt;path d=&quot;M20 20H80V80H20L20 20&quot; fill=&quot;blue&quot; stroke=&quot;red&quot; stroke-width=&quot;16&quot; marker-end=&quot;url(#m)&quot; paint-order=&quot;normal&quot;/&gt;&lt;/g&gt;&lt;g transform=&quot;translate(130 10)&quot;&gt;&lt;path d=&quot;M20 20H80V80H20L20 20&quot; fill=&quot;blue&quot; stroke=&quot;red&quot; stroke-width=&quot;16&quot; marker-end=&quot;url(#m)&quot; paint-order=&quot;stroke&quot;/&gt;&lt;/g&gt;&lt;g transform=&quot;translate(260 10)&quot;&gt;&lt;path d=&quot;M20 20H80V80H20L20 20&quot; fill=&quot;blue&quot; stroke=&quot;red&quot; stroke-width=&quot;16&quot; marker-end=&quot;url(#m)&quot; paint-order=&quot;markers&quot;/&gt;&lt;/g&gt;&lt;rect x=&quot;350&quot; y=&quot;100&quot; width=&quot;30&quot; height=&quot;30&quot; fill=&quot;black&quot;/&gt;&lt;/svg&gt;</pre></details><h2>explicit-layers</h2><h3>SVG输入</h3><img src="explicit-layers.svg"><h3>本次PNG</h3><img src="explicit-layers.png"><details><summary>源码</summary><pre>&lt;svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;400&quot; height=&quot;140&quot;&gt;&lt;g transform=&quot;translate(0 10)&quot;&gt;&lt;path d=&quot;M20 20H80V80H20L20 20&quot; fill=&quot;blue&quot;/&gt;&lt;path d=&quot;M20 20H80V80H20L20 20&quot; fill=&quot;none&quot; stroke=&quot;red&quot; stroke-width=&quot;16&quot;/&gt;&lt;rect x=&quot;14&quot; y=&quot;14&quot; width=&quot;12&quot; height=&quot;12&quot; fill=&quot;lime&quot;/&gt;&lt;/g&gt;&lt;g transform=&quot;translate(130 10)&quot;&gt;&lt;path d=&quot;M20 20H80V80H20L20 20&quot; fill=&quot;none&quot; stroke=&quot;red&quot; stroke-width=&quot;16&quot;/&gt;&lt;path d=&quot;M20 20H80V80H20L20 20&quot; fill=&quot;blue&quot;/&gt;&lt;rect x=&quot;14&quot; y=&quot;14&quot; width=&quot;12&quot; height=&quot;12&quot; fill=&quot;lime&quot;/&gt;&lt;/g&gt;&lt;g transform=&quot;translate(260 10)&quot;&gt;&lt;rect x=&quot;14&quot; y=&quot;14&quot; width=&quot;12&quot; height=&quot;12&quot; fill=&quot;lime&quot;/&gt;&lt;path d=&quot;M20 20H80V80H20L20 20&quot; fill=&quot;blue&quot;/&gt;&lt;path d=&quot;M20 20H80V80H20L20 20&quot; fill=&quot;none&quot; stroke=&quot;red&quot; stroke-width=&quot;16&quot;/&gt;&lt;/g&gt;&lt;rect x=&quot;350&quot; y=&quot;100&quot; width=&quot;30&quot; height=&quot;30&quot; fill=&quot;black&quot;/&gt;&lt;/svg&gt;</pre></details><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11715-paint-order/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 8,
+  &quot;passed&quot;: 8,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;all-three-orders-match-independent-explicit-layers&quot;,
+      &quot;passed&quot;: true,
+      &quot;changed_pixels&quot;: 0
+    },
+    {
+      &quot;name&quot;: &quot;normal-stroke-fill&quot;,
+      &quot;passed&quot;: true,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      &quot;name&quot;: &quot;normal-marker-corner&quot;,
+      &quot;passed&quot;: true,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        255
+      ]
+    },
+    {
+      &quot;name&quot;: &quot;stroke-stroke-fill&quot;,
+      &quot;passed&quot;: true,
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ]
+    },
+    {
+      &quot;name&quot;: &quot;stroke-marker-corner&quot;,
+      &quot;passed&quot;: true,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        255
+      ]
+    },
+    {
+      &quot;name&quot;: &quot;markers-stroke-fill&quot;,
+      &quot;passed&quot;: true,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      &quot;name&quot;: &quot;markers-marker-corner&quot;,
+      &quot;passed&quot;: true,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ]
+    },
+    {
+      &quot;name&quot;: &quot;black-sibling-unchanged&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>
