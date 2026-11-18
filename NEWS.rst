@@ -3,6 +3,24 @@
 ======
 
 
+Unreleased
+==========
+
+* Fix percentage lengths inside nested ``svg`` elements: they now resolve
+  against the effective viewport (the viewBox when one is present, in its own
+  user units), so meet/slice letterboxing, non-uniform scaling and non-zero
+  viewBox origins no longer distort circles, rectangles and stroke widths
+* Restore the parent viewport and coordinate system exactly when leaving a
+  nested ``svg``; zero-size or empty viewport nodes no longer leak their
+  size to following siblings
+* ``use`` no longer mutates the referenced tree or its own attributes:
+  single-dimension width/height is honored, a viewBox on ``use`` establishes
+  its viewport, and masks, patterns and embedded SVG images survive repeated
+  renders of the same parsed tree
+* ``symbol`` referenced through ``use`` renders identically to the
+  equivalent directly nested ``svg``
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

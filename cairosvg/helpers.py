@@ -59,6 +59,13 @@ def node_format(surface, node, reference=True):
     If ``reference`` is ``True``, we can rely on surface size to resolve
     percentages.
 
+    Percentages are always resolved against the viewport of the node's
+    parent (the active viewport when ``node`` starts being drawn), never
+    against a viewport established by a previous sibling. A node without an
+    explicit width or height defaults to ``100%`` of that parent viewport;
+    if the result is zero it stays zero instead of inheriting some other
+    node's size.
+
     """
     reference_size = 'xy' if reference else (0, 0)
     width = size(surface, node.get('width', '100%'), reference_size[0])
@@ -67,8 +74,14 @@ def node_format(surface, node, reference=True):
     if viewbox:
         viewbox = re.sub('[ \n\r\t,]+', ' ', viewbox)
         viewbox = tuple(float(position) for position in viewbox.split())
-        width = width or viewbox[2]
-        height = height or viewbox[3]
+        # A viewBox gives the node an intrinsic size, but it only provides a
+        # fallback for a dimension that could not be resolved at all. An
+        # explicit zero width/height (including an explicit ``0``) must keep
+        # the node empty rather than silently growing to the viewBox size.
+        if not width and 'width' not in node:
+            width = viewbox[2]
+        if not height and 'height' not in node:
+            height = viewbox[3]
     return width, height, viewbox
 
 
@@ -117,6 +130,8 @@ def preserve_ratio(surface, node, width=None, height=None):
 
     translate_x = 0
     translate_y = 0
+    # Empty viewBoxes (zero width or height) cannot define a scale: keep the
+    # user space identical to the viewport instead of collapsing it to zero.
     scale_x = width / viewbox_width if viewbox_width > 0 else 1
     scale_y = height / viewbox_height if viewbox_height > 0 else 1
 
@@ -364,14 +379,23 @@ def size(surface, string, reference='xy'):
     string = normalize(string).split(' ', 1)[0]
     if string.endswith('%'):
         if reference == 'x':
-            reference = surface.context_width or 0
+            reference = getattr(surface, 'percent_width',
+                                surface.context_width)
         elif reference == 'y':
-            reference = surface.context_height or 0
+            reference = getattr(surface, 'percent_height',
+                                surface.context_height)
         elif reference == 'xy':
             reference = (
-                hypot(surface.context_width, surface.context_height) / 2 ** .5
-            )
-        return float(string[:-1]) * reference / 100
+                hypot(getattr(surface, 'percent_width',
+                              surface.context_width),
+                      getattr(surface, 'percent_height',
+                              surface.context_height))
+                / 2 ** .5)
+        # A viewport dimension that was never established (None, e.g. on the
+        # root surface before its own size is known) must not be mistaken for
+        # a real zero-length viewport: fall back to zero instead of raising
+        # and let callers decide whether another intrinsic size applies.
+        return float(string[:-1]) * (reference or 0) / 100
     elif string.endswith('em'):
         return surface.font_size * float(string[:-2])
     elif string.endswith('ex'):

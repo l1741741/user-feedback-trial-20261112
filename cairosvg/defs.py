@@ -119,6 +119,11 @@ def clip_path(surface, node):
 def paint_mask(surface, node, name, opacity):
     """Paint the mask of the current surface."""
     mask_node = surface.masks[name]
+    # The mask definition is shared (and cached) across references and even
+    # across renders of the same tree: save everything we mutate and restore
+    # it afterwards so a second use or a second render behaves identically.
+    old_tag = mask_node.tag
+    old_attributes = dict(mask_node)
     mask_node.tag = 'g'
     mask_node['opacity'] = opacity
 
@@ -153,6 +158,10 @@ def paint_mask(surface, node, name, opacity):
         mask_node['height'] / mask_surface.height)
     surface.context.mask_surface(mask_surface.cairo)
     surface.context.restore()
+
+    mask_node.tag = old_tag
+    mask_node.clear()
+    mask_node.update(old_attributes)
 
 
 def draw_gradient(surface, node, name, opacity):
@@ -219,8 +228,21 @@ def draw_gradient(surface, node, name, opacity):
 def draw_pattern(surface, node, name, opacity):
     """Draw a pattern image."""
     pattern_node = surface.patterns[name]
+    # The pattern definition is shared and cached: keep a copy of its state
+    # so the node is restored even on an early return or a later re-render.
+    old_tag = pattern_node.tag
+    old_attributes = dict(pattern_node)
     pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
     pattern_node.tag = 'g'
+    try:
+        return _draw_pattern(surface, node, name, opacity, pattern_node)
+    finally:
+        pattern_node.tag = old_tag
+        pattern_node.clear()
+        pattern_node.update(old_attributes)
+
+
+def _draw_pattern(surface, node, name, opacity, pattern_node):
     transform(surface, pattern_node.get('patternTransform'))
 
     if pattern_node.get('viewBox'):
@@ -341,14 +363,6 @@ def use(surface, node):
     surface.context.save()
     surface.context.translate(
         size(surface, node.get('x'), 'x'), size(surface, node.get('y'), 'y'))
-    if 'x' in node:
-        del node['x']
-    if 'y' in node:
-        del node['y']
-    if 'viewBox' in node:
-        del node['viewBox']
-    if 'mask' in node:
-        del node['mask']
     href = parse_url(node.get_href()).geturl()
     try:
         tree = Tree(
@@ -366,9 +380,25 @@ def use(surface, node):
         # Explicitely specified
         # http://www.w3.org/TR/SVG11/struct.html#UseElement
         tree.tag = 'svg'
-        if 'width' in node and 'height' in node:
-            tree['width'], tree['height'] = node['width'], node['height']
+        # The width and height of the use element each independently
+        # override the corresponding value of the referenced element: a
+        # single specified dimension must still take effect, the missing one
+        # is resolved later by node_format (100% of the current viewport,
+        # the referenced element's own size or its viewBox size).
+        if 'width' in node:
+            tree['width'] = node['width']
+        if 'height' in node:
+            tree['height'] = node['height']
+        # SVG2: a viewBox on the use element establishes the viewport of
+        # the generated nested svg when the referenced element has no
+        # viewBox of its own. Never mutate the use node: the same node can
+        # be drawn more than once and must keep all of its attributes.
+        if 'viewBox' in node and 'viewBox' not in tree:
+            tree['viewBox'] = node['viewBox']
 
+    # The mask is applied by the regular draw() flow around this call; it
+    # must stay on the node so repeated references and repeated renders of
+    # the same tree behave identically.
     surface.draw(tree)
     node.get('fill', None)
     node.get('stroke', None)

@@ -159,6 +159,11 @@ class Surface(object):
         """
         self.cairo = None
         self.context_width, self.context_height = parent_width, parent_height
+        # Dimensions actually used to resolve percentage lengths. Without a
+        # viewBox they are the viewport itself; with a viewBox they follow
+        # the viewBox (in its own user units) so that a percentage always
+        # means the same fraction regardless of meet/slice letterboxing.
+        self.percent_width, self.percent_height = parent_width, parent_height
         self.cursor_position = [0, 0]
         self.cursor_d_position = [0, 0]
         self.text_path_width = 0
@@ -271,8 +276,28 @@ class Surface(object):
             self.context.clip()
         self.context.scale(scale_x, scale_y)
         self.context.translate(translate_x, translate_y)
-        self.context_width = rect_width / scale_x
-        self.context_height = rect_height / scale_y
+        # The active viewport seen by the children, expressed in the new
+        # user units. A zero scale (empty viewBox dimension) is replaced by
+        # 1 to avoid propagating an invalid, unrecoverable viewport size:
+        # an empty element simply paints nothing, its siblings must keep
+        # using the viewport restored when its draw() call returns.
+        self.context_width = (
+            rect_width / scale_x if scale_x else rect_width)
+        self.context_height = (
+            rect_height / scale_y if scale_y else rect_height)
+        if viewbox:
+            # With a viewBox, percentage lengths on the children are
+            # fractions of the viewBox itself (in its user units): this
+            # stays valid under meet/slice letterboxing and non-uniform
+            # scaling, where the letterboxed user viewport would differ.
+            self.percent_width = viewbox[2]
+            self.percent_height = viewbox[3]
+        else:
+            # Without a viewBox the user viewport is the percentage
+            # reference, and it is not scaled relative to the device
+            # viewport.
+            self.percent_width = self.context_width
+            self.percent_height = self.context_height
 
     def finish(self):
         """Read the surface content."""
@@ -303,6 +328,7 @@ class Surface(object):
         old_parent_node = self.parent_node
         old_font_size = self.font_size
         old_context_size = self.context_width, self.context_height
+        old_percent_size = self.percent_width, self.percent_height
         self.parent_node = node
 
         if "font" in node:
@@ -498,6 +524,7 @@ class Surface(object):
         self.parent_node = old_parent_node
         self.font_size = old_font_size
         self.context_width, self.context_height = old_context_size
+        self.percent_width, self.percent_height = old_percent_size
 
 
 class PDFSurface(Surface):

@@ -40,10 +40,6 @@ def image(surface, node):
         image_bytes.startswith((b'<svg ', b'<?xml', b'<!DOC', b'\x1f\x8b'))
         or b'<svg' in image_bytes
     ):
-        if 'x' in node:
-            del node['x']
-        if 'y' in node:
-            del node['y']
         tree = Tree(
             url=url.geturl(), url_fetcher=node.url_fetcher,
             bytestring=image_bytes, tree_cache=surface.tree_cache,
@@ -66,7 +62,9 @@ def image(surface, node):
         surface.context.rectangle(x, y, width, height)
         surface.context.clip()
 
-        # Draw image
+        # Draw image. The embedded SVG is positioned at the image's x/y: the
+        # translation happens on the context, the image node itself is never
+        # mutated so repeated renders of the same tree stay identical.
         surface.context.save()
         surface.context.translate(x, y)
         surface.context.translate(*surface.context.get_current_point())
