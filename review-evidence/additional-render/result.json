@@ -1,0 +1,38 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12598-render-state-isolation/local-frozen-source/cairosvg/__init__.py",
+  "tests": 7,
+  "passed": 7,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "blue-sibling-region-unaffected",
+      "passed": true
+    },
+    {
+      "name": "real-invalid-image-error-propagates",
+      "error": "UnidentifiedImageError",
+      "passed": true
+    },
+    {
+      "name": "failed-surface-context-released",
+      "passed": true
+    },
+    {
+      "name": "failed-native-surface-finished",
+      "passed": true
+    },
+    {
+      "name": "fresh-export-after-mid-render-failure-matches-baseline",
+      "passed": true
+    },
+    {
+      "name": "same-surface-frame-restored-after-error",
+      "error": "UnidentifiedImageError",
+      "passed": true
+    },
+    {
+      "name": "same-surface-after-error-pixels-match-baseline",
+      "passed": true
+    }
+  ]
+}

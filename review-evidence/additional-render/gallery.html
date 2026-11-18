@@ -1,0 +1,38 @@
+<!doctype html><meta charset="utf-8"><title>中途失败后的状态与画布</title><style>body{font:20px system-ui;margin:24px}img{width:600px;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>正常、特殊前置与真实图像解析失败后渲染</h1><h2>baseline</h2><p>SVG输入</p><img src="baseline.svg"><p>当次PNG</p><img src="baseline.png"><h2>special-before</h2><p>SVG输入</p><img src="special-before.svg"><p>当次PNG</p><img src="special-before.png"><h2>after-failure</h2><p>SVG输入</p><img src="after-failure.svg"><p>当次PNG</p><img src="after-failure.png"><h2>同画布中途失败后绘制</h2><img src="same-surface-after-error.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12598-render-state-isolation/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 7,
+  &quot;passed&quot;: 7,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;blue-sibling-region-unaffected&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;real-invalid-image-error-propagates&quot;,
+      &quot;error&quot;: &quot;UnidentifiedImageError&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;failed-surface-context-released&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;failed-native-surface-finished&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;fresh-export-after-mid-render-failure-matches-baseline&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;same-surface-frame-restored-after-error&quot;,
+      &quot;error&quot;: &quot;UnidentifiedImageError&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;same-surface-after-error-pixels-match-baseline&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>
