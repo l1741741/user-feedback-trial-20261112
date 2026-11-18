@@ -29,24 +29,44 @@ EXTEND_OPERATORS = {
 }
 
 
-def update_def_href(surface, def_name, def_dict, chain=None):
-    """Update the attributes of the def according to its href attribute."""
+def resolve_def_href(surface, def_name, def_dict, chain=None):
+    """Return a node with the ``href`` inheritance of ``def_name`` resolved.
+
+    Referencing nodes inherit the attributes they do not define from the
+    referenced node, recursively, while keeping their own attributes and
+    color stops. The stored definitions are never modified: a fresh node is
+    returned, so the same shared definition can be referenced by several
+    shapes with independent overrides and the result does not depend on the
+    drawing order. Missing references and cyclic inheritance end the chain
+    gracefully without raising or polluting other definitions.
+
+    """
     def_node = def_dict[def_name]
     href = parse_url(def_node.get_href()).fragment
+    if not href:
+        # No inheritance: use the stored definition as-is.
+        return def_node
     if chain is None:
         chain = set()
-    if href in def_dict and href not in chain:
-        chain.add(href)
-        update_def_href(surface, href, def_dict, chain)
-        href_node = def_dict[href]
-        def_dict[def_name] = Tree(
-            url=f'#{def_name}', url_fetcher=def_node.url_fetcher,
-            parent=href_node, parent_children=(not def_node.children),
-            tree_cache=surface.tree_cache, unsafe=def_node.unsafe)
-        # Inherit attributes generally not inherited
-        for key, value in href_node.items():
-            if key not in def_dict[def_name]:
-                def_dict[def_name][key] = value
+    if href not in def_dict or href in chain:
+        # Missing or cyclic reference: stop resolving the chain here, the
+        # referencing node is rendered with its own attributes and stops.
+        return def_node
+    chain = chain | {def_name}
+    href_node = resolve_def_href(surface, href, def_dict, chain)
+    # Use a private cache for the merged node: writing this synthetic tree
+    # into the surface's shared tree_cache would make later references to
+    # the same document URL resolve to the merged node instead of their own
+    # definition, which made rendering depend on the drawing order.
+    merged_node = Tree(
+        url=f'#{def_name}', url_fetcher=def_node.url_fetcher,
+        parent=href_node, parent_children=(not def_node.children),
+        tree_cache={}, unsafe=def_node.unsafe)
+    # Inherit attributes not defined on the referencing node
+    for key, value in href_node.items():
+        if key not in merged_node:
+            merged_node[key] = value
+    return merged_node
 
 
 def parse_all_defs(surface, node):
@@ -73,11 +93,11 @@ def parse_def(surface, node):
 def gradient_or_pattern(surface, node, name, opacity):
     """Gradient or pattern color."""
     if name in surface.gradients:
-        update_def_href(surface, name, surface.gradients)
-        return draw_gradient(surface, node, name, opacity)
+        gradient_node = resolve_def_href(surface, name, surface.gradients)
+        return draw_gradient(surface, node, gradient_node, opacity)
     elif name in surface.patterns:
-        update_def_href(surface, name, surface.patterns)
-        return draw_pattern(surface, node, name, opacity)
+        pattern_node = resolve_def_href(surface, name, surface.patterns)
+        return draw_pattern(surface, node, pattern_node, opacity)
 
 
 def marker(surface, node):
@@ -155,10 +175,8 @@ def paint_mask(surface, node, name, opacity):
     surface.context.restore()
 
 
-def draw_gradient(surface, node, name, opacity):
+def draw_gradient(surface, node, gradient_node, opacity):
     """Gradients colors."""
-    gradient_node = surface.gradients[name]
-
     if gradient_node.get('gradientUnits') == 'userSpaceOnUse':
         width_ref, height_ref = 'x', 'y'
         diagonal_ref = 'xy'
@@ -216,9 +234,8 @@ def draw_gradient(surface, node, name, opacity):
     return True
 
 
-def draw_pattern(surface, node, name, opacity):
+def draw_pattern(surface, node, pattern_node, opacity):
     """Draw a pattern image."""
-    pattern_node = surface.patterns[name]
     pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
     pattern_node.tag = 'g'
     transform(surface, pattern_node.get('patternTransform'))

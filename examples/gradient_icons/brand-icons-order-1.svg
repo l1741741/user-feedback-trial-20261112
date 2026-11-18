@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Shared-gradient brand icons, drawing order #1.
+
+  Every icon below reuses the SAME public gradient definitions through
+  href references. Each icon is a different shape with its own overrides
+  (coordinates, color stops, opacity, transform). The order of the icon
+  nodes is reversed in brand-icons-order-2.svg; both files must render to
+  identical per-icon color distributions.
+
+  Icons 5 and 6 share a MULTI-LEVEL inheritance chain (leaf -> mid -> base)
+  where the intermediate "mid" gradient is also painted directly. This is
+  the case that used to break: resolving "leaf" first mutated the shared
+  "mid" definition, so painting "mid" afterwards produced a black/empty
+  shape instead of its blue -> red gradient.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="384" height="64" viewBox="0 0 384 64" version="1.1">
+  <defs>
+    <!-- Public linear gradient: blue -> red, horizontal. -->
+    <linearGradient id="brand-linear" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0" stop-color="#1f3cff"/>
+      <stop offset="1" stop-color="#ff4d1f"/>
+    </linearGradient>
+
+    <!-- Public radial gradient: white center -> dark edge. -->
+    <radialGradient id="brand-radial" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#20242b"/>
+    </radialGradient>
+
+    <!-- Vertical variant: inherits everything from brand-linear except the
+         direction, and defines its OWN green -> yellow stops. -->
+    <linearGradient id="vertical-own-stops" href="#brand-linear"
+                    x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0" stop-color="#00c853"/>
+      <stop offset="1" stop-color="#ffd600"/>
+    </linearGradient>
+
+    <!-- Multi-level inheritance: plain -> brand-linear, no own stops. -->
+    <linearGradient id="inherited-flat" href="#brand-linear"/>
+
+    <!-- Radial override with a transform, inheriting the public stops. -->
+    <radialGradient id="radial-squashed" href="#brand-radial"
+                    gradientTransform="scale(0.5, 1)"/>
+
+    <!-- Multi-level chain used by icons 5 and 6. -->
+    <linearGradient id="chain-base" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0" stop-color="#0000ff"/>
+      <stop offset="1" stop-color="#ff0000"/>
+    </linearGradient>
+    <!-- Mid: inherits the base stops but overrides the direction to vertical.
+         It has no stops of its own. -->
+    <linearGradient id="chain-mid" href="#chain-base"
+                    x1="0%" y1="0%" x2="0%" y2="100%"/>
+    <!-- Leaf: references mid but defines its own green -> yellow stops. -->
+    <linearGradient id="chain-leaf" href="#chain-mid">
+      <stop offset="0" stop-color="#00ff00"/>
+      <stop offset="1" stop-color="#ffff00"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Icon 1: plain reference on a rounded square. -->
+  <g transform="translate(0, 0)">
+    <rect x="4" y="4" width="56" height="56" rx="10"
+          fill="url(#brand-linear)"/>
+  </g>
+
+  <!-- Icon 2: vertical override keeping its own stops. -->
+  <g transform="translate(64, 0)">
+    <rect x="4" y="4" width="56" height="56"
+          fill="url(#vertical-own-stops)"/>
+  </g>
+
+  <!-- Icon 3: a circle, different opacity, inheriting the public gradient. -->
+  <g transform="translate(128, 0)">
+    <circle cx="32" cy="32" r="28" fill="url(#inherited-flat)"
+            opacity="0.55"/>
+  </g>
+
+  <!-- Icon 4: transformed radial gradient on a diamond. -->
+  <g transform="translate(192, 0)">
+    <polygon points="32,4 60,32 32,60 4,32"
+             fill="url(#radial-squashed)"/>
+  </g>
+
+  <!-- Icon 5: leaf of the chain, own green -> yellow stops. -->
+  <g transform="translate(256, 0)">
+    <rect x="4" y="4" width="56" height="56"
+          fill="url(#chain-leaf)"/>
+  </g>
+
+  <!-- Icon 6: the intermediate mid gradient painted directly; it must keep
+       the inherited blue -> red vertical gradient in every drawing order. -->
+  <g transform="translate(320, 0)">
+    <rect x="4" y="4" width="56" height="56"
+          fill="url(#chain-mid)"/>
+  </g>
+</svg>

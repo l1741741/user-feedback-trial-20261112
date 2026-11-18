@@ -3,6 +3,18 @@
 ======
 
 
+Unreleased
+==========
+
+* Fix ``href``/``xlink:href`` inheritance of gradients and patterns: shared
+  definitions are no longer mutated when referenced, so a node overriding some
+  attributes or defining its own color stops does not affect later icons using
+  the same gradient. Inheritance is now independent of the drawing order,
+  multi-level chains resolve to the effective definition, and cyclic or
+  missing references terminate safely. Synthetic merged trees no longer
+  pollute the shared tree cache when rendering from a file URL.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 
