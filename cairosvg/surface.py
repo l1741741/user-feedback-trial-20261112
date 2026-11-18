@@ -172,6 +172,10 @@ class Surface(object):
             self.paths = parent_surface.paths
             self.filters = parent_surface.filters
             self.images = parent_surface.images
+            # References follow the whole reference chain, including the
+            # definitions used by masks, patterns and markers drawn on their
+            # own sub-surface.
+            self.active_references = parent_surface.active_references
         else:
             self.markers = {}
             self.gradients = {}
@@ -180,6 +184,7 @@ class Surface(object):
             self.paths = {}
             self.filters = {}
             self.images = {}
+            self.active_references = set()
         self._old_parent_node = self.parent_node = None
         self.output = output
         self.dpi = dpi

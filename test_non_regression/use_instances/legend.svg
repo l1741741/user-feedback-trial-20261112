@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200"
+     viewBox="0 0 320 200">
+  <title>Icon set reference instances</title>
+  <!--
+    Legend for a UI icon library. The same icon symbol and the same composed
+    button symbol are placed in several regions with different positions,
+    sizes, transforms and theme colors. The yellow square is a corner badge
+    that makes each instance’s lower-right corner visible.
+
+    Definitions are referenced several times; the drawing order is
+    independent from the declaration order, so instance state must not leak
+    from one reference to the next.
+  -->
+  <defs>
+    <symbol id="icon" viewBox="0 0 16 16">
+      <rect width="16" height="16" rx="3" fill="currentColor"/>
+      <path d="M4 8 L7 11 L12 5" fill="none" stroke="#ffffff"
+            stroke-width="2" stroke-linecap="round"
+            stroke-linejoin="round"/>
+      <rect x="11" y="11" width="5" height="5" fill="#ffcc00"/>
+    </symbol>
+
+    <symbol id="button" viewBox="0 0 40 20">
+      <rect width="40" height="20" rx="4" fill="currentColor"/>
+      <use href="#icon" x="4" y="4" width="12" height="12"/>
+      <rect x="20" y="6" width="16" height="8" fill="#ffcc00"/>
+    </symbol>
+  </defs>
+
+  <rect width="320" height="200" fill="#ffffff"/>
+
+  <!-- Row 1: the same icon at several sizes, both theme colors. -->
+  <use href="#icon" x="16" y="16" width="24" height="24"
+       color="#224466"/>
+  <use href="#icon" x="60" y="16" width="40" height="40"
+       color="#cc3355"/>
+  <use href="#icon" x="120" y="16" width="64" height="32"
+       color="#224466"/>
+  <!-- Position plus a transform on the instance itself. -->
+  <use href="#icon" x="0" y="0" width="24" height="24"
+       color="#cc3355" transform="translate(208,8) scale(1.25)"/>
+
+  <!--
+    Row 2: a single specified dimension. Nested svg viewports scope the
+    percentage used for the missing dimension.
+  -->
+  <svg x="16" y="72" width="56" height="40">
+    <use href="#icon" width="40" color="#cc3355"/>
+  </svg>
+  <svg x="88" y="72" width="56" height="40">
+    <use href="#icon" height="24" color="#224466"/>
+  </svg>
+
+  <!-- Row 3: composed buttons, scaled and colored per instance. -->
+  <use href="#button" x="16" y="136" width="120" height="48"
+       color="#224466"/>
+  <use href="#button" x="160" y="136" width="96" height="40"
+       color="#cc3355"/>
+</svg>

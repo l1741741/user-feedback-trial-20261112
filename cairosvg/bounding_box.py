@@ -338,12 +338,25 @@ def bounding_box_group(surface, node):
 def bounding_box_use(surface, node):
     """Get the bounding box of a ``use`` node."""
     href = parse_url(node.get_href()).geturl()
-    tree = Tree(
-        url=href, url_fetcher=node.url_fetcher, parent=node,
-        unsafe=node.unsafe)
-    if not match_features(tree.xml_tree):
+    if not href:
         return None
-    return calculate_bounding_box(surface, tree)
+    # A reference cycle has no meaningful bounding box: abort it the same way
+    # as when drawing (see ``defs.use``) instead of recursing without end.
+    active = getattr(surface, 'active_references', None)
+    if active is not None and href in active:
+        return None
+    if active is not None:
+        active.add(href)
+    try:
+        tree = Tree(
+            url=href, url_fetcher=node.url_fetcher, parent=node,
+            unsafe=node.unsafe)
+        if not match_features(tree.xml_tree):
+            return None
+        return calculate_bounding_box(surface, tree)
+    finally:
+        if active is not None:
+            active.discard(href)
 
 
 def extend_bounding_box(bounding_box, points):

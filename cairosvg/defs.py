@@ -5,6 +5,8 @@ This module handles clips, gradients, masks, patterns and external nodes.
 
 """
 
+import copy
+
 from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
 from .features import match_features
 from .helpers import paint, size, transform
@@ -30,7 +32,13 @@ EXTEND_OPERATORS = {
 
 
 def update_def_href(surface, def_name, def_dict, chain=None):
-    """Update the attributes of the def according to its href attribute."""
+    """Update the attributes of the def according to its href attribute.
+
+    The resulting definition is rebuilt from the original XML element every
+    time, so that resolving the same definition for a second instance cannot
+    depend on (or erase) the result of the first resolution.
+
+    """
     def_node = def_dict[def_name]
     href = parse_url(def_node.get_href()).fragment
     if chain is None:
@@ -39,9 +47,13 @@ def update_def_href(surface, def_name, def_dict, chain=None):
         chain.add(href)
         update_def_href(surface, href, def_dict, chain)
         href_node = def_dict[href]
+        # Whether children are taken from the referenced node is a property
+        # of the document, not of the previously resolved definition:
+        # ``def_node.children`` is mutated when defs are resolved.
+        has_children = bool(len(def_node.xml_tree))
         def_dict[def_name] = Tree(
             url=f'#{def_name}', url_fetcher=def_node.url_fetcher,
-            parent=href_node, parent_children=(not def_node.children),
+            parent=href_node, parent_children=not has_children,
             tree_cache=surface.tree_cache, unsafe=def_node.unsafe)
         # Inherit attributes generally not inherited
         for key, value in href_node.items():
@@ -117,8 +129,14 @@ def clip_path(surface, node):
 
 
 def paint_mask(surface, node, name, opacity):
-    """Paint the mask of the current surface."""
-    mask_node = surface.masks[name]
+    """Paint the mask of the current surface.
+
+    The mask is resolved into a private copy: the stored definition keeps its
+    declared attributes, so that a second, differently sized reference does
+    not inherit the first reference’s resolved geometry.
+
+    """
+    mask_node = copy.copy(surface.masks[name])
     mask_node.tag = 'g'
     mask_node['opacity'] = opacity
 
@@ -217,8 +235,14 @@ def draw_gradient(surface, node, name, opacity):
 
 
 def draw_pattern(surface, node, name, opacity):
-    """Draw a pattern image."""
-    pattern_node = surface.patterns[name]
+    """Draw a pattern image.
+
+    The pattern is resolved into a private copy: the stored definition keeps
+    its declared attributes, so that a second, differently sized reference
+    does not inherit the first reference’s resolved geometry.
+
+    """
+    pattern_node = copy.copy(surface.patterns[name])
     pattern_node['opacity'] = float(pattern_node.get('opacity', 1)) * opacity
     pattern_node.tag = 'g'
     transform(surface, pattern_node.get('patternTransform'))
@@ -333,43 +357,84 @@ def apply_filter_after_painting(surface, node, name):
 
 
 def use(surface, node):
-    """Draw the content of another SVG node."""
+    """Draw the content of another SVG node.
+
+    A ``use`` element is only a reference: the instance geometry (``x``,
+    ``y``, ``width``, ``height``) belongs to the instance, while the
+    referenced element supplies its own attributes and children.  The
+    referenced tree is therefore built from a copy of the shared node, so
+    that every instance keeps its own position, size, transform and style
+    even when the definition is reused later or painted in another order.
+
+    """
     surface.reference_count += 1
     if not node.unsafe and surface.reference_count > 100_000:
         raise ValueError(
             'Abort rendering: more than 100 000 referenced elements')
+    href = parse_url(node.get_href()).geturl()
+    if not href:
+        # A ``use`` element without an ``href`` references nothing.
+        return
+    # Guard against reference cycles using the set of *active* references
+    # only. Like a missing reference, a cycle makes this instance
+    # unresolvable, so it is skipped instead of recursing until Python or the
+    # global ``reference_count`` budget aborts the whole document. As the set
+    # is unwound when a reference finishes, later legitimate instances are
+    # still rendered and cannot be mistaken for “too deep” documents.
+    active = surface.active_references
+    if href in active:
+        return
     surface.context.save()
+    active.add(href)
+    try:
+        _draw_use(surface, node, href)
+    finally:
+        active.discard(href)
+        surface.context.restore()
+
+
+def _draw_use(surface, node, href):
+    """Draw the referenced content of ``node``.
+
+    ``surface.context`` is already saved. ``x``/``y`` are applied here, before
+    the referenced viewport is established, so that the instance position and
+    the referenced content’s own ``transform`` keep their defined order.
+
+    """
     surface.context.translate(
         size(surface, node.get('x'), 'x'), size(surface, node.get('y'), 'y'))
-    if 'x' in node:
-        del node['x']
-    if 'y' in node:
-        del node['y']
-    if 'viewBox' in node:
-        del node['viewBox']
-    if 'mask' in node:
-        del node['mask']
-    href = parse_url(node.get_href()).geturl()
+    # ``x``/``y`` position the instance and must not be inherited by the
+    # referenced content.  ``viewBox`` and ``mask`` are instance-only too:
+    # they describe the use element, not the referenced element.  Copy the
+    # node before removing these attributes: the same node may be referenced
+    # again later, and the shared definition must stay untouched.
+    instance = copy.copy(node)
+    for attribute in ('x', 'y', 'viewBox', 'mask'):
+        instance.pop(attribute, None)
     try:
         tree = Tree(
-            url=href, url_fetcher=node.url_fetcher, parent=node,
+            url=href, url_fetcher=node.url_fetcher, parent=instance,
             tree_cache=surface.tree_cache, unsafe=node.unsafe)
     except TypeError:
-        surface.context.restore()
         return
 
     if not match_features(tree.xml_tree):
-        surface.context.restore()
         return
 
+    # The tree may come from ``surface.tree_cache`` and be reused by another
+    # instance: copy it before overriding instance-specific geometry so the
+    # cached definition stays pristine.
+    tree = copy.copy(tree)
     if tree.tag in ('svg', 'symbol'):
-        # Explicitely specified
+        # Explicitly specified.
         # http://www.w3.org/TR/SVG11/struct.html#UseElement
+        # Each of width and height overrides its counterpart independently:
+        # a single specified dimension is valid, and the missing one falls
+        # back to the referenced element’s own size or viewBox (see
+        # ``node_format``).
         tree.tag = 'svg'
-        if 'width' in node and 'height' in node:
-            tree['width'], tree['height'] = node['width'], node['height']
+        for attribute in ('width', 'height'):
+            if attribute in node:
+                tree[attribute] = node[attribute]
 
     surface.draw(tree)
-    node.get('fill', None)
-    node.get('stroke', None)
-    surface.context.restore()

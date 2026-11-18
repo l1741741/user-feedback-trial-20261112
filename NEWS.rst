@@ -3,6 +3,19 @@
 ======
 
 
+Version 2.9.2 (unreleased)
+==========================
+
+* Fix state leaks between ``use`` instances of the same definition: each
+  instance now keeps its own position, size, transform and style instead of
+  rewriting the shared node (or the cached tree) for the next one
+* Apply ``use`` ``width`` and ``height`` independently, so that a single
+  specified dimension is honoured for ``symbol`` and ``svg`` references
+* Stop rewriting ``mask``, ``pattern`` and ``gradient`` definitions when they
+  are referenced more than once, so painting order does not change the result
+* Skip reference cycles instead of aborting the whole document with a
+  ``RecursionError``; following legitimate instances are still rendered
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 
