@@ -1,0 +1,464 @@
+<!doctype html><meta charset="utf-8"><title>矢量与本地栅格反色</title><style>body{font:20px system-ui;margin:24px}img{width:720px;max-width:100%;border:1px solid #aaa;background:repeating-conic-gradient(#eee 0% 25%,#fff 0% 50%) 50%/20px 20px}pre{white-space:pre-wrap}</style><h1>300×200本地素材版式及四种开关</h1><p>矢量红块、半透明RGBA、透明调色板、RGB和带EXIF方向的PNG；上红下蓝的方向在各开关保持。</p><h2>off</h2><p>SVG输入</p><img src="off.svg"><p>当次PNG</p><img src="off.png"><h2>negate</h2><p>SVG输入</p><img src="negate.svg"><p>当次PNG</p><img src="negate.png"><h2>invert</h2><p>SVG输入</p><img src="invert.svg"><p>当次PNG</p><img src="invert.png"><h2>both</h2><p>SVG输入</p><img src="both.svg"><p>当次PNG</p><img src="both.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12597-raster-colour-flags/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 30,
+  &quot;passed&quot;: 10,
+  &quot;failed&quot;: 20,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;off-vector&quot;,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;off-rgba&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;off-palette-transparent&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;off-palette-alpha&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        128
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;off-rgb&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;off-orientation-top&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;off-orientation-bottom&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;negate-vector&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;negate-rgba&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;negate-palette-transparent&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;negate-palette-alpha&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        128
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;negate-rgb&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;negate-orientation-top&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;negate-orientation-bottom&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;invert-vector&quot;,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;invert-rgba&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        255,
+        128
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;invert-palette-transparent&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;invert-palette-alpha&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        255,
+        128
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;invert-rgb&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        255,
+        255
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;invert-orientation-top&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        255,
+        255
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;invert-orientation-bottom&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        255,
+        255,
+        0,
+        255
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;both-vector&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;both-rgba&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        255,
+        128
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;both-palette-transparent&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;both-palette-alpha&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        255,
+        128
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;both-rgb&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        255,
+        255
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;both-orientation-top&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        255,
+        255
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;both-orientation-bottom&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        255,
+        255,
+        0,
+        255
+      ],
+      &quot;passed&quot;: false
+    },
+    {
+      &quot;name&quot;: &quot;off-after-other-options-identical&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;local-input-bytes-unchanged&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>
