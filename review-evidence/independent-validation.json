@@ -1,0 +1,22 @@
+{
+  "task_id": "rerun15-20261118-12584-css-visibility",
+  "final_sha": "3dd3df81127ef396150ab6bdea4eddcf81bb5bdf",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-12584-css-visibility/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12584-css-visibility/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_css_visibility.py"
+  ],
+  "exit_code": 0,
+  "tests": 55,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T07:39:46.679102+08:00"
+}

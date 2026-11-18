@@ -1,0 +1,156 @@
+<!doctype html><meta charset="utf-8"><title>可见性与裁剪引用</title><style>body{font:20px system-ui;margin:24px}img{width:720px;max-width:100%;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>可见子项、整支隐藏及引用隔离</h1><h2>visible-child</h2><p>SVG输入</p><img src="visible-child.svg"><p>当次PNG</p><img src="visible-child.png"><h2>display-none</h2><p>SVG输入</p><img src="display-none.svg"><p>当次PNG</p><img src="display-none.png"><h2>css-priority</h2><p>SVG输入</p><img src="css-priority.svg"><p>当次PNG</p><img src="css-priority.png"><h2>clip-hidden</h2><p>SVG输入</p><img src="clip-hidden.svg"><p>当次PNG</p><img src="clip-hidden.png"><h2>clip-collapse</h2><p>SVG输入</p><img src="clip-collapse.svg"><p>当次PNG</p><img src="clip-collapse.png"><h2>clip-display</h2><p>SVG输入</p><img src="clip-display.svg"><p>当次PNG</p><img src="clip-display.png"><h2>use-instances</h2><p>SVG输入</p><img src="use-instances.svg"><p>当次PNG</p><img src="use-instances.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12584-css-visibility/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 13,
+  &quot;passed&quot;: 13,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;visible-child-50&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;visible-child-130&quot;,
+      &quot;actual&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        255,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;visible-child-200&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;display-none-50&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;display-none-130&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;display-none-200&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;css-priority-50&quot;,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;css-priority-200&quot;,
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        255
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;clip-hidden&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;clip-collapse&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;clip-display&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;use-hidden-isolated&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;same-tree-repeat&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>
