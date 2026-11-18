@@ -74,6 +74,47 @@ def text(surface, node, draw_as_text=False):
     else:
         text_path = None
     letter_spacing = size(surface, node.get('letter-spacing'))
+    word_spacing = size(surface, node.get('word-spacing'))
+
+    # A ``textLength`` attribute asks for the text to be laid out at an exact
+    # target width. Unparsable, negative or zero lengths are invalid and
+    # leave the text at its natural width, as does empty content.
+    try:
+        text_length = size(surface, node.get('textLength'), 'x')
+    except (TypeError, ValueError):
+        text_length = 0
+    glyph_scale = 1
+    spacing_adjust = 0
+    if node.text and text_length > 0:
+        char_number = len(node.text)
+        # Natural advance of the text run, measured with the same font and
+        # context used for drawing below, declared spacing included.
+        natural_length = (
+            sum(surface.context.text_extents(char)[4] for char in node.text)
+            + letter_spacing * (char_number - 1)
+            + word_spacing * node.text.count(' '))
+        if natural_length > 0:
+            if node.get('lengthAdjust') == 'spacingAndGlyphs':
+                # Glyphs, advances and spacing are scaled together so that
+                # the run exactly reaches the target length.
+                glyph_scale = text_length / natural_length
+            elif char_number > 1:
+                # Only the spacing between characters is adjusted. A single
+                # character has no gap to adjust and keeps its natural
+                # width.
+                spacing_adjust = (
+                    text_length - natural_length) / (char_number - 1)
+    # Effective spacing applied between two consecutive letters, and extra
+    # advance added after a space character.
+    spacing = letter_spacing * glyph_scale + spacing_adjust
+    word_spacing *= glyph_scale
+
+    # Spacing continues across the child nodes of a same text run: the first
+    # letter of a tspan following a text chunk is spaced from the previous
+    # letter exactly like letters inside a chunk. A ``text`` element starts
+    # a new run.
+    if node.tag == 'text':
+        surface.text_spacing_continue = False
     x_bearing, y_bearing, width, height = (
         surface.context.text_extents(node.text)[:4])
 
@@ -108,6 +149,11 @@ def text(surface, node, draw_as_text=False):
         x_align = - (width + x_bearing)
         if letter_spacing and node.text:
             x_align -= (len(node.text) - 1) * letter_spacing
+
+    if text_length > 0 and node.text and text_anchor in ('middle', 'end'):
+        # With a declared length, alignment is relative to the target width
+        # rather than to the natural extents of the text.
+        x_align = -text_length / 2 if text_anchor == 'middle' else -text_length
 
     # TODO: This is a hack. The rest of the baseline alignment tags of the SVG
     # 1.1 spec (section 10.9.2) are not supported. We only try to align things
@@ -175,8 +221,8 @@ def text(surface, node, draw_as_text=False):
                 middle_point = point_following_path(cairo_path, middle)
                 end = start + extents
                 end_point = point_following_path(cairo_path, end)
-                if i:
-                    extents += letter_spacing
+                if i or surface.text_spacing_continue:
+                    extents += letter_spacing + spacing_adjust
                 surface.text_path_width += extents
                 if not all((start_point, middle_point, end_point)):
                     continue
@@ -193,20 +239,31 @@ def text(surface, node, draw_as_text=False):
                 surface.context.save()
                 x = surface.cursor_position[0] if x is None else x
                 y = surface.cursor_position[1] if y is None else y
-                if i:
-                    x += letter_spacing
+                if i or surface.text_spacing_continue:
+                    x += spacing
+                advance = extents * glyph_scale
+                if letter == ' ':
+                    advance += word_spacing
                 surface.context.move_to(x, y)
-                cursor_position = x + extents, y
+                cursor_position = x + advance, y
                 surface.context.rel_move_to(*surface.cursor_d_position)
                 surface.context.rel_move_to(x_align, y_align)
                 surface.context.rotate(last_r if r is None else r)
+                if glyph_scale != 1:
+                    # Scale the glyph horizontally around its own origin, so
+                    # that the run reaches its declared length without moving
+                    # the already computed position of the letter.
+                    current_x, current_y = surface.context.get_current_point()
+                    surface.context.translate(current_x, current_y)
+                    surface.context.scale(glyph_scale, 1)
+                    surface.context.move_to(0, 0)
                 points = (
                     (cursor_position[0] + x_align +
                      surface.cursor_d_position[0],
                      cursor_position[1] + y_align +
                      surface.cursor_d_position[1]),
-                    (cursor_position[0] + x_align + text_extents[4] +
-                     surface.cursor_d_position[0],
+                    (cursor_position[0] + x_align + text_extents[4] *
+                     glyph_scale + surface.cursor_d_position[0],
                      cursor_position[1] + y_align + text_extents[3] +
                      surface.cursor_d_position[1]))
                 bounding_box = extend_bounding_box(bounding_box, points)
@@ -220,6 +277,9 @@ def text(surface, node, draw_as_text=False):
             surface.context.restore()
             if not text_path:
                 surface.cursor_position = cursor_position
+        # Letters have been drawn in this run: the next sibling text chunk
+        # (tspan, a…) must be spaced from the last letter of this one.
+        surface.text_spacing_continue = True
     else:
         x = x[0] if x else surface.cursor_position[0]
         y = y[0] if y else surface.cursor_position[1]

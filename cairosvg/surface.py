@@ -162,6 +162,10 @@ class Surface(object):
         self.cursor_position = [0, 0]
         self.cursor_d_position = [0, 0]
         self.text_path_width = 0
+        # Whether letters have already been drawn in the current text run.
+        # Used to apply letter/word spacing continuously across the child
+        # nodes (tspan, a, textPath) of a same ``text`` element.
+        self.text_spacing_continue = False
         self.tree_cache = {(tree.url, tree.get('id')): tree}
         self.reference_count = 0
         if parent_surface:
@@ -401,7 +405,7 @@ class Surface(object):
 
         save_cursor = copy.deepcopy(
             (self.cursor_position, self.cursor_d_position,
-             self.text_path_width))
+             self.text_path_width, self.text_spacing_continue))
 
         # Only draw known tags
         if node.tag in TAGS:
@@ -449,6 +453,7 @@ class Surface(object):
                 self.cursor_position = save_cursor[0]
                 self.cursor_d_position = save_cursor[1]
                 self.text_path_width = save_cursor[2]
+                self.text_spacing_continue = save_cursor[3]
                 text(self, node, draw_as_text=True)
             else:
                 self.context.fill_preserve()
@@ -493,6 +498,7 @@ class Surface(object):
             self.cursor_position = [0, 0]
             self.cursor_d_position = [0, 0]
             self.text_path_width = 0
+            self.text_spacing_continue = False
 
         self.context.restore()
         self.parent_node = old_parent_node
