@@ -1,0 +1,34 @@
+{
+  "slug": "text-path-layout",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-12588-text-path-layout/local-frozen-source/cairosvg/__init__.py",
+  "tests": 4,
+  "passed": 4,
+  "failures": 0,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "textpath-percent-offset-horizontal",
+      "passed": true
+    },
+    {
+      "name": "zero-path-does-not-pollute-sibling",
+      "passed": true
+    },
+    {
+      "name": "text-repeat-stable",
+      "passed": true
+    }
+  ],
+  "images": [
+    "ordinary",
+    "path-offset",
+    "path-plain",
+    "zero-textpath",
+    "zero-reference",
+    "text-repeat-a",
+    "text-repeat-b"
+  ]
+}
