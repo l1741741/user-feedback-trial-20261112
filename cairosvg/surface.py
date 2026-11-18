@@ -376,28 +376,21 @@ class Surface(object):
             self.context.restore()
             self.context.clip()
         clip_path = parse_url(node.get('clip-path')).fragment
+        clip_mask = None
         if clip_path:
             path = self.paths.get(clip_path)
             if path:
-                self.context.save()
-                if path.get('clipPathUnits') == 'objectBoundingBox':
-                    x = size(self, node.get('x'), 'x')
-                    y = size(self, node.get('y'), 'y')
-                    width = size(self, node.get('width'), 'x')
-                    height = size(self, node.get('height'), 'y')
-                    self.context.translate(x, y)
-                    self.context.scale(width, height)
-                path.tag = 'g'
-                self.stroke_and_fill = False
-                self.draw(path)
-                self.stroke_and_fill = True
-                path.tag = 'clipPath'
-                self.context.restore()
-                # TODO: fill rules are not handled by cairo for clips
-                # if node.get('clip-rule') == 'evenodd':
-                #     self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
-                self.context.clip()
-                self.context.set_fill_rule(cairo.FILL_RULE_WINDING)
+                # Rasterize the clipPath geometry into an alpha mask.
+                # This honors per-child ``clip-rule`` (inherited or
+                # local), unions siblings instead of intersecting them
+                # like repeated cairo clip() calls would, and keeps
+                # vector output through cairo soft masks.
+                clip_mask = self._build_clip_mask(path, node)
+
+        if clip_mask is not None:
+            # The node and all its descendants are rendered into a
+            # content group, then composited once through the mask.
+            self.context.push_group()
 
         save_cursor = copy.deepcopy(
             (self.cursor_position, self.cursor_d_position,
@@ -440,8 +433,15 @@ class Surface(object):
             # Fill
             self.context.save()
             paint_source, paint_color = paint(node.get('fill', 'black'))
+            # ``fill-rule`` is an inherited property: the parser has already
+            # resolved the effective value (default: nonzero). Set the cairo
+            # fill rule explicitly for every fill so that a previous path or
+            # a clip cannot leak its rule into this one; the save/restore
+            # pair below also guarantees the state never outlives this fill.
             if node.get('fill-rule') == 'evenodd':
                 self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+            else:
+                self.context.set_fill_rule(cairo.FILL_RULE_WINDING)
             if not gradient_or_pattern(self, node, paint_source, fill_opacity):
                 self.context.set_source_rgba(
                     *self.map_color(paint_color, fill_opacity))
@@ -476,6 +476,17 @@ class Surface(object):
             for child in node.children:
                 self.draw(child)
 
+        # Composite the clipPath mask: pop this node's content group and
+        # paint it through the alpha mask, so only the clipped region is
+        # ever visible. This runs before the opacity/mask/filter group
+        # below, which then operates on the already-clipped content.
+        if clip_mask is not None:
+            content_group = self.context.pop_group()
+            self.context.save()
+            self.context.set_source(content_group)
+            self.context.mask(clip_mask)
+            self.context.restore()
+
         # Apply filter, mask and opacity
         if filter_ or mask or (opacity < 1 and node.children):
             self.context.pop_group_to_source()
@@ -498,6 +509,94 @@ class Surface(object):
         self.parent_node = old_parent_node
         self.font_size = old_font_size
         self.context_width, self.context_height = old_context_size
+
+    def _build_clip_mask(self, node, clipped_node):
+        """Build an alpha mask holding the ``clipPath`` clip region.
+
+        The returned cairo pattern is opaque where the clip region is
+        active and transparent elsewhere. Every geometry child paints
+        its own silhouette with the fill rule implied by its effective
+        ``clip-rule`` (inherited from the clipPath or set locally), so
+        evenodd and nonzero children can be mixed. Painting the
+        silhouettes one after another into the same alpha group unions
+        them, which is exactly how the children of a clipPath combine.
+
+        Building a mask instead of calling cairo ``clip()`` repeatedly
+        is required because successive ``clip()`` calls intersect their
+        regions and only one fill rule can be active at a time. On
+        vector surfaces (PDF/PS/SVG) cairo represents the mask as a soft
+        mask, so output stays vectorial.
+
+        """
+        # The alpha group is created in the OUTER coordinate system:
+        # pushing it before applying the objectBoundingBox transform
+        # ensures the popped mask can be composited later with the same
+        # geometry as the clipped content, while the transform still
+        # applies to the geometry painted into the group.
+        self.context.push_group_with_content(cairo.CONTENT_ALPHA)
+        object_bbox = node.get('clipPathUnits') == 'objectBoundingBox'
+        if object_bbox:
+            x = size(self, clipped_node.get('x'), 'x')
+            y = size(self, clipped_node.get('y'), 'y')
+            width = size(self, clipped_node.get('width'), 'x')
+            height = size(self, clipped_node.get('height'), 'y')
+            self.context.save()
+            self.context.translate(x, y)
+            self.context.scale(width, height)
+
+        # Geometry inside a clipPath defines coverage only, so paint it
+        # with opaque white: its alpha channel becomes the mask.
+        self.context.set_source_rgba(1, 1, 1, 1)
+
+        old_tag = node.tag
+        node.tag = 'g'
+        old_stroke_and_fill = self.stroke_and_fill
+        self.stroke_and_fill = False
+        try:
+            self._paint_clip_children(node.children)
+        finally:
+            self.stroke_and_fill = old_stroke_and_fill
+            node.tag = old_tag
+
+        if object_bbox:
+            self.context.restore()
+        mask = self.context.pop_group()
+        # Never let a clip rule leak into later painting operations.
+        self.context.set_fill_rule(cairo.FILL_RULE_WINDING)
+        return mask
+
+    def _paint_clip_children(self, children):
+        """Recursively paint clipPath children into the alpha mask group."""
+        for child in children:
+            if child.get('display', 'inline') == 'none':
+                continue
+            if child.tag == 'g':
+                self.context.save()
+                transform(
+                    self, child.get('transform'),
+                    transform_origin=child.get('transform-origin'))
+                self._paint_clip_children(child.children)
+                self.context.restore()
+                continue
+            # Resolve the effective clip-rule before drawing so that the
+            # fill used by the silhouette honors it directly. fill-rule
+            # attributes inside a clipPath are intentionally ignored:
+            # clip-rule is the property governing clip geometry.
+            self.context.save()
+            if child.get('clip-rule') == 'evenodd':
+                self.context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+            else:
+                self.context.set_fill_rule(cairo.FILL_RULE_WINDING)
+            self.draw(child)
+            # Empty or invisible geometry paints nothing and therefore
+            # leaves the accumulated union untouched.
+            if self.context.has_current_point():
+                # Reassert the mask color: draw() may have installed a
+                # gradient or pattern as source, but clip geometry only
+                # contributes coverage, never its own paint.
+                self.context.set_source_rgba(1, 1, 1, 1)
+                self.context.fill()
+            self.context.restore()
 
 
 class PDFSurface(Surface):

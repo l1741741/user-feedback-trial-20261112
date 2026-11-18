@@ -3,6 +3,24 @@
 ======
 
 
+Unreleased
+==========
+
+* Fix ``fill-rule`` and ``clip-rule`` handling:
+
+  - The ``clip-rule`` of ``clipPath`` children (including the rule
+    inherited from the ``clipPath`` element itself) is now honored, so
+    ``evenodd`` clips punch holes instead of always using the nonzero
+    winding rule.
+  - Multiple ``clipPath`` children now combine as a union even when they
+    use different rules, instead of being intersected by repeated cairo
+    ``clip()`` calls.
+  - The cairo fill rule is set explicitly for every fill and reset after
+    clipping, so a rule can no longer leak from one path or clip into the
+    next one. Inheritance from parent groups and local overrides keep
+    working, including for unclosed and implicitly closed outlines.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 
