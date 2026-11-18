@@ -5,6 +5,7 @@ Cairo surface creators.
 
 import copy
 import io
+from math import isfinite
 
 import cairocffi as cairo
 
@@ -83,15 +84,23 @@ class Surface(object):
     """Abstract base class for CairoSVG surfaces.
 
     The ``width`` and ``height`` attributes are in device units (pixels for
-    PNG, else points).
+    PNG, else points). They are the dimensions the surface actually stored:
+    raster surfaces round the requested size to whole pixels.
 
     The ``context_width`` and ``context_height`` attributes are in user units
-    (i.e. in pixels), they represent the size of the active viewport.
+    (i.e. in pixels), they represent the size of the active viewport. The
+    root viewport is laid out on a rectangle proportional to the requested
+    size that covers the whole stored surface, so that the drawing never
+    leaves a partially covered last row or column.
 
     """
 
     # Subclasses must either define this or override _create_surface()
     surface_class = None
+
+    # Whether the backend stores dimensions as whole pixels. Raster surfaces
+    # round their size, unlike the exact vector formats.
+    whole_pixel_sizes = False
 
     @classmethod
     def convert(cls, bytestring=None, *, file_obj=None, url=None, dpi=96,
@@ -109,10 +118,22 @@ class Surface(object):
 
         Give some options:
 
-        :param dpi: The ratio between 1 inch and 1 pixel.
+        :param dpi: The ratio between 1 inch and 1 pixel. Physical lengths in
+                    the document (``mm``, ``cm``, ``in``, ``pt``, ``pc``) are
+                    multiplied by it.
         :param parent_width: The width of the parent container in pixels.
         :param parent_height: The height of the parent container in pixels.
-        :param scale: The ouptut scaling factor.
+        :param scale: The ouptut scaling factor. It is applied to the
+                      document size when neither ``output_width`` nor
+                      ``output_height`` is given.
+        :param output_width: The desired output width, in pixels. When
+                             ``output_height`` is omitted, the height keeps
+                             the document aspect ratio. For raster formats,
+                             the requested width is stored as-is (rounded to
+                             whole pixels) and the derived height is computed
+                             from the stored width.
+        :param output_height: The desired output height, in pixels, with the
+                              same rules as ``output_width``.
         :param unsafe: A boolean allowing external file access, XML entities
                        and very large files
                        (WARNING: vulnerable to XXE attacks and various DoS).
@@ -120,6 +141,15 @@ class Surface(object):
                        specified via the ``url`` parameter.
                        Applications should validate input URLs to prevent SSRF.
 
+        When both ``output_width`` and ``output_height`` are given, they are
+        used as-is and the document aspect ratio is not preserved by the
+        surface: the document's ``preserveAspectRatio`` then decides how the
+        content fits in that box (letterboxing by default).
+
+        A size that is not a positive, finite number raises ``ValueError``
+        before any output is created, so no empty file is written. For raster
+        formats a requested size is rounded to whole pixels; a size that
+        rounds to zero is rejected the same way.
 
         Specifiy the output with:
 
@@ -189,36 +219,94 @@ class Surface(object):
         if viewbox is None:
             viewbox = (0, 0, width, height)
 
-        if output_width and output_height:
-            width, height = output_width, output_height
-        elif output_width:
-            if width:
-                # Keep the aspect ratio
-                height *= output_width / width
-            width = output_width
-        elif output_height:
-            if height:
-                # Keep the aspect ratio
-                width *= output_height / height
-            height = output_height
+        # Resolve the layout size of the output. ``output_width`` and
+        # ``output_height`` are given in output pixels; ``scale`` multiplies
+        # the source size. Sizes are handled in user units (pixels) and
+        # converted to device units (pixels for PNG, points for the vector
+        # formats) only when creating the surface.
+        source_width, source_height = width, height
+        if output_width is not None and output_height is not None:
+            # Both dimensions are given: each one is used as requested,
+            # without trying to preserve the source aspect ratio.
+            layout_width, layout_height = output_width, output_height
+        elif output_width is not None:
+            # Keep the source aspect ratio for the missing dimension.
+            layout_width = output_width
+            layout_height = (
+                source_height * (output_width / source_width)
+                if source_width else source_height)
+        elif output_height is not None:
+            layout_width = (
+                source_width * (output_height / source_height)
+                if source_height else source_width)
+            layout_height = output_height
         else:
-            width *= scale
-            height *= scale
+            # Default: the source size, scaled by ``scale`` (1 by default).
+            layout_width = source_width * scale
+            layout_height = source_height * scale
 
-        # Actual surface dimensions: may be rounded on raster surfaces types
+        # Reject undefined, negative and non-finite sizes before they reach
+        # the backend, so that we never return a "successful" file with no
+        # content.
+        self._check_size(layout_width, layout_height)
+
+        # Fit the request to the dimensions the backend can actually store.
+        # A PNG surface only has whole pixels. Rounding each dimension
+        # independently distorts the aspect ratio; when only one dimension
+        # was requested, derive the other one from the stored dimension so
+        # the requested one stays exact and the ratio stays as close as
+        # whole pixels allow. A legal requested dimension always gives a
+        # non-empty image: the derived one is kept at one pixel when the
+        # aspect ratio is too extreme for it to round to a whole pixel.
+        # Vector surfaces store the exact requested size, so no derivation
+        # is needed and their output is unchanged.
+        stored_width = self._snap_dimension(layout_width)
+        stored_height = self._snap_dimension(layout_height)
+        if self.whole_pixel_sizes:
+            if (output_width is not None and output_height is None
+                    and source_width):
+                stored_height = (
+                    self._snap_dimension(
+                        stored_width * source_height / source_width) or 1)
+            elif (output_height is not None and output_width is None
+                    and source_height):
+                stored_width = (
+                    self._snap_dimension(
+                        stored_height * source_width / source_height) or 1)
+
+        # Rounding may turn a valid fractional request into an empty image;
+        # reject it with the same error as any other undefined size.
+        self._check_size(stored_width, stored_height)
+
+        device_units = self.device_units_per_user_units
+        # Ask the backend for the stored (already rounded) dimensions, in
+        # device units.
         self.cairo, self.width, self.height = self._create_surface(
-            width * self.device_units_per_user_units,
-            height * self.device_units_per_user_units)
+            stored_width * device_units, stored_height * device_units)
 
         if 0 in (self.width, self.height):
             raise ValueError('The SVG size is undefined')
+
+        # Lay the viewport out on a rectangle that is proportional to the
+        # requested one and covers the whole stored surface. Raster surfaces
+        # only have whole pixels: their size can differ from the requested
+        # viewport by up to half a pixel in each direction. Drawing at the
+        # requested size would leave the last row or column partially
+        # covered (a transparent line along the edge of the image). Scaling
+        # both viewport dimensions by the same factor keeps the aspect ratio
+        # intact; it only clips less than one pixel of content at the edges.
+        # Vector surfaces store the exact requested size, so the factor is 1
+        # and their output is unchanged.
+        coverage = max(
+            1, self.width / (layout_width * device_units),
+            self.height / (layout_height * device_units))
 
         self.context = cairo.Context(self.cairo)
         # We must scale the context as the surface size is using physical units
         self.context.scale(
             self.device_units_per_user_units, self.device_units_per_user_units)
-        # Initial, non-rounded dimensions
-        self.set_context_size(width, height, viewbox, tree)
+        self.set_context_size(
+            layout_width * coverage, layout_height * coverage, viewbox, tree)
         self.context.move_to(0, 0)
 
         if background_color:
@@ -248,6 +336,21 @@ class Surface(object):
         """Create and return ``(cairo_surface, width, height)``."""
         cairo_surface = self.surface_class(self.output, width, height)
         return cairo_surface, width, height
+
+    def _snap_dimension(self, value):
+        """Return the dimension the backend can store for ``value``.
+
+        Device units are exact for vector formats. Raster surfaces only have
+        whole pixels and round the requested size; see ``PNGSurface``.
+
+        """
+        return value
+
+    def _check_size(self, width, height):
+        """Reject sizes that cannot produce a non-empty output."""
+        if (not (isfinite(width) and isfinite(height)) or
+                width <= 0 or height <= 0):
+            raise ValueError('The SVG size is undefined')
 
     def set_context_size(self, width, height, viewbox, tree):
         """Set the Cairo context size, set the SVG viewport size."""
@@ -523,11 +626,20 @@ class EPSSurface(Surface):
 class PNGSurface(Surface):
     """A surface that writes in PNG format."""
     device_units_per_user_units = 1
+    whole_pixel_sizes = True
+
+    def _snap_dimension(self, value):
+        """Return the whole-pixel dimension stored for ``value``.
+
+        An ImageSurface can only hold whole pixels. Its dimensions are
+        rounded to the nearest integer (the historical behavior of CairoSVG,
+        kept for API compatibility); a value that rounds to zero is invalid.
+
+        """
+        return int(round(value))
 
     def _create_surface(self, width, height):
         """Create and return ``(cairo_surface, width, height)``."""
-        width = int(round(width))
-        height = int(round(height))
         cairo_surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
         return cairo_surface, width, height
 

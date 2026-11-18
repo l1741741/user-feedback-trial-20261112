@@ -3,6 +3,18 @@
 ======
 
 
+Unreleased
+==========
+
+* Fix PNG output size and effective viewport: a fractional or physical source
+  size (e.g. ``5mm``, or ``output_width=25.5``) no longer leaves a transparent
+  line along the edge of the image, and the stored image keeps the requested
+  aspect ratio as closely as whole pixels allow
+* Reject zero, negative and non-finite output sizes with ``ValueError`` before
+  writing anything, including ``output_width=0`` and ``output_height=0``
+  which used to be silently ignored
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 
