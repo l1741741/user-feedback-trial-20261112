@@ -3,6 +3,24 @@
 ======
 
 
+Unreleased
+==========
+
+* Fix textPath layout along referenced paths:
+
+  - ``startOffset`` percentages are now relative to the path length, with
+    out-of-range values clamped to the path bounds;
+  - ``text-anchor`` and per-character ``dx``/``dy`` follow the path
+    direction, including on reversed paths;
+  - closing segments, multiple subpaths and zero-length paths have
+    deterministic results, and glyphs no longer jump across subpath gaps;
+  - text on a missing, empty or too-short path is clipped or disabled without
+    leaking layout state into the following ordinary text;
+  - polyline, polygon, circle, ellipse, rect and line elements can be used as
+    referenced paths, and referencing a path several times no longer mutates
+    its geometry.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

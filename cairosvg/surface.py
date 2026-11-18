@@ -162,6 +162,10 @@ class Surface(object):
         self.cursor_position = [0, 0]
         self.cursor_d_position = [0, 0]
         self.text_path_width = 0
+        # Flattened path currently followed by a textPath subtree, shared by
+        # nested tspans so the referenced geometry is built only once.
+        self.active_text_path = None
+        self.active_text_path_length = 0
         self.tree_cache = {(tree.url, tree.get('id')): tree}
         self.reference_count = 0
         if parent_surface:
@@ -403,6 +407,16 @@ class Surface(object):
             (self.cursor_position, self.cursor_d_position,
              self.text_path_width))
 
+        # A textPath owns the text layout cursor while it is rendered,
+        # including its tspan children. Save and restore the path-related
+        # state around the whole subtree so that a short, zero-length or
+        # missing path cannot leak offsets into the sibling text rendered
+        # afterwards.
+        text_path_node = node.tag == 'textPath'
+        if text_path_node:
+            save_text_path_state = copy.deepcopy(
+                (self.cursor_d_position, self.text_path_width))
+
         # Only draw known tags
         if node.tag in TAGS:
             try:
@@ -493,6 +507,10 @@ class Surface(object):
             self.cursor_position = [0, 0]
             self.cursor_d_position = [0, 0]
             self.text_path_width = 0
+        elif text_path_node:
+            # Keep the path layout state local to the textPath subtree.
+            (self.cursor_d_position,
+             self.text_path_width) = save_text_path_state
 
         self.context.restore()
         self.parent_node = old_parent_node

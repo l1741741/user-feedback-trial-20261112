@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Offline textPath layout demonstration.
+
+  Uses only the locally installed Verdana font and basic geometry. It
+  exercises every behavior fixed in cairosvg/text.py:
+   1. percentage startOffset relative to the path length (arc labels);
+   2. text-anchor middle/end combined with startOffset;
+   3. a reversed polyline, glyphs following the path direction;
+   4. multiple subpaths (no jump across the gap);
+   5. a closed curve whose closing segment is part of the length;
+   6. a zero-length path whose content is disabled;
+   7. a short path followed by ordinary sibling text with no state leak;
+   8. the same path referenced twice with identical geometry.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="1180"
+     font-family="Verdana" font-size="14">
+  <rect width="760" height="1180" fill="white"/>
+
+  <!-- 1-2: ticked semicircular arc with labels along it -->
+  <text x="30" y="36" font-size="16" font-weight="bold" fill="#222">
+    1. Arc with ticks: startOffset 0/50%/100% with start/middle/end anchors</text>
+  <path id="arc" d="M90 250 A150 150 0 0 1 390 250"
+        fill="none" stroke="#444" stroke-width="1.5"/>
+  <g stroke="#444" stroke-width="1.5">
+    <line x1="90"  y1="250" x2="90"  y2="263"/>
+    <line x1="134" y1="161" x2="125" y2="170"/>
+    <line x1="240" y1="100" x2="240" y2="115"/>
+    <line x1="346" y1="161" x2="355" y2="170"/>
+    <line x1="390" y1="250" x2="390" y2="263"/>
+  </g>
+  <text fill="#0a5">
+    <textPath href="#arc" startOffset="0">START</textPath>
+  </text>
+  <text fill="#06c" text-anchor="middle">
+    <textPath href="#arc" startOffset="50%">CENTERED ON ARC MIDPOINT</textPath>
+  </text>
+  <text fill="#c33" text-anchor="end">
+    <textPath href="#arc" startOffset="100%">END</textPath>
+  </text>
+
+  <!-- 3: reversed polyline -->
+  <text x="30" y="340" font-size="16" font-weight="bold" fill="#222">
+    2. Reversed polyline: glyphs rotate and follow the path direction</text>
+  <polyline id="zig" points="620,420 540,360 460,420 380,360 300,420"
+            fill="none" stroke="#888" stroke-width="1.5"/>
+  <text font-size="13" fill="#709">
+    <textPath href="#zig">GLYPHS FOLLOW PATH DIRECTION</textPath>
+  </text>
+
+  <!-- 4: multiple subpaths -->
+  <text x="30" y="490" font-size="16" font-weight="bold" fill="#222">
+    3. Two subpaths: text continues on the second one, never in the gap</text>
+  <path id="two" d="M40 540 H200 M360 540 H600"
+        fill="none" stroke="#444" stroke-width="1.5"/>
+  <text font-size="15" fill="#080">
+    <textPath href="#two">ABCDEFGHIJKLMNOPQRST</textPath>
+  </text>
+
+  <!-- 5: closed curve -->
+  <text x="30" y="610" font-size="16" font-weight="bold" fill="#222">
+    4. Closed triangle: the closing segment counts in the length</text>
+  <path id="tri" d="M40 800 L280 800 L280 640 Z"
+        fill="none" stroke="#444" stroke-width="1.5"/>
+  <text font-size="13" fill="#b26a00">
+    <textPath href="#tri">CLOSING SEGMENT COUNTS IN LENGTH 0123456789 ABCDEF</textPath>
+  </text>
+
+  <!-- 6: zero-length path (content must be invisible) -->
+  <text x="30" y="870" font-size="16" font-weight="bold" fill="#222">
+    5. Zero-length path: its text is disabled (nothing rendered below)</text>
+  <path id="zero" d="M40 910 L40 910"/>
+  <text font-size="15" fill="red">
+    <textPath href="#zero">INVISIBLE TEXT</textPath>
+  </text>
+
+  <!-- 7: short path then ordinary sibling text -->
+  <text x="30" y="960" font-size="16" font-weight="bold" fill="#222">
+    6. Short path, then sibling text unaffected by exhausted path state</text>
+  <path id="short" d="M40 1005 H110" fill="none" stroke="#444"/>
+  <text font-size="15">
+    <textPath href="#short" fill="#0a5">ON PATH</textPath>
+    <tspan x="40" y="1035" fill="#06c">ordinary sibling text at its own line</tspan>
+  </text>
+
+  <!-- 8: same path referenced twice -->
+  <text x="30" y="1080" font-size="16" font-weight="bold" fill="#222">
+    7. Same path referenced twice keeps its geometry</text>
+  <path id="rep" d="M40 1130 H700" fill="none" stroke="#444"/>
+  <text font-size="14" fill="#0a5">
+    <textPath href="#rep">FIRST REFERENCE</textPath>
+  </text>
+  <text font-size="14" fill="#c33" transform="translate(0,26)">
+    <textPath href="#rep">SECOND REFERENCE</textPath>
+  </text>
+</svg>

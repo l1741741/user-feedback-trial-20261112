@@ -28,6 +28,11 @@ EXTEND_OPERATORS = {
     'repeat': cairo.EXTEND_REPEAT,
 }
 
+# Shape elements that can be referenced by a textPath. Kept in sync with
+# ``surface.PATH_TAGS`` (duplicated here to avoid a circular import).
+SHAPE_TAGS = frozenset((
+    'circle', 'ellipse', 'line', 'path', 'polygon', 'polyline', 'rect'))
+
 
 def update_def_href(surface, def_name, def_dict, chain=None):
     """Update the attributes of the def according to its href attribute."""
@@ -64,10 +69,14 @@ def parse_all_defs(surface, node):
 def parse_def(surface, node):
     """Parse the SVG definitions."""
     for def_type in (
-            'marker', 'gradient', 'pattern', 'path', 'mask', 'filter',
+            'marker', 'gradient', 'pattern', 'mask', 'filter',
             'image'):
         if def_type in node.tag.lower() and 'id' in node:
             getattr(surface, f'{def_type}s')[node['id']] = node
+    # Every shape can be referenced by a textPath through an href, so all
+    # shape elements with an id are registered as reusable paths.
+    if node.tag in SHAPE_TAGS and 'id' in node:
+        surface.paths[node['id']] = node
 
 
 def gradient_or_pattern(surface, node, name, opacity):
