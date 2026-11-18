@@ -4,7 +4,7 @@ Paths manager.
 """
 
 from collections import deque
-from math import copysign, hypot, pi, radians
+from math import atan2, copysign, cos, hypot, pi, radians, sin
 from re import finditer
 
 from .bounding_box import calculate_bounding_box
@@ -158,7 +158,6 @@ def path(surface, node):
 
         if letter in 'aA':
             # Elliptic curve
-            surface.context.set_tolerance(0.00001)
             x1, y1 = current_point
             rx, ry, string = point(surface, string)
             rotation, string = string.split(' ', 1)
@@ -184,6 +183,11 @@ def path(surface, node):
                 x3 -= x1
                 y3 -= y1
 
+            # Negative radii are not valid, their absolute values are used
+            # instead (a negative radius would mirror the arc and flip its
+            # sweep direction)
+            rx, ry = abs(rx), abs(ry)
+
             # rx=0 or ry=0 means straight line
             if not rx or not ry:
                 if string := string.strip():
@@ -192,6 +196,12 @@ def path(surface, node):
                     # or A) in case it’s omitted
                     matches.appendleft((letter, string))
                 matches.appendleft(('l', f'{x3} {y3}'))
+                continue
+
+            # Identical start and end points: the arc is omitted entirely
+            if not x3 and not y3:
+                if string := string.strip():
+                    matches.appendleft((letter, string))
                 continue
 
             radii_ratio = ry / rx
@@ -230,11 +240,23 @@ def path(surface, node):
             angle1 = point_angle(xc, yc, 0, 0)
             angle2 = point_angle(xc, yc, xe, ye)
 
-            # Store the tangent angles
-            node.vertices.append((-angle1, -angle2))
+            # Store the tangent angles at both ends of the arc, expressed in
+            # user space along the drawing direction. In the squashed circle
+            # space the tangent is perpendicular to the radius; map it back
+            # through the y scaling and the rotation used when drawing.
+            tangent_sign = 1 if sweep else -1
+            tangents = []
+            for radius_angle in (angle1, angle2):
+                tangent_x = -sin(radius_angle) * tangent_sign
+                tangent_y = cos(radius_angle) * tangent_sign
+                tangent_x, tangent_y = rotate(
+                    tangent_x, tangent_y * radii_ratio, rotation)
+                tangents.append(atan2(tangent_y, tangent_x))
+            node.vertices.append((pi - tangents[0], tangents[1]))
 
             # Draw the arc
             surface.context.save()
+            surface.context.set_tolerance(0.00001)
             surface.context.translate(x1, y1)
             surface.context.rotate(rotation)
             surface.context.scale(1, radii_ratio)
