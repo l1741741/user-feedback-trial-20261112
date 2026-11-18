@@ -1,0 +1,13 @@
+from pathlib import Path
+from io import BytesIO
+import sys,json,html
+import cairosvg
+from PIL import Image
+OUT=Path(sys.argv[1]);OUT.mkdir(parents=True,exist_ok=True);checks=[];names=[]
+def render(n,body,scale=1):
+ names.append(n);s='<svg xmlns="http://www.w3.org/2000/svg" width="240" height="180">'+body+'<rect x="210" y="10" width="20" height="40" fill="blue"/></svg>';(OUT/(n+'.svg')).write_text(s);p=cairosvg.svg2png(bytestring=s.encode(),scale=scale);(OUT/(n+'.png')).write_bytes(p);return Image.open(BytesIO(p)).convert('RGBA')
+for n,tr,explicit in [('uniform','matrix(3 0 0 3 10 20)','M40 50H100V110'),('nonuniform','matrix(3 0 0 1.5 10 20)','M40 35H100V65'),('rotated','matrix(0 3 -2 0 130 10)','M110 40V100H70')]:
+ a=render(n,'<path d="M10 10H30V30" transform="'+tr+'" stroke="red" stroke-width="4" vector-effect="non-scaling-stroke" fill="none"/>');b=render(n+'-reference','<path d="'+explicit+'" stroke="red" stroke-width="4" fill="none"/>');checks.append({'name':n+'-host-space-explicit-path','different_pixels':sum(x!=y for x,y in zip(a.getdata(),b.getdata())),'passed':a.tobytes()==b.tobytes()});checks.append({'name':n+'-blue-sibling','passed':a.getpixel((220,30))==(0,0,255,255)})
+a=render('output-scale2','<path d="M10 10H30V30" transform="matrix(3 0 0 3 10 20)" stroke="red" stroke-width="4" vector-effect="non-scaling-stroke" fill="none"/>',2);b=render('output-scale2-reference','<path d="M40 50H100V110" stroke="red" stroke-width="4" fill="none"/>',2);checks.append({'name':'output-scale2-applies-to-host-stroke','passed':a.tobytes()==b.tobytes()})
+a=render('ordinary-scaled','<path d="M10 10H30V30" transform="matrix(3 0 0 3 10 20)" stroke="red" stroke-width="4" fill="none"/>');b=render('ordinary-scaled-reference','<path d="M40 50H100V110" stroke="red" stroke-width="12" fill="none"/>');checks.append({'name':'ordinary-stroke-keeps-scaling','passed':a.tobytes()==b.tobytes()})
+r={'source':cairosvg.__file__,'tests':len(checks),'passed':sum(c['passed'] for c in checks),'failed':sum(not c['passed'] for c in checks),'checks':checks};(OUT/'result.json').write_text(json.dumps(r,ensure_ascii=False,indent=2)+'\n');print(json.dumps(r,ensure_ascii=False,indent=2));(OUT/'gallery.html').write_text('<!doctype html><meta charset="utf-8"><title>固定描边与独立路径</title><style>body{font:20px system-ui;margin:24px}img{width:720px;max-width:100%;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>非缩放描边和宿主空间参考</h1><p>几何变换，固定4单位描边；普通描边在三倍缩放时仍为12单位。输出scale2同时放大宿主。</p>'+''.join('<h2>'+n+'</h2><p>SVG输入</p><img src="'+n+'.svg"><p>当次PNG</p><img src="'+n+'.png">' for n in names)+'<pre>'+html.escape(json.dumps(r,ensure_ascii=False,indent=2))+'</pre>');sys.exit(bool(r['failed']))

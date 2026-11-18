@@ -1,0 +1,22 @@
+{
+  "task_id": "rerun15-20261118-11716-vector-effect",
+  "final_sha": "9ddc1fcbd4fe719fafb6c0c05bc8c40e856db5fc",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/rerun15-20261118-11716-vector-effect/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11716-vector-effect/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/test_vector_effect.py"
+  ],
+  "exit_code": 0,
+  "tests": 38,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T06:38:33.790059+08:00"
+}

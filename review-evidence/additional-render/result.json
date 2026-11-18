@@ -1,0 +1,43 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11716-vector-effect/local-frozen-source/cairosvg/__init__.py",
+  "tests": 8,
+  "passed": 8,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "uniform-host-space-explicit-path",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "uniform-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "nonuniform-host-space-explicit-path",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "nonuniform-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "rotated-host-space-explicit-path",
+      "different_pixels": 0,
+      "passed": true
+    },
+    {
+      "name": "rotated-blue-sibling",
+      "passed": true
+    },
+    {
+      "name": "output-scale2-applies-to-host-stroke",
+      "passed": true
+    },
+    {
+      "name": "ordinary-stroke-keeps-scaling",
+      "passed": true
+    }
+  ]
+}

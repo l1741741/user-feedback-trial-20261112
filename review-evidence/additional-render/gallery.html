@@ -1,0 +1,43 @@
+<!doctype html><meta charset="utf-8"><title>固定描边与独立路径</title><style>body{font:20px system-ui;margin:24px}img{width:720px;max-width:100%;border:1px solid #aaa;background:#eee}pre{white-space:pre-wrap}</style><h1>非缩放描边和宿主空间参考</h1><p>几何变换，固定4单位描边；普通描边在三倍缩放时仍为12单位。输出scale2同时放大宿主。</p><h2>uniform</h2><p>SVG输入</p><img src="uniform.svg"><p>当次PNG</p><img src="uniform.png"><h2>uniform-reference</h2><p>SVG输入</p><img src="uniform-reference.svg"><p>当次PNG</p><img src="uniform-reference.png"><h2>nonuniform</h2><p>SVG输入</p><img src="nonuniform.svg"><p>当次PNG</p><img src="nonuniform.png"><h2>nonuniform-reference</h2><p>SVG输入</p><img src="nonuniform-reference.svg"><p>当次PNG</p><img src="nonuniform-reference.png"><h2>rotated</h2><p>SVG输入</p><img src="rotated.svg"><p>当次PNG</p><img src="rotated.png"><h2>rotated-reference</h2><p>SVG输入</p><img src="rotated-reference.svg"><p>当次PNG</p><img src="rotated-reference.png"><h2>output-scale2</h2><p>SVG输入</p><img src="output-scale2.svg"><p>当次PNG</p><img src="output-scale2.png"><h2>output-scale2-reference</h2><p>SVG输入</p><img src="output-scale2-reference.svg"><p>当次PNG</p><img src="output-scale2-reference.png"><h2>ordinary-scaled</h2><p>SVG输入</p><img src="ordinary-scaled.svg"><p>当次PNG</p><img src="ordinary-scaled.png"><h2>ordinary-scaled-reference</h2><p>SVG输入</p><img src="ordinary-scaled-reference.svg"><p>当次PNG</p><img src="ordinary-scaled-reference.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/rerun15-20261118-11716-vector-effect/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 8,
+  &quot;passed&quot;: 8,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;uniform-host-space-explicit-path&quot;,
+      &quot;different_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;uniform-blue-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;nonuniform-host-space-explicit-path&quot;,
+      &quot;different_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;nonuniform-blue-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;rotated-host-space-explicit-path&quot;,
+      &quot;different_pixels&quot;: 0,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;rotated-blue-sibling&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;output-scale2-applies-to-host-stroke&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;ordinary-stroke-keeps-scaling&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>
