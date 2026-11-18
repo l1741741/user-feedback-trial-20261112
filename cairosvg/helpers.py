@@ -4,7 +4,7 @@ Surface helpers.
 """
 
 import re
-from math import atan2, cos, hypot, radians, sin, tan
+from math import atan2, cos, hypot, isfinite, pi, radians, sin, tan
 
 from .surface import cairo
 from .url import parse_url
@@ -21,6 +21,60 @@ UNITS = {
 PAINT_URL = re.compile(r'(url\(.+\)) *(.*)')
 PATH_LETTERS = 'achlmqstvzACHLMQSTVZ'
 RECT = re.compile(r'rect\( ?(.+?) ?\)')
+
+# Mapping between the SVG stroke properties and the Cairo enumerations.
+# Every legal SVG keyword is present, including the explicit initial values
+# (``miter`` and ``butt``): they must reset a value inherited from an ancestor
+# instead of silently keeping the context's current setting.
+STROKE_LINE_CAP = {
+    'butt': cairo.LINE_CAP_BUTT,
+    'round': cairo.LINE_CAP_ROUND,
+    'square': cairo.LINE_CAP_SQUARE,
+}
+STROKE_LINE_JOIN = {
+    'miter': cairo.LINE_JOIN_MITER,
+    'round': cairo.LINE_JOIN_ROUND,
+    'bevel': cairo.LINE_JOIN_BEVEL,
+}
+
+
+def stroke_line_cap(value):
+    """Return the Cairo line cap matching the SVG keyword ``value``.
+
+    An absent or unknown value keeps the Cairo/SVG initial value (``butt``)
+    rather than leaving the context in an inherited or invalid state.
+
+    """
+    return STROKE_LINE_CAP.get((value or '').strip(), cairo.LINE_CAP_BUTT)
+
+
+def stroke_line_join(value):
+    """Return the Cairo line join matching the SVG keyword ``value``.
+
+    An absent or unknown value keeps the Cairo/SVG initial value (``miter``)
+    rather than leaving the context in an inherited or invalid state.
+
+    """
+    return STROKE_LINE_JOIN.get((value or '').strip(), cairo.LINE_JOIN_MITER)
+
+
+def stroke_miter_limit(value):
+    """Return a usable ``stroke-miterlimit`` from the SVG ``value``.
+
+    The SVG specification requires a number greater than or equal to 1.
+    Missing, unparsable, non-finite or out-of-range values fall back to the
+    SVG initial value of 4, so that an invalid document never aborts the
+    rendering or puts the Cairo context in an error state.
+
+    """
+    if value:
+        try:
+            limit = float(value)
+        except (TypeError, ValueError):
+            limit = 4.0
+        if isfinite(limit) and limit >= 1:
+            return limit
+    return 4.0
 
 
 class PointError(Exception):
@@ -187,6 +241,30 @@ def quadratic_points(x1, y1, x2, y2, x3, y3):
     xq2 = x2 * 2 / 3 + x3 / 3
     yq2 = y2 * 2 / 3 + y3 / 3
     return xq1, yq1, xq2, yq2, x3, y3
+
+
+def quadratic_angles(x1, y1, x2, y2, x3, y3):
+    """Return the tangent angles of a quadratic Bézier at its two ends.
+
+    The curve goes from ``(x1, y1)`` through control point ``(x2, y2)`` to
+    ``(x3, y3)``. The initial tangent points toward the control point and the
+    final tangent points from the control point to the end. Degenerate control
+    points (zero-length tangent) fall back to the angle of the chord, so that
+    markers and joins keep a usable orientation instead of a hard-coded zero
+    angle.
+
+    """
+    start = point_angle(x1, y1, x2, y2)
+    end = point_angle(x2, y2, x3, y3)
+    if (x1, y1) == (x2, y2) or (x2, y2) == (x3, y3):
+        chord = point_angle(x1, y1, x3, y3)
+        if (x1, y1) == (x2, y2):
+            start = chord
+        if (x2, y2) == (x3, y3):
+            end = chord
+    # ``vertices`` stores the angles as (pi - outgoing, incoming), mirroring
+    # the convention used by the straight-line segments.
+    return pi - start, end
 
 
 def rotate(x, y, angle):

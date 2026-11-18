@@ -10,7 +10,7 @@ from re import finditer
 from .bounding_box import calculate_bounding_box
 from .helpers import (
     PATH_LETTERS, clip_marker_box, node_format, normalize, point, point_angle,
-    preserve_ratio, quadratic_points, rotate, size)
+    preserve_ratio, quadratic_angles, quadratic_points, rotate, size)
 from .url import parse_url
 
 
@@ -332,7 +332,8 @@ def path(surface, node):
             xq1, yq1, xq2, yq2, xq3, yq3 = quadratic_points(
                 x1, y1, x2, y2, x3, y3)
             surface.context.rel_curve_to(xq1, yq1, xq2, yq2, xq3, yq3)
-            node.vertices.append((0, 0))
+            node.vertices.append(
+                quadratic_angles(x1, y1, x2, y2, x3, y3))
             current_point = current_point[0] + x3, current_point[1] + y3
 
         elif letter == 'Q':
@@ -343,7 +344,8 @@ def path(surface, node):
             xq1, yq1, xq2, yq2, xq3, yq3 = quadratic_points(
                 x1, y1, x2, y2, x3, y3)
             surface.context.curve_to(xq1, yq1, xq2, yq2, xq3, yq3)
-            node.vertices.append((0, 0))
+            node.vertices.append(
+                quadratic_angles(x1, y1, x2, y2, x3, y3))
             current_point = x3, y3
 
         elif letter == 's':
@@ -393,7 +395,8 @@ def path(surface, node):
             x3, y3, string = point(surface, string)
             xq1, yq1, xq2, yq2, xq3, yq3 = quadratic_points(
                 x1, y1, x2, y2, x3, y3)
-            node.vertices.append((0, 0))
+            node.vertices.append(
+                quadratic_angles(x1, y1, x2, y2, x3, y3))
             surface.context.rel_curve_to(xq1, yq1, xq2, yq2, xq3, yq3)
             current_point = current_point[0] + x3, current_point[1] + y3
 
@@ -413,7 +416,8 @@ def path(surface, node):
             x3, y3, string = point(surface, string)
             xq1, yq1, xq2, yq2, xq3, yq3 = quadratic_points(
                 x1, y1, x2, y2, x3, y3)
-            node.vertices.append((0, 0))
+            node.vertices.append(
+                quadratic_angles(x1, y1, x2, y2, x3, y3))
             surface.context.curve_to(xq1, yq1, xq2, yq2, xq3, yq3)
             current_point = x3, y3
 

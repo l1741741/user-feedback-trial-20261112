@@ -15,7 +15,8 @@ from .defs import (
     parse_all_defs, pattern, prepare_filter, radial_gradient, use)
 from .helpers import (
     UNITS, PointError, clip_rect, node_format, normalize, paint,
-    preserve_ratio, size, transform)
+    preserve_ratio, size, stroke_line_cap, stroke_line_join,
+    stroke_miter_limit, transform)
 from .image import image, invert_image
 from .parser import Tree
 from .path import draw_markers, path
@@ -335,18 +336,16 @@ class Surface(object):
             size(self, node.get('x'), 'x'),
             size(self, node.get('y'), 'y'))
 
-        # Set node's drawing informations if the ``node.tag`` method exists
-        line_cap = node.get('stroke-linecap')
-        if line_cap == 'square':
-            self.context.set_line_cap(cairo.LINE_CAP_SQUARE)
-        if line_cap == 'round':
-            self.context.set_line_cap(cairo.LINE_CAP_ROUND)
-
-        join_cap = node.get('stroke-linejoin')
-        if join_cap == 'round':
-            self.context.set_line_join(cairo.LINE_JOIN_ROUND)
-        if join_cap == 'bevel':
-            self.context.set_line_join(cairo.LINE_JOIN_BEVEL)
+        # Set node's drawing informations if the ``node.tag`` method exists.
+        # Always set the three stroke properties explicitly: the context is
+        # saved/restored around each node but the values are presentation
+        # attributes that must honor the local keyword (including the initial
+        # ``butt`` cap and ``miter`` join which reset an inherited value), and
+        # invalid keywords must not leave the context in a wrong state.
+        self.context.set_line_cap(
+            stroke_line_cap(node.get('stroke-linecap')))
+        self.context.set_line_join(
+            stroke_line_join(node.get('stroke-linejoin')))
 
         dash_array = normalize(node.get('stroke-dasharray', '')).split()
         if dash_array:
@@ -355,8 +354,8 @@ class Surface(object):
                 offset = size(self, node.get('stroke-dashoffset'))
                 self.context.set_dash(dashes, offset)
 
-        miter_limit = float(node.get('stroke-miterlimit', 4))
-        self.context.set_miter_limit(miter_limit)
+        self.context.set_miter_limit(
+            stroke_miter_limit(node.get('stroke-miterlimit')))
 
         # Clip
         rect_values = clip_rect(node.get('clip'))

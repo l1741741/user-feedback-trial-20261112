@@ -8,3 +8,6 @@ __pycache__
 .eggs
 .idea
 .pytest_cache
+# Local scratch for stroke-join investigation and artifact generation
+/work/
+/test_stroke_artifacts/_scratch/
