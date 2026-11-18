@@ -1,6 +1,11 @@
 CairoSVG is an SVG converter based on Cairo. It can export SVG files to PDF,
 EPS, PS, and PNG files.
 
+The ``negate_colors`` and ``invert_images`` options produce inverted
+previews: vector colors and raster images can be inverted independently,
+with alpha preserved and EXIF orientation honoured. See
+``demo_negate_invert/README.rst`` for a runnable example.
+
 * Free software: LGPL license
 * For Python 3.10+
 * Documentation: https://cairosvg.org/documentation/

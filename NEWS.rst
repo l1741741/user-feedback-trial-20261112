@@ -3,6 +3,27 @@
 ======
 
 
+Unreleased
+==========
+
+* Make ``negate_colors`` and ``invert_images`` independent and safe to
+  combine: each option is applied exactly once, vector colors follow
+  ``negate_colors`` only and raster pixels follow ``invert_images`` only.
+* ``invert_images`` now keeps the alpha channel of RGBA, palette (with a
+  transparent index) and ``tRNS`` RGB images, so transparent pixels stay
+  transparent instead of being flattened to black.
+* Apply EXIF orientation before inversion, including ``eXIf`` chunks in PNG
+  files, so the image geometry does not depend on ``invert_images``.
+* Scale 16-bit grayscale images to 8 bits instead of clamping them, and
+  raise an explicit ``ValueError`` for float, HSV, LAB and YCbCr images.
+* Propagate both options to pattern sub-surfaces; masks keep describing
+  transparency and are not color-mapped.
+* Fix parsing of percentage alpha values in ``rgba()`` colors.
+* Add regression tests and a runnable demo (``demo_negate_invert``) covering
+  transparency, EXIF orientation, clipping, scaling, image reuse and
+  repeated conversions.
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 

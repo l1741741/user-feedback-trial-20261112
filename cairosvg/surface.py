@@ -119,6 +119,18 @@ class Surface(object):
                        This does NOT restrict fetching of the main SVG input
                        specified via the ``url`` parameter.
                        Applications should validate input URLs to prevent SSRF.
+        :param negate_colors: A boolean replacing each vector fill, stroke,
+                              gradient stop and pattern color with its
+                              complementary RGB value.  Alpha is unchanged.
+        :param invert_images: A boolean replacing each raster image pixel with
+                              its complementary RGB value.  Alpha is unchanged,
+                              so transparent pixels stay transparent and
+                              EXIF orientation is applied before inversion.
+                              The two options are independent and can be
+                              combined; when both are false the output is
+                              unchanged.
+        :param background_color: A color string painted behind the document.
+                                 It is not affected by ``negate_colors``.
 
 
         Specifiy the output with:
@@ -153,10 +165,19 @@ class Surface(object):
         a file-like object, ``None`` (render in memory but do not write
         anything) or the built-in ``bytes`` as a marker.
 
+        ``map_rgba`` and ``map_image`` are the low-level hooks behind the
+        ``negate_colors`` and ``invert_images`` options: ``map_rgba`` maps a
+        ``(r, g, b, a)`` vector color tuple, ``map_image`` maps a decoded
+        Pillow image.  Pattern sub-surfaces inherit both, because patterns
+        are visible artwork; mask sub-surfaces deliberately do not, because
+        a mask describes transparency rather than displayed colors.
+
         Call the ``.finish()`` method to make sure that the output is
         actually written.
 
         """
+        self.map_rgba = map_rgba
+        self.map_image = map_image
         self.cairo = None
         self.context_width, self.context_height = parent_width, parent_height
         self.cursor_position = [0, 0]
@@ -225,8 +246,6 @@ class Surface(object):
             self.context.set_source_rgba(*color(background_color))
             self.context.paint()
 
-        self.map_rgba = map_rgba
-        self.map_image = map_image
         self.draw(tree)
 
     @property

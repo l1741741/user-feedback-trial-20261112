@@ -210,10 +210,24 @@ def color(string, opacity=1):
 
     match = RGBA.search(string)
     if match:
-        r, g, b, a = tuple(
-            float(i.strip(' %')) / 100 if '%' in i else float(i) / 255
-            for i in match.group(1).strip().split(','))
-        return (r, g, b, a * 255 * opacity)
+        red, green, blue, alpha = (
+            value.strip() for value in match.group(1).strip().split(','))
+
+        def component(value):
+            """Parse an RGB component given as a number or a percentage."""
+            return (
+                float(value.rstrip('%')) / 100 if value.endswith('%')
+                else float(value) / 255)
+
+        def alpha_component(value):
+            """Parse an alpha value given as a number or a percentage."""
+            return (
+                float(value.rstrip('%')) / 100 if value.endswith('%')
+                else float(value))
+
+        return (
+            component(red), component(green), component(blue),
+            alpha_component(alpha) * opacity)
 
     match = RGB.search(string)
     if match:
@@ -240,6 +254,13 @@ def color(string, opacity=1):
 
 
 def negate_color(rgba_tuple):
-    """Replace ``rgba_tuple`` with its complementary color."""
+    """Replace ``rgba_tuple`` with its complementary color.
+
+    Only the RGB channels are inverted; the alpha channel is kept as-is, so
+    ``transparent`` and semi-transparent colors keep their opacity.  This is
+    the vector counterpart of :func:`cairosvg.image.invert_image`, used by the
+    ``negate_colors`` option.
+
+    """
     r, g, b, a = rgba_tuple
     return (1 - r, 1 - g, 1 - b, a)

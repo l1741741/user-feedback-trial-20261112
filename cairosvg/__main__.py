@@ -36,10 +36,12 @@ def main(argv=None, stdout=None, stdin=None):
         '-b', '--background', metavar='COLOR', help='output background color')
     parser.add_argument(
         '-n', '--negate-colors', action='store_true',
-        help='replace every vector color with its complement')
+        help='replace every vector color (fill, stroke, gradient stop, '
+             'pattern color) with its complement; alpha is unchanged')
     parser.add_argument(
         '-i', '--invert-images', action='store_true',
-        help='replace every raster pixel with its complementary color')
+        help='replace every raster image color with its complement; alpha '
+             'is unchanged, so transparent pixels stay transparent')
     parser.add_argument(
         '-u', '--unsafe', action='store_true',
         help='fetch external files, resolve XML entities and allow very large '

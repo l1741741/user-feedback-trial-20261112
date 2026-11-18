@@ -145,6 +145,8 @@ def paint_mask(surface, node, name, opacity):
         mask_node['viewBox'] = '{x} {y} {width} {height}'.format(**mask_node)
 
     from .surface import SVGSurface  # circular import
+    # Masks describe transparency, not displayed colors: they deliberately
+    # do not inherit ``map_rgba``/``map_image`` from the parent surface.
     mask_surface = SVGSurface(mask_node, None, surface.dpi, surface)
     surface.context.save()
     surface.context.translate(x, y)
@@ -256,7 +258,11 @@ def draw_pattern(surface, node, name, opacity):
         return False
 
     from .surface import SVGSurface  # circular import
-    pattern_surface = SVGSurface(pattern_node, None, surface.dpi, surface)
+    # Patterns are part of the visible artwork, so they inherit the color
+    # and image mappings and follow the same options as the parent document.
+    pattern_surface = SVGSurface(
+        pattern_node, None, surface.dpi, surface,
+        map_rgba=surface.map_rgba, map_image=surface.map_image)
     pattern_pattern = cairo.SurfacePattern(pattern_surface.cairo)
     pattern_pattern.set_extend(cairo.EXTEND_REPEAT)
     pattern_pattern.set_matrix(cairo.Matrix(
