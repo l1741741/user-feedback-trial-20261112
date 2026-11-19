@@ -1,0 +1,42 @@
+{
+  "task_id": "middleware-startfix-20261120-13861-consumer-lease",
+  "final_sha": "0bbb009acb34d29af998ff420d8cfd19ebbe9159",
+  "regression": {
+    "exit_code": 0,
+    "log": "/Users/lichao/Desktop/xpert/user-feedback/runs/middleware-20261120/middleware-startfix-20261120-13861-consumer-lease/regression-preparation.log",
+    "tests": 355,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 105
+  },
+  "targets": [
+    "huey/tests/test_api.py",
+    "huey/tests/test_storage.py",
+    "huey/tests/test_consumer.py",
+    "huey/tests/test_serializer.py",
+    "huey/tests/test_priority.py",
+    "huey/tests/test_signals.py",
+    "huey/tests/test_reliable.py",
+    "huey/tests/test_reliable_subprocess.py"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "NATIVE-RUNTIME.md",
+    "docs/api.rst",
+    "docs/consumer.rst",
+    "docs/index.rst",
+    "docs/reliable.rst",
+    "huey/api.py",
+    "huey/consumer.py",
+    "huey/consumer_options.py",
+    "huey/storage.py",
+    "huey/tests/__init__.py",
+    "huey/tests/reliable_helper.py",
+    "huey/tests/reliable_tasks.py",
+    "huey/tests/test_reliable.py",
+    "huey/tests/test_reliable_subprocess.py",
+    "huey/tests/test_storage.py"
+  ],
+  "review_status": "AWAITING_INDEPENDENT_MAIN_AGENT_REVIEW",
+  "independent_acceptance_required": true
+}

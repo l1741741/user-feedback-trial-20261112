@@ -1,0 +1,16 @@
+........................................................................ [ 20%]
+..............................................s..........sssssssssssssss [ 40%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssss.............. [ 60%]
+s.........sssssssssssssss.........s.....ssssssssss...s........ss........ [ 81%]
+s..................................................................      [100%]
+=============================== warnings summary ===============================
+huey/tests/test_api.py:32
+  /Users/lichao/Desktop/xpert/user-feedback/runs/middleware-20261120/middleware-startfix-20261120-13861-consumer-lease/local-frozen-source/huey/tests/test_api.py:32: PytestCollectionWarning: cannot collect test class 'TestError' because it has a __init__ constructor (from: huey/tests/test_api.py)
+    class TestError(Exception):
+
+huey/tests/test_consumer.py:30
+  /Users/lichao/Desktop/xpert/user-feedback/runs/middleware-20261120/middleware-startfix-20261120-13861-consumer-lease/local-frozen-source/huey/tests/test_consumer.py:30: PytestCollectionWarning: cannot collect test class 'TestConsumer' because it has a __init__ constructor (from: huey/tests/test_consumer.py)
+    class TestConsumer(Consumer):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+250 passed, 105 skipped, 2 warnings in 21.37s
