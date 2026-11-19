@@ -1,0 +1,600 @@
+<!doctype html><meta charset="utf-8"><title>半透明混合与手算结果</title><style>body{font:20px system-ui;margin:24px}img{width:600px;max-width:100%;border:1px solid #aaa;background:repeating-conic-gradient(#eee 0% 25%,#fff 0% 50%) 50%/20px 20px}pre{white-space:pre-wrap}</style><h1>五种混合模式及透明度对照</h1><p>背景蓝色50%，前景红色50%；重叠区alpha约192。叶子与组参考应一致，透明边缘不发黑。</p><h2>normal-over-half-blue</h2><p>SVG输入</p><img src="normal-over-half-blue.svg"><p>当次PNG</p><img src="normal-over-half-blue.png"><h2>normal-group-reference</h2><p>SVG输入</p><img src="normal-group-reference.svg"><p>当次PNG</p><img src="normal-group-reference.png"><h2>multiply-over-half-blue</h2><p>SVG输入</p><img src="multiply-over-half-blue.svg"><p>当次PNG</p><img src="multiply-over-half-blue.png"><h2>multiply-group-reference</h2><p>SVG输入</p><img src="multiply-group-reference.svg"><p>当次PNG</p><img src="multiply-group-reference.png"><h2>screen-over-half-blue</h2><p>SVG输入</p><img src="screen-over-half-blue.svg"><p>当次PNG</p><img src="screen-over-half-blue.png"><h2>screen-group-reference</h2><p>SVG输入</p><img src="screen-group-reference.svg"><p>当次PNG</p><img src="screen-group-reference.png"><h2>darken-over-half-blue</h2><p>SVG输入</p><img src="darken-over-half-blue.svg"><p>当次PNG</p><img src="darken-over-half-blue.png"><h2>darken-group-reference</h2><p>SVG输入</p><img src="darken-group-reference.svg"><p>当次PNG</p><img src="darken-group-reference.png"><h2>lighten-over-half-blue</h2><p>SVG输入</p><img src="lighten-over-half-blue.svg"><p>当次PNG</p><img src="lighten-over-half-blue.png"><h2>lighten-group-reference</h2><p>SVG输入</p><img src="lighten-group-reference.svg"><p>当次PNG</p><img src="lighten-group-reference.png"><h2>multiply-gradient</h2><p>SVG输入</p><img src="multiply-gradient.svg"><p>当次PNG</p><img src="multiply-gradient.png"><h2>multiply-zero-source</h2><p>SVG输入</p><img src="multiply-zero-source.svg"><p>当次PNG</p><img src="multiply-zero-source.png"><h2>screen-gradient</h2><p>SVG输入</p><img src="screen-gradient.svg"><p>当次PNG</p><img src="screen-gradient.png"><h2>screen-zero-source</h2><p>SVG输入</p><img src="screen-zero-source.svg"><p>当次PNG</p><img src="screen-zero-source.png"><h2>shared-filter</h2><p>SVG输入</p><img src="shared-filter.svg"><p>当次PNG</p><img src="shared-filter.png"><h2>unsupported-normal-fallback</h2><p>SVG输入</p><img src="unsupported-normal-fallback.svg"><p>当次PNG</p><img src="unsupported-normal-fallback.png"><h2>unfiltered-reference</h2><p>SVG输入</p><img src="unfiltered-reference.svg"><p>当次PNG</p><img src="unfiltered-reference.png"><pre>{
+  &quot;source&quot;: &quot;/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/retry-user-two-20261118-12596-filter-blend/local-frozen-source/cairosvg/__init__.py&quot;,
+  &quot;tests&quot;: 37,
+  &quot;passed&quot;: 37,
+  &quot;failed&quot;: 0,
+  &quot;checks&quot;: [
+    {
+      &quot;name&quot;: &quot;normal-overlap&quot;,
+      &quot;point&quot;: [
+        80,
+        60
+      ],
+      &quot;actual&quot;: [
+        170,
+        0,
+        85,
+        192
+      ],
+      &quot;expected&quot;: [
+        170,
+        0,
+        85,
+        191
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;normal-source-only&quot;,
+      &quot;point&quot;: [
+        140,
+        60
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;normal-back-only&quot;,
+      &quot;point&quot;: [
+        30,
+        60
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        128
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        128
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;normal-outside&quot;,
+      &quot;point&quot;: [
+        220,
+        140
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;normal-leaf-group-equivalent&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;multiply-overlap&quot;,
+      &quot;point&quot;: [
+        80,
+        60
+      ],
+      &quot;actual&quot;: [
+        85,
+        0,
+        85,
+        192
+      ],
+      &quot;expected&quot;: [
+        85,
+        0,
+        85,
+        191
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;multiply-source-only&quot;,
+      &quot;point&quot;: [
+        140,
+        60
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;multiply-back-only&quot;,
+      &quot;point&quot;: [
+        30,
+        60
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        128
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        128
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;multiply-outside&quot;,
+      &quot;point&quot;: [
+        220,
+        140
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;multiply-leaf-group-equivalent&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;screen-overlap&quot;,
+      &quot;point&quot;: [
+        80,
+        60
+      ],
+      &quot;actual&quot;: [
+        170,
+        0,
+        170,
+        192
+      ],
+      &quot;expected&quot;: [
+        170,
+        0,
+        170,
+        191
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;screen-source-only&quot;,
+      &quot;point&quot;: [
+        140,
+        60
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;screen-back-only&quot;,
+      &quot;point&quot;: [
+        30,
+        60
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        128
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        128
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;screen-outside&quot;,
+      &quot;point&quot;: [
+        220,
+        140
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;screen-leaf-group-equivalent&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;darken-overlap&quot;,
+      &quot;point&quot;: [
+        80,
+        60
+      ],
+      &quot;actual&quot;: [
+        85,
+        0,
+        85,
+        192
+      ],
+      &quot;expected&quot;: [
+        85,
+        0,
+        85,
+        191
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;darken-source-only&quot;,
+      &quot;point&quot;: [
+        140,
+        60
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;darken-back-only&quot;,
+      &quot;point&quot;: [
+        30,
+        60
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        128
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        128
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;darken-outside&quot;,
+      &quot;point&quot;: [
+        220,
+        140
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;darken-leaf-group-equivalent&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;lighten-overlap&quot;,
+      &quot;point&quot;: [
+        80,
+        60
+      ],
+      &quot;actual&quot;: [
+        170,
+        0,
+        170,
+        192
+      ],
+      &quot;expected&quot;: [
+        170,
+        0,
+        170,
+        191
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;lighten-source-only&quot;,
+      &quot;point&quot;: [
+        140,
+        60
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;lighten-back-only&quot;,
+      &quot;point&quot;: [
+        30,
+        60
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        128
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        128
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;lighten-outside&quot;,
+      &quot;point&quot;: [
+        220,
+        140
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        0,
+        0
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;lighten-leaf-group-equivalent&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;multiply-gradient-20&quot;,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        127
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;multiply-gradient-70&quot;,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        63
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;multiply-gradient-118&quot;,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        2
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;multiply-zero-source-no-hidden-colour&quot;,
+      &quot;point&quot;: [
+        30,
+        30
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        128
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        128
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;screen-gradient-20&quot;,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        127
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;screen-gradient-70&quot;,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        63
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;screen-gradient-118&quot;,
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        2
+      ],
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;screen-zero-source-no-hidden-colour&quot;,
+      &quot;point&quot;: [
+        30,
+        30
+      ],
+      &quot;actual&quot;: [
+        0,
+        0,
+        255,
+        128
+      ],
+      &quot;expected&quot;: [
+        0,
+        0,
+        255,
+        128
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;shared-first&quot;,
+      &quot;point&quot;: [
+        40,
+        40
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;shared-second&quot;,
+      &quot;point&quot;: [
+        120,
+        40
+      ],
+      &quot;actual&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;expected&quot;: [
+        255,
+        0,
+        0,
+        128
+      ],
+      &quot;tolerance&quot;: 3,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;shared-definition-unchanged-repeat&quot;,
+      &quot;passed&quot;: true
+    },
+    {
+      &quot;name&quot;: &quot;unsupported-mode-explicit-warning-normal-output&quot;,
+      &quot;passed&quot;: true
+    }
+  ]
+}</pre>

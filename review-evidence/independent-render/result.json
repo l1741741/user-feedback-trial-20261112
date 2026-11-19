@@ -1,0 +1,26 @@
+{
+  "slug": "filter-blend",
+  "renderer_source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/retry-user-two-20261118-12596-filter-blend/local-frozen-source/cairosvg/__init__.py",
+  "tests": 3,
+  "passed": 3,
+  "failures": 0,
+  "cases": [
+    {
+      "name": "ordinary-render-preserved",
+      "passed": true
+    },
+    {
+      "name": "transparent-background-multiply-keeps-visible-colour",
+      "passed": true
+    },
+    {
+      "name": "screen-red-over-blue-is-magenta",
+      "passed": true
+    }
+  ],
+  "images": [
+    "ordinary",
+    "transparent-blend",
+    "screen"
+  ]
+}

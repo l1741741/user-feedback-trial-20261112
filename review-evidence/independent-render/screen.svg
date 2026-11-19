@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="120" ><defs><filter id="f"><feBlend mode="screen" in="SourceGraphic" in2="BackgroundImage"/></filter></defs><rect x="0" y="0" width="120" height="100" fill="blue"/><rect x="20" y="20" width="100" height="60" fill="red" filter="url(#f)"/></svg>

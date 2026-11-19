@@ -1,0 +1,600 @@
+{
+  "source": "/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/retry-user-two-20261118-12596-filter-blend/local-frozen-source/cairosvg/__init__.py",
+  "tests": 37,
+  "passed": 37,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "normal-overlap",
+      "point": [
+        80,
+        60
+      ],
+      "actual": [
+        170,
+        0,
+        85,
+        192
+      ],
+      "expected": [
+        170,
+        0,
+        85,
+        191
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "normal-source-only",
+      "point": [
+        140,
+        60
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "normal-back-only",
+      "point": [
+        30,
+        60
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "normal-outside",
+      "point": [
+        220,
+        140
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "normal-leaf-group-equivalent",
+      "passed": true
+    },
+    {
+      "name": "multiply-overlap",
+      "point": [
+        80,
+        60
+      ],
+      "actual": [
+        85,
+        0,
+        85,
+        192
+      ],
+      "expected": [
+        85,
+        0,
+        85,
+        191
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "multiply-source-only",
+      "point": [
+        140,
+        60
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "multiply-back-only",
+      "point": [
+        30,
+        60
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "multiply-outside",
+      "point": [
+        220,
+        140
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "multiply-leaf-group-equivalent",
+      "passed": true
+    },
+    {
+      "name": "screen-overlap",
+      "point": [
+        80,
+        60
+      ],
+      "actual": [
+        170,
+        0,
+        170,
+        192
+      ],
+      "expected": [
+        170,
+        0,
+        170,
+        191
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "screen-source-only",
+      "point": [
+        140,
+        60
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "screen-back-only",
+      "point": [
+        30,
+        60
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "screen-outside",
+      "point": [
+        220,
+        140
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "screen-leaf-group-equivalent",
+      "passed": true
+    },
+    {
+      "name": "darken-overlap",
+      "point": [
+        80,
+        60
+      ],
+      "actual": [
+        85,
+        0,
+        85,
+        192
+      ],
+      "expected": [
+        85,
+        0,
+        85,
+        191
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "darken-source-only",
+      "point": [
+        140,
+        60
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "darken-back-only",
+      "point": [
+        30,
+        60
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "darken-outside",
+      "point": [
+        220,
+        140
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "darken-leaf-group-equivalent",
+      "passed": true
+    },
+    {
+      "name": "lighten-overlap",
+      "point": [
+        80,
+        60
+      ],
+      "actual": [
+        170,
+        0,
+        170,
+        192
+      ],
+      "expected": [
+        170,
+        0,
+        170,
+        191
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "lighten-source-only",
+      "point": [
+        140,
+        60
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "lighten-back-only",
+      "point": [
+        30,
+        60
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "lighten-outside",
+      "point": [
+        220,
+        140
+      ],
+      "actual": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "lighten-leaf-group-equivalent",
+      "passed": true
+    },
+    {
+      "name": "multiply-gradient-20",
+      "actual": [
+        255,
+        0,
+        0,
+        127
+      ],
+      "passed": true
+    },
+    {
+      "name": "multiply-gradient-70",
+      "actual": [
+        255,
+        0,
+        0,
+        63
+      ],
+      "passed": true
+    },
+    {
+      "name": "multiply-gradient-118",
+      "actual": [
+        255,
+        0,
+        0,
+        2
+      ],
+      "passed": true
+    },
+    {
+      "name": "multiply-zero-source-no-hidden-colour",
+      "point": [
+        30,
+        30
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "screen-gradient-20",
+      "actual": [
+        255,
+        0,
+        0,
+        127
+      ],
+      "passed": true
+    },
+    {
+      "name": "screen-gradient-70",
+      "actual": [
+        255,
+        0,
+        0,
+        63
+      ],
+      "passed": true
+    },
+    {
+      "name": "screen-gradient-118",
+      "actual": [
+        255,
+        0,
+        0,
+        2
+      ],
+      "passed": true
+    },
+    {
+      "name": "screen-zero-source-no-hidden-colour",
+      "point": [
+        30,
+        30
+      ],
+      "actual": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "expected": [
+        0,
+        0,
+        255,
+        128
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "shared-first",
+      "point": [
+        40,
+        40
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "shared-second",
+      "point": [
+        120,
+        40
+      ],
+      "actual": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "expected": [
+        255,
+        0,
+        0,
+        128
+      ],
+      "tolerance": 3,
+      "passed": true
+    },
+    {
+      "name": "shared-definition-unchanged-repeat",
+      "passed": true
+    },
+    {
+      "name": "unsupported-mode-explicit-warning-normal-output",
+      "passed": true
+    }
+  ]
+}

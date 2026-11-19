@@ -1,0 +1,22 @@
+{
+  "task_id": "retry-user-two-20261118-12596-filter-blend",
+  "final_sha": "f615431551820ae1de16e67ff61c40013cfd5587",
+  "command": [
+    "/Users/lichao/.local/share/user-feedback/graphics/20261117/retry-user-two-20261118-12596-filter-blend/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "-o",
+    "addopts=",
+    "--junitxml=/Users/lichao/Desktop/xpert/user-feedback/runs/rerun15-20261118/retry-user-two-20261118-12596-filter-blend/independent-validation.xml",
+    "cairosvg/test_api.py",
+    "cairosvg/tests/test_blend.py"
+  ],
+  "exit_code": 0,
+  "tests": 20,
+  "failures": 0,
+  "errors": 0,
+  "checked_at": "2026-11-19T09:03:09.095967+08:00"
+}
