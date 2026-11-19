@@ -95,12 +95,18 @@ class Huey(object):
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
                  use_zlib=False, immediate_use_memory=True, storage_class=None,
-                 store_intermediate_errors=True, **storage_kwargs):
+                 store_intermediate_errors=True, durable_revoke=False,
+                 **storage_kwargs):
 
         self.name = name
         self.results = results
         self.store_none = store_none
         self.store_intermediate_errors = store_intermediate_errors
+        # Opt-in durable revocation. When enabled, revoke()/restore() are
+        # persisted with a generation counter that lets multiple processes
+        # observe the same state and prevents stale workers from resurrecting
+        # a task (or re-arming a revoke that a restore already superseded).
+        self.durable_revoke = durable_revoke
         self.utc = utc
         self._immediate = immediate
         self.immediate_use_memory = immediate_use_memory
@@ -113,6 +119,7 @@ class Huey(object):
         if storage_class is not None:
             self.storage_class = storage_class
         self.storage = self.create_storage()
+        self._check_durable_supported()
 
         # Allow overriding the default TaskWrapper implementation.
         self.task_wrapper_class = self.get_task_wrapper_class()
@@ -162,6 +169,9 @@ class Huey(object):
             self._immediate = value
             # If we are using different storage engines for immediate-mode
             # versus normal mode, we need to recreate the storage engine.
+            # When the swap lands on a backend without durable revocations
+            # (e.g. the in-memory immediate storage), ``_durable`` evaluates
+            # to False and the legacy revoke path is used for that mode.
             if self.immediate_use_memory:
                 self.storage = self.create_storage()
 
@@ -416,7 +426,7 @@ class Huey(object):
 
         if not self.ready_to_run(task, timestamp):
             self.add_schedule(task)
-        elif self.is_revoked(task, timestamp, False):
+        elif self._is_revoked_for_execution(task, timestamp):
             logger.warning('Task %s was revoked, not executing', task)
             self._emit(S.SIGNAL_REVOKED, task)
             self._abort_chord_member(task, SKIPPED)
@@ -428,6 +438,19 @@ class Huey(object):
             logger.info('Executing %s', task)
             self._emit(S.SIGNAL_EXECUTING, task)
             return self._execute(task, timestamp)
+
+    def _is_revoked_for_execution(self, task, timestamp):
+        if self._durable:
+            # Atomically check the durable revocation and consume a matching
+            # revoke_once record. Only one consumer can observe a "once"
+            # revocation, so it can never silently become permanent.
+            #
+            # Periodic tasks are constructed with a fresh id on every
+            # occurrence, so only the class scope can apply to them.
+            task_id = None if isinstance(task, PeriodicTask) else task.id
+            return self.storage.consume_durable_revocation(
+                task_id, self._task_name(type(task)), timestamp)
+        return self.is_revoked(task, timestamp, False)
 
     def _execute(self, task, timestamp):
         if self._pre_execute:
@@ -505,10 +528,17 @@ class Huey(object):
 
         # Clear the flag if this instance of the task was revoked after it
         # began executing. Expiring storages implement pop_data as a peek.
-        if not isinstance(task, PeriodicTask):
+        # Durable revocations live in their own table and are never cleared
+        # by a finishing worker -- clearing them here would let a stale
+        # executor overwrite a newer restore.
+        if not self._durable and not isinstance(task, PeriodicTask):
             self.delete(task.revoke_id)
 
         store = self.results and not isinstance(task, PeriodicTask)
+        if self._durable:
+            return self._settle_durable(
+                task, exception, task_value, retry_eta, store)
+
         if exception is None:
             if store and (task_value is not None or self.store_none):
                 self.put_result(task.id, task_value)
@@ -540,6 +570,134 @@ class Huey(object):
             else:
                 self._emit(S.SIGNAL_RETRYING, task)
                 self._requeue_task(task, self._get_timestamp(), retry_eta)
+
+        return task_value
+
+    def _delivery_write(self, task, retry_eta=None):
+        """
+        Convert a follow-up delivery into a durable settlement write.
+
+        Mirrors ``enqueue``/``_requeue_task`` exactly, including their (slightly
+        different) handling of task expiration:
+
+        * An immediate delivery mirrors ``enqueue()``, which resolves the
+          expiration time relative to now.
+        * A scheduled retry mirrors ``add_schedule()``, which leaves the
+          already-resolved expiration time untouched.
+
+        Returns ``(write, signal)``.
+        """
+        if retry_eta is not None:
+            task.eta = retry_eta
+            data = self.serialize_task(task)
+            return ('schedule', data, retry_eta), S.SIGNAL_SCHEDULED
+        if task.expires:
+            task.resolve_expires(self.utc)
+        data = self.serialize_task(task)
+        return ('queue', data, task.priority), S.SIGNAL_ENQUEUED
+
+    def _settle_durable(self, task, exception, task_value, retry_eta, store):
+        """
+        Finish a task in durable-revocation mode.
+
+        Follow-up deliveries (retry, ``on_complete`` successor, ``on_error``
+        successor) are written in the *same* SQLite transaction that checks
+        for an active revocation. If a revoke committed first, none of those
+        deliveries is created -- so a successful revoke cannot be bypassed by
+        a retry that was arranged concurrently with it. Result values for the
+        business function that already ran are still recorded.
+
+        Signals and in-process ``post_execute`` hooks are always emitted, so
+        observability is unchanged.
+        """
+        writes, signals = [], []
+        task_name = self._task_name(type(task))
+        final = False
+        chord_error = None
+
+        if exception is None:
+            if store and (task_value is not None or self.store_none):
+                self.put_result(task.id, task_value)
+            if task.on_complete:
+                task.on_complete.extend_data(task_value)
+                write, sig = self._delivery_write(task.on_complete)
+                writes.append(write)
+                signals.append((sig, task.on_complete))
+        else:
+            final = not task.retries
+            surface = final or (self.store_intermediate_errors and
+                                not isinstance(exception, RETRYING_EXCEPTIONS))
+            if surface:
+                chord_error = error = Error(
+                    self.build_error_result(task, exception))
+                next_task = task if store else None
+                while next_task is not None:
+                    self.put_result(next_task.id, error)
+                    next_task = next_task.on_complete if final else None
+            if surface and task.on_error:
+                handler = copy.copy(task.on_error)
+                handler.extend_data(exception)
+                write, sig = self._delivery_write(handler)
+                writes.append(write)
+                signals.append((sig, handler))
+            if not final:
+                task.retries -= 1
+                if retry_eta is not None or task.retry_delay:
+                    if retry_eta is None:
+                        # Mirror _requeue_task(): the delay is measured from
+                        # the moment the worker settles, not from the task's
+                        # original execution timestamp.
+                        retry_eta = self._get_timestamp() + datetime.timedelta(
+                            seconds=task.retry_delay)
+                        if task.retry_backoff:
+                            task.retry_delay *= task.retry_backoff
+                    write, sig = self._delivery_write(task, retry_eta=retry_eta)
+                else:
+                    write, sig = self._delivery_write(task)
+                writes.append(write)
+                signals.append((sig, task))
+
+        applied = self.storage.settle_durable_revocation(
+            None if isinstance(task, PeriodicTask) else task.id, task_name,
+            self._get_timestamp(), writes)
+
+        self._run_post_execute(task, task_value, exception)
+        if exception is None:
+            self._emit(S.SIGNAL_COMPLETE, task)
+
+        if applied:
+            if exception is not None and not final:
+                self._emit(S.SIGNAL_RETRYING, task)
+            for sig, followup in signals:
+                if sig == S.SIGNAL_SCHEDULED:
+                    logger.info('Added task %s to schedule, eta %s',
+                                followup.id, followup.eta)
+                self._emit(sig, followup)
+        elif signals:
+            logger.warning('Task %s was revoked while executing; %d '
+                           'follow-up delivery(ies) suppressed.', task.id,
+                           len(signals))
+
+        # Chord bookkeeping is intentionally outside the delivery fence: the
+        # batch must always converge.
+        #
+        # * If this task already ran to completion as the chord member (its
+        #   tail), report whatever it produced even if a revoke suppressed its
+        #   follow-ups.
+        # * A final failure always reports the error.
+        # * If the follow-up that would have carried the member's chord config
+        #   was suppressed by a revoke -- a pipeline successor, or a retry that
+        #   will never happen -- the member is reported as skipped so the
+        #   callback does not wait on a phantom member forever.
+        if exception is None:
+            if task.chord_config is not None:
+                self._check_chord(task.chord_config, task_value)
+            elif not applied and task.on_complete is not None:
+                self._abort_chord_member(task.on_complete, SKIPPED)
+        elif final:
+            self._abort_chord_member(task, chord_error)
+        elif not applied:
+            self._abort_chord_member(task, SKIPPED)
 
         return task_value
 
@@ -626,27 +784,100 @@ class Huey(object):
             task_class = task_class.task_class
         return ':'.join((key, self._registry.task_to_string(task_class)))
 
-    def revoke_all(self, task_class, revoke_until=None, revoke_once=False):
+    def _task_name(self, task_class):
+        if isinstance(task_class, TaskWrapper):
+            task_class = task_class.task_class
+        if inspect.isclass(task_class):
+            return self._registry.task_to_string(task_class)
+        return self._registry.task_to_string(type(task_class))
+
+    @property
+    def _durable(self):
+        return (self.durable_revoke and
+                getattr(self.storage, 'supports_durable_revoke', False))
+
+    def _check_durable_supported(self):
+        # Immediate mode always runs against the in-memory broker (unless
+        # immediate_use_memory=False). Durable revocations are meaningless
+        # there because nothing crosses a process boundary, so the legacy
+        # path is used silently for that debugging mode. Any other backend
+        # that cannot honor the option is rejected up front rather than
+        # silently downgrading.
+        if self._immediate and self.immediate_use_memory:
+            return
+        if self.durable_revoke and not getattr(
+                self.storage, 'supports_durable_revoke', False):
+            raise ConfigurationError(
+                'durable_revoke=True requires a storage backend that supports '
+                'durable revocations (currently SqliteHuey); it is not '
+                'compatible with %s.' % type(self.storage).__name__)
+
+    def _durable_target(self, task, allow_class=True):
+        """
+        Map the accepted task forms onto ``(scope, target)`` pairs for the
+        durable revocation store.
+
+        A TaskWrapper or task class targets every instance of that task; a
+        Result or Task targets one instance. The returned pair selects the
+        primary key; callers that need "effective" state for a task instance
+        pass both its id and its class name to the storage.
+        """
+        if isinstance(task, TaskWrapper) or inspect.isclass(task):
+            return 'class', self._task_name(task)
+        if isinstance(task, Result):
+            task = task.task
+        if isinstance(task, Task):
+            return 'task', task.id
+        return 'task', task
+
+    def revoke_all(self, task_class, revoke_until=None, revoke_once=False,
+                   request_id=None):
         if revoke_until is not None:
             revoke_until = normalize_time(revoke_until, utc=self.utc)
+        if self._durable:
+            return self.storage.revoke_durable(
+                'class', self._task_name(task_class), revoke_until,
+                revoke_once, request_id=request_id)
         self.put(self._task_key(task_class, 'rt'), (revoke_until, revoke_once))
 
-    def restore_all(self, task_class):
+    def restore_all(self, task_class, request_id=None):
+        if self._durable:
+            return self.storage.restore_durable(
+                'class', self._task_name(task_class), request_id=request_id)
         return self.delete(self._task_key(task_class, 'rt'))
 
-    def revoke(self, task, revoke_until=None, revoke_once=False):
+    def revoke(self, task, revoke_until=None, revoke_once=False,
+               request_id=None):
         if revoke_until is not None:
             revoke_until = normalize_time(revoke_until, utc=self.utc)
+        if self._durable:
+            scope, target = self._durable_target(task)
+            return self.storage.revoke_durable(
+                scope, target, revoke_until, revoke_once,
+                request_id=request_id)
         self.put(task.revoke_id, (revoke_until, revoke_once))
 
-    def restore(self, task):
+    def restore(self, task, request_id=None):
         # Return value indicates whether the task was in fact revoked.
+        if self._durable:
+            scope, target = self._durable_target(task)
+            return self.storage.restore_durable(
+                scope, target, request_id=request_id)
         return self.delete(task.revoke_id)
 
-    def revoke_by_id(self, id, revoke_until=None, revoke_once=False):
+    def revoke_by_id(self, id, revoke_until=None, revoke_once=False,
+                     request_id=None):
+        if self._durable:
+            if revoke_until is not None:
+                revoke_until = normalize_time(revoke_until, utc=self.utc)
+            return self.storage.revoke_durable(
+                'task', id, revoke_until, revoke_once, request_id=request_id)
         return self.revoke(Task(id=id), revoke_until, revoke_once)
 
-    def restore_by_id(self, id):
+    def restore_by_id(self, id, request_id=None):
+        if self._durable:
+            return self.storage.restore_durable('task', id,
+                                                request_id=request_id)
         return self.restore(Task(id=id))
 
     def _check_revoked(self, data, timestamp=None, peek=True):
@@ -683,7 +914,35 @@ class Huey(object):
             return [task.revoke_id, self._task_key(type(task), 'rt')]
         return [Task(id=task).revoke_id]
 
+    def _durable_lookup(self, task):
+        """
+        Map the accepted ``is_revoked`` argument forms onto the
+        ``(task_id, task_name)`` pair used by the durable revocation store.
+
+        A class or TaskWrapper revokes every instance of that task; a Result
+        or Task is instance-level (and also reflects its class); a bare id is
+        instance-level only, matching the legacy behavior where an id has no
+        task class to look up.
+        """
+        if isinstance(task, TaskWrapper) or inspect.isclass(task):
+            return None, self._task_name(task)
+        if isinstance(task, Result):
+            task = task.task
+        if isinstance(task, Task):
+            return task.id, self._task_name(type(task))
+        return task, None
+
+    def _durable_revoked(self, task, timestamp=None):
+        if timestamp is None:
+            timestamp = self._get_timestamp()
+        task_id, task_name = self._durable_lookup(task)
+        record = self.storage.get_durable_revocation(
+            task_id, task_name, timestamp)
+        return record is not None
+
     def is_revoked(self, task, timestamp=None, peek=True):
+        if self._durable:
+            return self._durable_revoked(task, timestamp)
         keys = self._revoke_keys(task)
         data = self.storage.peek_many(keys)
         for key in keys:
@@ -990,11 +1249,12 @@ class TaskWrapper(object):
     def is_revoked(self, timestamp=None, peek=True):
         return self.huey.is_revoked(self.task_class, timestamp, peek)
 
-    def revoke(self, revoke_until=None, revoke_once=False):
-        self.huey.revoke_all(self.task_class, revoke_until, revoke_once)
+    def revoke(self, revoke_until=None, revoke_once=False, request_id=None):
+        return self.huey.revoke_all(self.task_class, revoke_until, revoke_once,
+                                    request_id=request_id)
 
-    def restore(self):
-        return self.huey.restore_all(self.task_class)
+    def restore(self, request_id=None):
+        return self.huey.restore_all(self.task_class, request_id=request_id)
 
     def schedule(self, args=None, kwargs=None, eta=None, delay=None,
                  priority=None, retries=None, retry_delay=None,
@@ -1265,11 +1525,12 @@ class Result(object):
     def is_revoked(self):
         return self.huey.is_revoked(self.task, peek=True)
 
-    def revoke(self, revoke_once=True):
-        self.huey.revoke(self.task, revoke_once=revoke_once)
+    def revoke(self, revoke_once=True, revoke_until=None, request_id=None):
+        self.huey.revoke(self.task, revoke_until=revoke_until,
+                         revoke_once=revoke_once, request_id=request_id)
 
-    def restore(self):
-        return self.huey.restore(self.task)
+    def restore(self, request_id=None):
+        return self.huey.restore(self.task, request_id=request_id)
 
     def reschedule(self, eta=None, delay=None, expires=None, priority=None,
                    preserve_pipeline=True):

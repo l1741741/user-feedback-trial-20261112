@@ -1,5 +1,7 @@
+from collections import namedtuple
 from functools import cached_property
 import contextlib
+import datetime
 import hashlib
 import heapq
 import itertools
@@ -37,12 +39,68 @@ from huey.exceptions import ConfigurationError
 from huey.utils import FileLock
 
 
+# A durable revocation record.
+#
+# Unlike the legacy revoke keys (a simple (revoke_until, revoke_once) blob
+# that is destroyed by a destructive read), a durable record is kept and
+# carries a monotonically-increasing ``generation``. Every state change --
+# revoke, restore and revoke_once consumption -- bumps the generation in the
+# same transaction, so it is a version number that every process can observe
+# and compare.
+#
+# ``request_id`` is the caller-supplied identity of the last revoke request
+# that was applied to this key. Replaying an already-applied request (same
+# request_id) is a no-op, which is what stops a retried "cancel task X"
+# request from re-arming a revocation that a newer restore has superseded.
+# The identity is also recorded in a separate ``revocation_request`` ledger
+# that outlives later state changes, so the replay check survives a restore.
+Revocation = namedtuple(
+    'Revocation', ('generation', 'revoked', 'revoke_once', 'revoke_until',
+                   'request_id'))
+
+
+def _to_iso(ts):
+    """
+    Render a naive/aware datetime as a fixed-width ISO-8601 string.
+
+    Durable revocations store ``revoke_until`` as text so comparisons happen
+    in exactly the same clock frame the legacy implementation used (naive
+    wall-clock datetimes), without any process-local timezone conversion.
+    ``None`` passes through.
+    """
+    if ts is None:
+        return None
+    return ts.strftime('%Y-%m-%dT%H:%M:%S.%f')
+
+
+def _revocation_active(revoked, revoke_once, revoke_until, timestamp):
+    """
+    Evaluate a stored durable revocation the same way ``_check_revoked``
+    evaluates a legacy revoke blob.
+
+    ``revoke_once`` wins over ``revoke_until`` (matching the legacy ordering),
+    an elapsed ``revoke_until`` makes the revocation inactive, and otherwise
+    the record is active while ``revoked`` is set.
+    """
+    if not revoked:
+        return False
+    if revoke_once:
+        return True
+    if revoke_until is not None and revoke_until <= timestamp:
+        return False
+    return True
+
+
 class BaseStorage(object):
     """
     Base storage-layer interface. Subclasses should implement all methods.
     """
     blocking = False  # Does dequeue() block until ready, or should we poll?
     priority = True
+    # Whether the storage implements durable (versioned, cross-process)
+    # revocations. Only the SQLite backend implements this; the default
+    # revoke/restore machinery is used everywhere else.
+    supports_durable_revoke = False
 
     def __init__(self, name='huey', **storage_kwargs):
         self.name = name
@@ -306,6 +364,125 @@ class BaseStorage(object):
         self.flush_schedule()
         self.flush_results()
         self.flush_counters()
+
+    # Durable revocation API. Implemented only by storages that set
+    # ``supports_durable_revoke = True`` (currently the SQLite backend). All
+    # operations are atomic with respect to every other process sharing the
+    # storage.
+    #
+    # Revocations live in one of two scopes:
+    #
+    # * ``('task', task_id)`` -- applies to one task instance.
+    # * ``('class', task_name)`` -- applies to every instance of a task.
+    #
+    # The effective state of a task is the combination of both scopes, so a
+    # class revoke revokes instances that were enqueued before *or* after it.
+
+    def revoke_durable(self, scope, target, revoke_until=None,
+                       revoke_once=False, expected_generation=None,
+                       request_id=None):
+        """
+        Persist a revocation and bump its generation.
+
+        :param str scope: ``'task'`` or ``'class'``.
+        :param str target: task id (scope ``'task'``) or fully-qualified task
+            name (scope ``'class'``).
+        :param datetime revoke_until: time after which the revocation lapses,
+            or ``None`` for "until restored".
+        :param bool revoke_once: revoke only the next execution.
+        :param int expected_generation: optional compare-and-swap token
+            previously read from :py:meth:`get_durable_record`. When given,
+            the revocation is only written if the stored generation still
+            matches, which lets a retried (stale) revoke request avoid
+            re-arming a task that a newer restore already re-enabled.
+        :param str request_id: optional caller-supplied identity for the
+            revoke request. If it matches the request_id of the last applied
+            revoke, the call is a no-op (idempotent retry).
+        :return: the new :py:class:`Revocation` record, or ``None`` if the
+            request was rejected as stale (a generation mismatch or a
+            replayed request_id).
+        """
+        raise NotImplementedError('durable revocations are not supported by '
+                                  'this storage backend.')
+
+    def restore_durable(self, scope, target, expected_generation=None,
+                        request_id=None):
+        """
+        Clear a durable revocation, bumping its generation.
+
+        Restoring a key that was never revoked is still recorded as an
+        explicit "not revoked" generation, so a stale duplicate revoke (one
+        carrying an older ``expected_generation``) cannot resurrect the task.
+
+        :return: ``True`` if a revocation was actually cleared.
+        """
+        raise NotImplementedError('durable revocations are not supported by '
+                                  'this storage backend.')
+
+    def get_durable_record(self, scope, target):
+        """
+        Read the raw stored record for one scope/target, active or not. The
+        returned record's ``generation`` can be passed back as
+        ``expected_generation`` to a later revoke/restore for a
+        compare-and-swap update.
+
+        :return: a :py:class:`Revocation` record, or ``None`` if the key has
+            no recorded state.
+        """
+        raise NotImplementedError('durable revocations are not supported by '
+                                  'this storage backend.')
+
+    def get_durable_revocation(self, task_id, task_name, timestamp=None):
+        """
+        Read the effective durable revocation for a task instance and class.
+
+        :return: the active :py:class:`Revocation` record, or ``None`` when
+            neither an instance nor a class revocation applies.
+        """
+        raise NotImplementedError('durable revocations are not supported by '
+                                  'this storage backend.')
+
+    def consume_durable_revocation(self, task_id, task_name, timestamp=None):
+        """
+        Atomically evaluate a revocation immediately before a task is
+        executed.
+
+        If the task is revoked, this returns ``True``. When the matching
+        record is a ``revoke_once`` record it is consumed (cleared and its
+        generation bumped) as part of the same transaction, so exactly one
+        consumer observes it and it never becomes a permanent revocation.
+
+        :return: ``True`` if the task should be skipped.
+        """
+        raise NotImplementedError('durable revocations are not supported by '
+                                  'this storage backend.')
+
+    def settle_durable_revocation(self, task_id, task_name, timestamp, writes):
+        """
+        Atomically finish a task execution: check the current durable
+        revocation and, only if the task is not revoked, apply the given
+        writes in the same transaction.
+
+        This is what closes the race between a revoke committing and a worker
+        enqueueing a retry / successor / error-handler: because the check and
+        the writes share one serialized SQLite transaction, either the revoke
+        commits first (and the writes are suppressed) or the writes commit
+        first (and a retry delivery is later skipped when it is consumed).
+        Either way a successful revoke cannot be defeated by a follow-up that
+        "went around" it.
+
+        :param datetime timestamp: reference time for evaluating
+            ``revoke_until``.
+        :param list writes: follow-up *deliveries* to create, as
+            ``('queue', data, priority)`` or ``('schedule', data, datetime)``.
+            Results are intentionally not part of the fence: a task that
+            already ran still records its result.
+        :return: ``True`` if the writes were applied (the task was not
+            revoked); ``False`` if an active revocation suppressed them.
+        """
+        raise NotImplementedError('durable revocations are not supported by '
+                                  'this storage backend.')
+
 
 
 class BlackHoleStorage(BaseStorage):
@@ -852,6 +1029,7 @@ class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
     integrity_error = getattr(sqlite3, 'IntegrityError', None)
     operational_error = getattr(sqlite3, 'OperationalError', None)
+    supports_durable_revoke = True
     table_kv = ('create table if not exists kv ('
                 'queue text not null, key text not null, value blob not null, '
                 'primary key(queue, key))')
@@ -870,8 +1048,31 @@ class SqliteStorage(BaseSqlStorage):
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
+    # Durable revocations. A row is keyed by queue plus either a task id
+    # (scope='task') or a task class name (scope='class'). Every revoke,
+    # restore and revoke_once consumption bumps "generation". The generation
+    # makes each change observable and comparable, which is what lets a stale
+    # worker (or a retried duplicate revoke) avoid clobbering a newer restore.
+    table_revocation = ('create table if not exists revocation ('
+                        'queue text not null, scope text not null, '
+                        'target text not null, generation integer not null '
+                        'default 0, revoked integer not null default 0, '
+                        'revoke_once integer not null default 0, '
+                        'revoke_until text, request_id text, '
+                        'primary key(queue, scope, target))')
+    # Ledger of applied revoke/restore requests, keyed by caller-supplied
+    # request id. It outlives subsequent state changes, so replaying an old
+    # "cancel task X" request after a newer restore is recognized as a retry
+    # and ignored instead of re-arming the revocation.
+    table_revocation_request = (
+        'create table if not exists revocation_request ('
+        'queue text not null, scope text not null, target text not null, '
+        'request_id text not null, action text not null, '
+        'generation integer not null, '
+        'primary key(queue, scope, target, request_id))')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           table_counter, drop_index_task, table_revocation,
+           table_revocation_request]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
@@ -1075,6 +1276,214 @@ class SqliteStorage(BaseSqlStorage):
 
     def flush_counters(self):
         self.sql('delete from counter where queue=?', (self.name,), True)
+
+    def flush_revocations(self):
+        self.sql('delete from revocation where queue=?', (self.name,), True)
+        self.sql('delete from revocation_request where queue=?', (self.name,),
+                 True)
+
+    def flush_all(self):
+        super(SqliteStorage, self).flush_all()
+        self.flush_revocations()
+
+    # Durable revocation API. Every state change bumps "generation" in the
+    # same transaction that writes the new state, so the returned/recorded
+    # generation is a monotonically-increasing version number for the key.
+
+    def _read_revocation(self, curs, scope, target):
+        curs.execute('select generation, revoked, revoke_once, revoke_until, '
+                     'request_id from revocation where queue = ? and '
+                     'scope = ? and target = ?', (self.name, scope, target))
+        row = curs.fetchone()
+        if row is None:
+            return None
+        return Revocation(row[0], bool(row[1]), bool(row[2]), row[3], row[4])
+
+    def _request_applied(self, curs, scope, target, request_id):
+        curs.execute(
+            'select 1 from revocation_request where queue = ? and scope = ? '
+            'and target = ? and request_id = ?',
+            (self.name, scope, target, request_id))
+        return curs.fetchone() is not None
+
+    def _write_revocation(self, curs, scope, target, revoked, revoke_once,
+                          revoke_until, action='revoke',
+                          expected_generation=None, request_id=None):
+        """
+        Write a revocation record, bumping its generation.
+
+        * When ``expected_generation`` is given, the write only happens if the
+          stored generation matches (compare-and-swap). A stale worker that
+          captured the pre-restore generation therefore cannot overwrite the
+          restore.
+        * When ``request_id`` is given, it is recorded in a request ledger
+          that outlives later state changes. Replaying a request that was
+          already applied is a no-op, so a retried "cancel task X" cannot
+          re-arm a revocation that a newer restore has since cleared.
+        """
+        if request_id is not None and self._request_applied(
+                curs, scope, target, request_id):
+            # Idempotent replay of an already-applied request.
+            return self._read_revocation(curs, scope, target)
+        record = self._read_revocation(curs, scope, target)
+        if expected_generation is not None:
+            current = 0 if record is None else record.generation
+            if current != expected_generation:
+                return None
+        generation = 1 if record is None else record.generation + 1
+        curs.execute(
+            'insert into revocation (queue, scope, target, generation, '
+            'revoked, revoke_once, revoke_until, request_id) values '
+            '(?, ?, ?, ?, ?, ?, ?, ?) '
+            'on conflict (queue, scope, target) do update set '
+            'generation = excluded.generation, '
+            'revoked = excluded.revoked, '
+            'revoke_once = excluded.revoke_once, '
+            'revoke_until = excluded.revoke_until, '
+            'request_id = excluded.request_id',
+            (self.name, scope, target, generation, int(revoked),
+             int(revoke_once), revoke_until, request_id))
+        if request_id is not None:
+            curs.execute(
+                'insert or replace into revocation_request '
+                '(queue, scope, target, request_id, action, generation) '
+                'values (?, ?, ?, ?, ?, ?)',
+                (self.name, scope, target, request_id, action, generation))
+        return Revocation(generation, bool(revoked), bool(revoke_once),
+                          revoke_until, request_id)
+
+    def _revocation_active(self, record, timestamp):
+        if record is None:
+            return False
+        return _revocation_active(record.revoked, record.revoke_once,
+                                  record.revoke_until, timestamp)
+
+    def _active_keys(self, curs, task_id, task_name, timestamp):
+        """
+        Within an open transaction, evaluate both scopes for a task and
+        return the list of ``(scope, target, record)`` tuples that are
+        currently active, plus the list of scopes whose elapsed
+        ``revoke_until`` record should be lazily cleared.
+        """
+        keys = []
+        if task_id:
+            keys.append(('task', task_id))
+        if task_name:
+            keys.append(('class', task_name))
+        # ``revoke_until`` is stored as a fixed-width ISO-8601 string, so
+        # render the reference timestamp the same way for a lexicographic
+        # comparison (which matches chronological order).
+        ts = _to_iso(timestamp)
+        active = []
+        expired = []
+        for scope, target in keys:
+            record = self._read_revocation(curs, scope, target)
+            if record is None or not record.revoked:
+                continue
+            if _revocation_active(record.revoked, record.revoke_once,
+                                  record.revoke_until, ts):
+                active.append((scope, target, record))
+            else:
+                expired.append((scope, target))
+        return active, expired
+
+    def revoke_durable(self, scope, target, revoke_until=None,
+                       revoke_once=False, expected_generation=None,
+                       request_id=None):
+        until = _to_iso(revoke_until)
+        with self.db(commit=True) as curs:
+            return self._write_revocation(
+                curs, scope, target, True, revoke_once, until, 'revoke',
+                expected_generation, request_id)
+
+    def restore_durable(self, scope, target, expected_generation=None,
+                        request_id=None):
+        with self.db(commit=True) as curs:
+            record = self._read_revocation(curs, scope, target)
+            restored = record is not None and record.revoked
+            self._write_revocation(
+                curs, scope, target, False, False, None, 'restore',
+                expected_generation, request_id)
+            return restored
+
+    def get_durable_record(self, scope, target):
+        with self.db() as curs:
+            return self._read_revocation(curs, scope, target)
+
+    def get_durable_revocation(self, task_id, task_name, timestamp=None):
+        if timestamp is None:
+            timestamp = self._get_timestamp()
+        with self.db() as curs:
+            active, _ = self._active_keys(curs, task_id, task_name, timestamp)
+        return active[0][2] if active else None
+
+    def consume_durable_revocation(self, task_id, task_name, timestamp=None):
+        """
+        Atomically check-and-consume a durable revocation just before a task
+        starts. A ``revoke_once`` record that matches is cleared here, inside
+        the same transaction, so exactly one consumer can observe it.
+        """
+        if timestamp is None:
+            timestamp = self._get_timestamp()
+        with self.db(commit=True) as curs:
+            active, expired = self._active_keys(
+                curs, task_id, task_name, timestamp)
+            for scope, target in expired:
+                self._write_revocation(curs, scope, target, False, False, None)
+            for scope, target, record in active:
+                if record.revoke_once:
+                    # Consume: the "once" revocation has now taken effect.
+                    # Bumping the generation both clears it and invalidates
+                    # any concurrent duplicate of this call.
+                    self._write_revocation(curs, scope, target, False, False,
+                                           None)
+            return bool(active)
+
+    def settle_durable_revocation(self, task_id, task_name, timestamp, writes):
+        """
+        Atomically check the durable revocation and apply follow-up writes.
+
+        If any revocation is active, no writes are applied; ``revoke_once``
+        records that matched are consumed in the same transaction (a "once"
+        revocation suppresses exactly the follow-up that would have been
+        created here). Returns ``True`` when the writes were applied.
+        """
+        if timestamp is None:
+            timestamp = self._get_timestamp()
+        with self.db(commit=True) as curs:
+            active, expired = self._active_keys(
+                curs, task_id, task_name, timestamp)
+            for scope, target in expired:
+                self._write_revocation(curs, scope, target, False, False, None)
+            for scope, target, record in active:
+                if record.revoke_once:
+                    self._write_revocation(curs, scope, target, False, False,
+                                           None)
+            if active:
+                return False
+            for write in writes:
+                kind = write[0]
+                if kind == 'queue':
+                    _, data, priority = write
+                    curs.execute(
+                        'insert into task (queue, data, priority) '
+                        'values (?, ?, ?)',
+                        (self.name, self.to_blob(data), priority or 0))
+                elif kind == 'schedule':
+                    _, data, ts = write
+                    curs.execute(
+                        'insert into schedule (queue, data, timestamp) '
+                        'values (?, ?, ?)',
+                        (self.name, self.to_blob(data), ts.timestamp()))
+                else:
+                    raise ValueError('unknown durable write %r' % (kind,))
+            return True
+
+    def _get_timestamp(self):
+        # Storage-level clock for revocation expiry. Mirrors the naive-local
+        # clock used by the legacy revoke implementation so that
+        # ``_revocation_active`` compares apples to apples.
+        return datetime.datetime.now()
 
 
 class CySqliteStorage(SqliteStorage):

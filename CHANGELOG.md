@@ -5,6 +5,18 @@ Changelog
 
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
+* Add an opt-in `durable_revoke=True` mode to `SqliteHuey` / `CySqliteHuey`.
+  Revocations are stored in a versioned `revocation` table with a
+  monotonically-increasing generation, so multiple processes observe the same
+  state across restarts. A revoke that commits while a task is executing
+  suppresses that worker's retry / `on_complete` / `on_error` delivery in the
+  same transaction, closing the "revoke succeeds but the retry goes around
+  it" window. `revoke_once` records are consumed atomically and never become
+  permanent, and `restore` bumps the generation so stale workers or replayed
+  cancellation requests (opt-in `request_id`) cannot re-arm a revoked task.
+  Default behavior and every other backend are unchanged. See
+  `docs/guide.rst` ("Durable revocations").
+
 ## 3.5.4
 
 * Fix possible hang if worker holding the stop flag was killed while holding

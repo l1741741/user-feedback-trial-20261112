@@ -133,6 +133,9 @@ Huey types
         corruption in the event of sudden power loss. By default will use the
         SQLite library's ``synchronous`` setting (typically ``1``, which
         provides a good balance between durability and performance).
+    :param bool durable_revoke: opt into durable, versioned revocations (see
+        :ref:`durable-revocations`). Default is ``False``, preserving the
+        legacy revoke/restore behavior.
 
     SqliteHuey fully supports task priorities.
 
@@ -150,6 +153,8 @@ Huey types
     :param dict pragmas: mapping of pragmas to apply to every connection. If
         unset, ``journal_mode`` will default to ``'wal'``, which enables
         readers to coexist with a single writer.
+    :param bool durable_revoke: opt into durable, versioned revocations (see
+        :ref:`durable-revocations`). Default is ``False``.
 
     CySqliteHuey fully supports task priorities.
 
@@ -231,7 +236,7 @@ Huey types
 Huey object
 -----------
 
-.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, storage_class=None, store_intermediate_errors=True, **storage_kwargs)
+.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, storage_class=None, store_intermediate_errors=True, durable_revoke=False, **storage_kwargs)
 
     :param str name: the name of the task queue, e.g. your application's name.
     :param bool results: whether to store task results.
@@ -255,6 +260,9 @@ Huey object
         storage backend whenever immediate-mode is enabled.
     :param storage_class: storage implementation to use, e.g.
         :py:class:`SqliteStorage`. Overrides the class's default.
+    :param bool durable_revoke: opt into durable, versioned revocations
+        (SQLite backends only). Default is ``False``. See
+        :ref:`durable-revocations`.
     :param storage_kwargs: arbitrary keyword arguments that will be passed to
         the storage backend for additional configuration.
 
@@ -797,35 +805,41 @@ Huey object
             :py:meth:`~Huey.enqueue` directly when working with pipelines,
             groups, or chords.
 
-    .. py:method:: revoke(task, revoke_until=None, revoke_once=False)
+    .. py:method:: revoke(task, revoke_until=None, revoke_once=False, request_id=None)
 
         .. seealso:: Use :py:meth:`Result.revoke` instead.
 
-    .. py:method:: revoke_by_id(id, revoke_until=None, revoke_once=False)
+        ``request_id`` is only meaningful when ``durable_revoke=True``; see
+        :ref:`durable-revocations`.
+
+    .. py:method:: revoke_by_id(id, revoke_until=None, revoke_once=False, request_id=None)
 
         :param str id: task instance id.
         :param datetime revoke_until: optional expiration date for revocation.
         :param bool revoke_once: revoke once and then re-enable.
+        :param str request_id: optional stable id for the cancellation request,
+            used to make retries idempotent when ``durable_revoke=True``.
 
         Revoke a :py:class:`Task` instance using the task id.
 
-    .. py:method:: revoke_all(task_class, revoke_until=None, revoke_once=False)
+    .. py:method:: revoke_all(task_class, revoke_until=None, revoke_once=False, request_id=None)
 
         .. seealso:: Use :py:meth:`TaskWrapper.revoke` instead.
 
-    .. py:method:: restore(task)
+    .. py:method:: restore(task, request_id=None)
 
         .. seealso:: Use :py:meth:`Result.restore` instead.
 
-    .. py:method:: restore_by_id(id)
+    .. py:method:: restore_by_id(id, request_id=None)
 
         :param str id: task instance id.
+        :param str request_id: optional stable id for the restore request.
         :returns: boolean indicating success.
 
         Restore a :py:class:`Task` instance using the task id. Returns boolean
         indicating if the revocation was successfully removed.
 
-    .. py:method:: restore_all(task_class)
+    .. py:method:: restore_all(task_class, request_id=None)
 
         .. seealso:: Use :py:meth:`TaskWrapper.restore` instead.
 
@@ -2035,9 +2049,11 @@ Result
 
         Identical to the :py:meth:`~Result.get` method, provided as a shortcut.
 
-    .. py:method:: revoke(revoke_once=True)
+    .. py:method:: revoke(revoke_once=True, revoke_until=None, request_id=None)
 
         :param bool revoke_once: revoke only once.
+        :param datetime revoke_until: optional expiration date for revocation.
+        :param str request_id: optional stable request id (durable mode only).
 
         Revoke the given task. Unless it is in the process of executing, the
         task will be discarded without being executed.
@@ -2052,7 +2068,11 @@ Result
             # I changed my mind, do not run it after all.
             res.revoke()
 
-    .. py:method:: restore()
+        When the Huey instance was created with ``durable_revoke=True`` and a
+        task is already executing, the worker will not create any retry or
+        successor delivery for it. See :ref:`durable-revocations`.
+
+    .. py:method:: restore(request_id=None)
 
         Restore the given task instance. Unless the task instance has already
         been dequeued and discarded, it will be restored and run as scheduled.
@@ -2450,6 +2470,11 @@ Huey comes with several built-in storage implementations:
     :param bool create_tables: create tables if they do not exist.
     :param kwargs: Additional keyword arguments passed to the ``sqlite3``
         connection constructor.
+
+    This backend implements the durable-revocation storage API used by
+    :py:class:`SqliteHuey` when created with ``durable_revoke=True``. The
+    supporting ``revocation`` / ``revocation_request`` tables are part of the
+    normal schema; they stay empty until the option is enabled.
 
 
 .. py:class:: CySqliteStorage(name='huey', filename='huey.db', pragmas=None, timeout=5, strict_fifo=False, create_tables=True, **kwargs)

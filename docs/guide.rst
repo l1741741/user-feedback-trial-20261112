@@ -662,6 +662,144 @@ For more information, see the following API docs:
 * :py:meth:`TaskWrapper.is_revoked` for checking the status of the task
   function itself.
 
+.. _durable-revocations:
+
+Durable revocations
+^^^^^^^^^^^^^^^^^^^
+
+The default revocation mechanism (described above) stores a single revoke flag
+per task id or task class and clears it when the consumer observes it. That is
+simple and fast, but it has two limitations when several processes share a
+:py:class:`SqliteHuey` database and operations staff revoke tasks by id:
+
+* A task that is already being executed by one consumer cannot prevent that
+  consumer from scheduling a *retry* when it finishes. The same is true of an
+  ``on_complete`` successor or an ``on_error`` handler.
+* A worker that finishes a task deletes the revoke flag as part of its
+  cleanup. If a newer ``restore()`` has happened in the meantime, the stale
+  worker can wipe it out.
+
+:py:class:`SqliteHuey` (and :py:class:`CySqliteHuey`) can be created with
+``durable_revoke=True`` to opt into a stronger, versioned revocation:
+
+.. code-block:: python
+
+    huey = SqliteHuey('my-app', durable_revoke=True)
+
+The default is ``False``, and every other backend keeps its existing
+semantics. Enabling the option changes nothing else about the API: the same
+:py:meth:`Result.revoke`, :py:meth:`TaskWrapper.revoke`,
+:py:meth:`~Huey.revoke_by_id` and their ``restore`` counterparts are used.
+
+What is guaranteed
+~~~~~~~~~~~~~~~~~~
+
+Revocations are stored in a dedicated ``revocation`` table keyed by the queue
+name, so two Huey instances that share one database never revoke each other's
+tasks. Each row carries a monotonically-increasing **generation** and, when
+supplied, a **request id**:
+
+* **Not-yet-started tasks never run.** A revoke that commits before a consumer
+  begins a task is observed by every process; the task is discarded and
+  ``SIGNAL_REVOKED`` is emitted. Waiting-in-the-schedule tasks are not purged
+  from the schedule, but they are skipped when they become ready (the schedule
+  is never emptied wholesale).
+* **Already-running tasks need not be interrupted.** The business function
+  finishes normally, but once it returns the worker will not create any
+  follow-up delivery: no retry, no success successor, no error successor. A
+  revoke that succeeds can never be defeated by a retry that "went around" it,
+  because the revocation check and the follow-up write share one SQLite
+  transaction (see below).
+* **Restarts do not resurrect tasks.** The revocation table is on disk, so a
+  process crash or restart between revoke and execution cannot resurrect a
+  task.
+* **Restore has a clear version boundary.** Every revoke *and* restore bumps the
+  generation. A worker that captured the pre-restore generation, or a duplicate
+  "cancel task X" request that carries an older request id, cannot overwrite a
+  newer restore.
+* **``revoke_once`` never silently becomes permanent.** A ``revoke_once``
+  record is consumed atomically by the first consumer that observes it
+  (generation is bumped and the flag cleared in the same transaction), so
+  exactly one delivery is skipped and subsequent enqueues run normally.
+* **Batches still converge.** If a chord member's retry or pipeline successor
+  is suppressed by a revoke, the member is reported to the chord as
+  ``huey.SKIPPED`` so the callback does not wait forever on a member that can
+  no longer produce an outcome.
+
+Results of a revocation by task state
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The public ``revoke`` / ``restore`` calls report success once the durable state
+is written. What that means for the individual task depends on where it is:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - Task state
+     - Effect of a successful revoke
+   * - Waiting in the execution queue
+     - The queued delivery is left in place but skipped when dequeued
+       (``SIGNAL_REVOKED``); no side effect, no result.
+   * - Waiting for its ETA in the schedule
+     - Still promoted to the execution queue by the scheduler, then skipped
+       when it becomes ready. The schedule as a whole is never flushed.
+   * - Currently executing
+     - The business function runs to completion, but the worker's settlement
+       creates no retry / successor / error-handler delivery. Results and
+       signals for the finished execution are still recorded.
+   * - Already finished
+     - No effect on the completed task or its stored result. A later re-enqueue
+       of the same id under the revocation is skipped.
+
+Instance revocation versus class revocation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``Result.revoke()`` / :py:meth:`~Huey.revoke_by_id` target a single task id.
+``TaskWrapper.revoke()`` (or :py:meth:`~Huey.revoke_all`) targets every
+instance of the task class, including instances enqueued *after* the revoke.
+Both are evaluated together: a task runs only if neither its instance nor its
+class is revoked. ``TaskWrapper.restore()`` clears only the class revocation,
+and ``Result.restore()`` clears only the instance revocation, mirroring the
+legacy API.
+
+Two optional parameters are also accepted on the durable path:
+
+* ``revoke_once`` - skip exactly one execution. Unlike the legacy mechanism the
+  record is consumed in the same transaction that observes it, so a
+  ``revoke_once`` can never turn into a permanent revocation.
+* ``revoke_until`` - a datetime after which the revocation lapses. The record is
+  lazily cleaned up the next time the task is examined.
+
+Idempotent cancellation requests
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Operations systems typically retry a "cancel task X" request when they do not
+receive a response. Pass a stable ``request_id`` to make the request
+idempotent:
+
+.. code-block:: python
+
+    huey.revoke_by_id(task_id, request_id='ticket-4711')
+
+If the same ``request_id`` is seen again it is ignored, even after a newer
+``restore_by_id(task_id)`` has re-enabled the task. This prevents a stale,
+retried cancellation from undoing a restore that an operator performed later.
+A new ``request_id`` (or omitting it) is treated as a fresh request.
+
+Enabling the option on an existing database
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``revocation`` and ``revocation_request`` tables are created alongside the
+existing tables and are simply empty until ``durable_revoke=True`` is enabled.
+Enabling it is safe on a database populated by the default mode: legacy revoke
+flags are left untouched and continue to apply through the legacy code path
+until they expire or are restored.
+
+Durable revocations are specific to the SQLite backends. Constructing a Huey
+instance with ``durable_revoke=True`` and an unsupported storage backend raises
+:py:class:`ConfigurationError` rather than silently falling back.
+
 Canceling from within a Task
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
