@@ -1,3 +1,11 @@
+# Keep native test fixtures isolated across concurrently running workspaces.
+import atexit as _atexit
+import os as _os
+import shutil as _shutil
+import tempfile as _tempfile
+TEST_TMP_DIR = _tempfile.mkdtemp(prefix='huey-native-%s-' % _os.getpid())
+_atexit.register(_shutil.rmtree, TEST_TMP_DIR, ignore_errors=True)
+
 from huey.tests.test_api import *
 from huey.tests.test_asyncio import *
 from huey.tests.test_consumer import *

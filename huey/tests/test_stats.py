@@ -1,3 +1,4 @@
+from huey.tests import TEST_TMP_DIR
 import os
 import threading
 import time
@@ -21,7 +22,7 @@ if peewee is not None:
 
 @unittest.skipIf(peewee is None, 'requires peewee')
 class StatsTestCase(BaseTestCase):
-    db_file = '/tmp/huey-stats.db'
+    db_file = os.path.join(TEST_TMP_DIR, 'huey-stats.db')
 
     def setUp(self):
         super(StatsTestCase, self).setUp()
