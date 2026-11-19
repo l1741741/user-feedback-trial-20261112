@@ -4,6 +4,18 @@ class TaskLockedException(HueyException): pass
 class ResultTimeout(HueyException): pass
 class TaskTimeout(HueyException): pass
 
+
+class BatchPublishError(HueyException):
+    """Base class for errors raised while publishing a task batch."""
+
+
+class BatchConflictError(BatchPublishError):
+    """The idempotency key was reused for different batch content."""
+
+
+class BatchIdConflictError(BatchConflictError):
+    """A task id collides with a task already known to this queue."""
+
 class RateLimitExceeded(HueyException):
     def __init__(self, key, delay, retry=True):
         self.key, self.delay, self.retry = key, delay, retry

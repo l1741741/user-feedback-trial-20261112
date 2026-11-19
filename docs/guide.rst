@@ -1464,6 +1464,111 @@ For more information, see the following API docs:
 * :py:class:`chord`
 * :py:class:`ResultGroup` and :py:class:`ChordResult`
 
+.. _batch-publishing:
+
+Atomic batch publishing
+-----------------------
+
+Normally each task is enqueued independently: calling a task, or calling
+:py:meth:`Huey.enqueue` once per member, performs one database write per
+task. If a later member cannot be serialized, or a write fails part-way
+through, the earlier members are already on the queue and a consumer may run
+them, and a retry duplicates everything that did get written.
+
+When a set of tasks must be published together -- for example the tasks that
+make up month-end settlement -- use :py:meth:`Huey.publish_batch`:
+
+.. code-block:: python
+
+    from huey import chord
+
+    batch = huey.publish_batch([
+        settle_account.s(account_id),
+        fetch_rates.s(account_id).then(apply_rates),
+        chord([charge.s(i) for i in invoice_ids], reconcile.s()),
+    ], key='settle-%s-%s' % (account_id, '2026-11'))
+
+    settle_result, rates_result, reconcile_result = batch
+
+The input is a list whose members may be task signatures, pipelines,
+:py:class:`group` or :py:class:`chord` instances (nested arbitrarily). The
+return value is a :py:class:`BatchResult` holding one handle per input item,
+in input order, of the same type :py:meth:`Huey.enqueue` would have returned.
+
+All-or-nothing visibility
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The whole batch is written in a single SQLite transaction. Consumers, using
+their own connections, see either the entire batch or none of it -- never a
+prefix. If anything fails before the commit -- an unserializable argument, a
+duplicate or already-used task id, a database error -- the transaction is
+rolled back and the queue is untouched, including any chord completion
+bookkeeping. Nothing signals and no result handles are usable.
+
+Atomic batch publishing is currently provided by :py:class:`SqliteHuey`.
+Other backends raise :py:class:`BatchPublishError`; ordinary
+:py:meth:`~Huey.enqueue` keeps its per-task behavior on every backend.
+
+Idempotent retries with a batch key
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Pass ``key=`` to give the batch a stable business identifier. Retrying the
+same key with the same content returns the handles from the first successful
+publish and writes nothing, so a retry after a crash cannot duplicate tasks.
+Reusing the key with different content raises :py:class:`BatchConflictError`
+instead of merging the two batches.
+
+Huey-generated task ids and etas derived from relative delays are excluded
+from the content comparison, since they change on every attempt. Task ids you
+assign yourself are included, because they determine the returned handles.
+To make retries depend only on your own ids, assign them explicitly:
+
+.. code-block:: python
+
+    huey.publish_batch([
+        settle_account.s(account_id, id='settle:%s' % account_id),
+        reconcile.s(id='reconcile:%s' % account_id),
+    ], key='settle-%s-2026-11' % account_id)
+
+If two processes race with the same key, exactly one batch is committed; the
+other gets :py:class:`BatchConflictError` (if its content differs) or the
+winner's handles.
+
+Recovering an unknown outcome
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+If the database committed but the caller never received the response, do
+**not** re-enqueue the tasks individually. Either retry
+:py:meth:`~Huey.publish_batch` with the same key, or call
+:py:meth:`Huey.get_batch` with the key:
+
+.. code-block:: python
+
+    recovered = huey.get_batch('settle-42-2026-11')
+    if recovered is None:
+        # Never committed -- safe to publish.
+        recovered = huey.publish_batch(items, key='settle-42-2026-11')
+
+This works across processes, so a supervisor or a new worker can check the
+outcome of a publisher that died.
+
+Transaction boundary
+^^^^^^^^^^^^^^^^^^^^
+
+The batch is committed by huey on its own connection, in a transaction that
+spans only the ``publish_batch`` call. Huey will not commit or roll back a
+transaction the caller has opened on that same connection: if one is open,
+``publish_batch`` raises :py:class:`BatchPublishError` and leaves it alone.
+
+Signals
+^^^^^^^
+
+``SIGNAL_ENQUEUED`` is emitted for each task actually written, only after the
+commit succeeds, and never for a batch that failed or that was satisfied by an
+idempotent retry. Signal receivers run after the commit: a receiver raising
+an exception is logged and does not roll the batch back. Tasks the consumer
+writes later (chord callbacks, pipeline successors) emit their usual signal
+when that happens.
 
 Signals
 -------

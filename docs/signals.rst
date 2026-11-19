@@ -22,7 +22,9 @@ handler beyond the standard ``(signal, task)`` pair.
    * - ``SIGNAL_ENQUEUED``
      - Task has been placed on the queue. Emitted in both the **application
        process** (when your code calls a task) and the **consumer** (when
-       re-enqueueing retries, periodic tasks, or scheduled tasks).
+       re-enqueueing retries, periodic tasks, or scheduled tasks). For
+       :py:meth:`~Huey.publish_batch`, emitted only after the batch
+       transaction commits, and only for tasks that were written.
      - None
    * - ``SIGNAL_EXECUTING``
      - Task is about to be executed by a worker.

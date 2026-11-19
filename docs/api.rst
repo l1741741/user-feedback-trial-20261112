@@ -797,6 +797,89 @@ Huey object
             :py:meth:`~Huey.enqueue` directly when working with pipelines,
             groups, or chords.
 
+    .. py:method:: publish_batch(items, key=None)
+
+        :param items: an iterable of task signatures, :py:class:`group` and
+            :py:class:`chord` instances, or a single such value. Members may
+            include pipelines, and groups and chords may be nested.
+        :param str key: optional stable business identifier for this batch.
+        :returns: a :py:class:`BatchResult` with one handle per input item, in
+            input order.
+        :raises BatchPublishError: the storage backend cannot publish a batch
+            atomically, or the batch could not be written.
+        :raises BatchConflictError: ``key`` was already used for different
+            batch content.
+        :raises BatchIdConflictError: a task id in the batch was already
+            published (in this batch or an earlier one).
+
+        Atomically enqueue a group of related tasks. Either every member
+        becomes visible to consumers at once, or -- if a member cannot be
+        serialized, an id collides, or a database write fails -- none of them
+        do. No task from a failed batch is consumable, and no partial chord
+        bookkeeping is left behind.
+
+        This is supported by :py:class:`SqliteHuey` (and
+        :py:class:`SqliteStorage`). Other storage backends raise
+        :py:class:`BatchPublishError`; ordinary :py:meth:`enqueue` is unchanged
+        for every backend.
+
+        **Idempotent retries.** If ``key`` is given, a retry with the same key
+        and the same content returns the handles produced by the first
+        successful publish, without enqueuing anything again. Retrying with
+        the same key and different content raises :py:class:`BatchConflictError`
+        rather than mixing the two batches. Two processes racing on the same
+        key produce exactly one batch: the other sees a conflict.
+
+        Huey-generated task ids and etas computed from relative delays are not
+        part of the content comparison (they differ on every attempt). Ids the
+        caller assigns explicitly are, since they define the returned handles.
+
+        **Unknown commit outcome.** If the database committed but the caller
+        never saw the response, call :py:meth:`Huey.get_batch` with the same
+        key -- from this process or another -- to learn whether the batch
+        exists and recover its handles. Retrying
+        :py:meth:`~Huey.publish_batch` with the key achieves the same result
+        and never publishes a second copy.
+
+        **Transaction boundary.** The batch is written by a single
+        ``BEGIN EXCLUSIVE`` / ``COMMIT`` on huey's own SQLite connection. If
+        that connection already has a transaction open (e.g. the caller
+        borrowed ``huey.storage.conn``), the call raises
+        :py:class:`BatchPublishError` and leaves the caller's transaction
+        untouched -- it is never committed or rolled back by huey.
+
+        **Signals.** ``SIGNAL_ENQUEUED`` is emitted for the tasks that are
+        written now, only after the transaction commits -- never for a failed
+        or idempotently-returned batch. A failing signal receiver is logged and
+        cannot roll back the batch. Tasks that are only written later by the
+        consumer (chord callbacks, pipeline successors) signal when that
+        happens, as usual.
+
+        .. code-block:: python
+
+            from huey import chord, group
+
+            batch = huey.publish_batch([
+                settle_account.s(account_id),
+                fetch_rates.s(...).then(apply_rates, account_id),
+                chord([charge.s(i) for i in invoice_ids], reconcile.s()),
+            ], key='settle-2026-11-%s' % account_id)
+
+            first_result = batch[0]
+            reconcile_result = batch[2].callback
+
+    .. py:method:: get_batch(key)
+
+        :param str key: batch key used with :py:meth:`~Huey.publish_batch`.
+        :returns: a :py:class:`BatchResult`, or ``None`` if no batch has
+            committed under that key.
+
+        Look up a previously published batch by its idempotency key. Use this
+        after an attempt whose outcome is unknown (the process crashed, the
+        response was lost) to determine whether the batch was committed and to
+        recover its result handles without publishing anything. Supported by
+        the same backends as :py:meth:`~Huey.publish_batch`.
+
     .. py:method:: revoke(task, revoke_until=None, revoke_once=False)
 
         .. seealso:: Use :py:meth:`Result.revoke` instead.
@@ -1928,6 +2011,28 @@ Huey object
 Result
 ------
 
+.. py:class:: BatchResult(huey, members)
+
+    Result of :py:meth:`Huey.publish_batch`. ``members`` mirrors the input:
+    one handle per published item, in input order, using the same handle types
+    :py:meth:`Huey.enqueue` would have produced (:py:class:`Result`,
+    :py:class:`ResultGroup` or :py:class:`ChordResult`). An empty batch yields
+    an empty ``members`` tuple.
+
+    .. code-block:: python
+
+        batch = huey.publish_batch([task_a.s(1), task_b.s(2)])
+        first, second = batch
+        print(batch.get(blocking=True))  # [result_a, result_b]
+
+    .. py:method:: get(*args, **kwargs)
+
+        :returns: a list with each member handle's result.
+
+    .. py:attribute:: members
+
+        Tuple of result handles, in the same order as the input items.
+
 .. py:class:: Result(huey, task)
 
     Although you will probably never instantiate an ``Result`` object yourself,
@@ -2280,6 +2385,24 @@ Exceptions
 
     Raised when Huey encounters a configuration problem.
 
+.. py:class:: BatchPublishError
+
+    Raised when a batch cannot be published atomically, either because the
+    storage backend does not support batch publishing, or because a database
+    write failed (nothing from the batch is then visible). See
+    :py:meth:`Huey.publish_batch`.
+
+.. py:class:: BatchConflictError
+
+    Raised when a :py:meth:`Huey.publish_batch` idempotency key is reused for
+    different batch content. Nothing is written.
+
+.. py:class:: BatchIdConflictError
+
+    A :py:class:`BatchConflictError` for task-id collisions: an id was listed
+    twice in one batch, or was already published by an earlier batch (including
+    ids reserved for chord callbacks that have not run yet).
+
 .. py:class:: TaskLockedException
 
     Raised by the consumer when a task lock cannot be acquired.
@@ -2451,6 +2574,32 @@ Huey comes with several built-in storage implementations:
     :param kwargs: Additional keyword arguments passed to the ``sqlite3``
         connection constructor.
 
+    In addition to the usual ``kv``, ``schedule``, ``task`` and ``counter``
+    tables, the schema includes ``batch`` (idempotency records for
+    :py:meth:`Huey.publish_batch`) and ``task_id`` (ids reserved by published
+    batches, so a later batch cannot reuse an id that may already have been
+    consumed). Both are cleared by ``flush_all()``.
+
+    .. py:method:: publish_batch(entries, batch_key=None, fingerprint=None, payload=None, task_ids=())
+
+        Storage-level atomic append used by :py:meth:`Huey.publish_batch`.
+        Performs all inserts in one ``BEGIN EXCLUSIVE`` transaction and
+        returns ``(created, payload)``. If an idempotency record for
+        ``batch_key`` exists with a different ``fingerprint`` it raises
+        :py:class:`BatchConflictError`; with a matching fingerprint it returns
+        ``(False, stored_payload)`` without writing. Raises
+        :py:class:`BatchIdConflictError` for already-reserved ids, and
+        :py:class:`BatchPublishError` for other write failures or when the
+        connection already has a caller-owned transaction open.
+
+    .. py:method:: get_batch(key)
+
+        Return the stored payload for a batch key, or ``None``.
+
+    .. py:attribute:: supports_batch_publish
+
+        ``True`` for :py:class:`SqliteStorage`.
+
 
 .. py:class:: CySqliteStorage(name='huey', filename='huey.db', pragmas=None, timeout=5, strict_fifo=False, create_tables=True, **kwargs)
 
@@ -2471,6 +2620,12 @@ Huey comes with several built-in storage implementations:
     :param bool create_tables: create tables if they do not exist.
     :param kwargs: Additional keyword arguments passed to
         ``cysqlite.connect()``.
+
+    Atomic batch publishing (:py:meth:`Huey.publish_batch`) is not currently
+    supported by this backend: it raises
+    :py:class:`~huey.exceptions.BatchPublishError` rather than risk exposing a
+    partially-written batch. Use :py:class:`SqliteHuey` when atomic batch
+    publishing is required.
 
     Where :py:class:`SqliteStorage` exposes a fixed set of tuning parameters,
     this storage takes an open-ended ``pragmas`` dict. The

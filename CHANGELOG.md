@@ -3,6 +3,12 @@ Changelog
 
 ## Master
 
+* Add `Huey.publish_batch()` / `Huey.get_batch()`: an explicit atomic batch
+  publish entry point for `SqliteHuey`. Publishes independent tasks, pipelines,
+  groups and (nested) chords in a single transaction, with optional
+  idempotency keys and conflict detection. Unsupported backends raise
+  `BatchPublishError`; ordinary `enqueue()` is unchanged.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4

@@ -1,8 +1,10 @@
 import copy
 import datetime
+import hashlib
 import inspect
 import itertools
 import logging
+import pickle
 import re
 import time
 import traceback
@@ -16,6 +18,9 @@ from functools import wraps
 from huey import signals as S
 from huey.constants import EmptyData
 from huey.consumer import Consumer
+from huey.exceptions import BatchConflictError
+from huey.exceptions import BatchIdConflictError
+from huey.exceptions import BatchPublishError
 from huey.exceptions import CancelExecution
 from huey.exceptions import ConfigurationError
 from huey.exceptions import RateLimitExceeded
@@ -48,6 +53,126 @@ from huey.utils import utcnow
 
 logger = logging.getLogger('huey')
 _sentinel = object()
+
+
+def _canonical_recipe(recipe, index):
+    """
+    Replace task ids in a result recipe with their position in the batch's
+    traversal order, yielding a fingerprint input that is stable across
+    processes (huey-generated ids are random).
+    """
+    kind = recipe[0]
+    if kind == 'none':
+        return ('none',)
+    elif kind == 'result':
+        return ('result', index[recipe[1]])
+    elif kind == 'group':
+        return ('group', tuple(_canonical_recipe(r, index)
+                               for r in recipe[1]))
+    elif kind == 'items':
+        return ('items', tuple(_canonical_recipe(r, index)
+                               for r in recipe[1]))
+    elif kind == 'pipeline':
+        return ('pipeline', tuple(_canonical_recipe(r, index)
+                                  for r in recipe[1]))
+    elif kind == 'chord':
+        _, members, callback, pipeline = recipe
+        return ('chord',
+                tuple(_canonical_recipe(r, index) for r in members),
+                _canonical_recipe(callback, index),
+                (None if pipeline is None else
+                 _canonical_recipe(pipeline, index)))
+    raise ValueError('unknown recipe %r' % (recipe,))
+
+
+def _sort_key(value):
+    # Content-derived ordering that is stable across processes: pickle bytes
+    # for objects that support it, a repr fallback for the rest. Never
+    # compare the objects themselves (they may not be orderable).
+    try:
+        return pickle.dumps(value, protocol=4)
+    except Exception:
+        return repr(value).encode('utf-8', 'replace')
+
+
+def _canonical(value):
+    """
+    Normalize container ordering so a content fingerprint does not depend on
+    hash randomization (sets) or dict insertion order across processes.
+
+    Collections are reduced to sequences of sort keys, so elements whose sort
+    key ties are interchangeable in the fingerprint and cannot make it depend
+    on iteration order.
+    """
+    if isinstance(value, dict):
+        items = [(_sort_key(_canonical(k)), _sort_key(_canonical(v)),
+                  _canonical(v))
+                 for k, v in value.items()]
+        # Sort by both keys so tied keys cannot make the result depend on
+        # insertion order; a full tie means the pairs are identical.
+        items.sort(key=lambda i: (i[0], i[1]))
+        return (type(value).__name__, tuple((k, v) for k, _, v in items))
+    elif isinstance(value, (set, frozenset)):
+        return (type(value).__name__,
+                tuple(sorted(_sort_key(_canonical(v)) for v in value)))
+    elif isinstance(value, (list, tuple)):
+        return (type(value).__name__, tuple(_canonical(v) for v in value))
+    return value
+
+
+class _BatchPlan(object):
+    def __init__(self):
+        self.entries = []       # (serialized task data, priority) pairs.
+        self.task_ids = []      # every task id in every staged graph.
+        self.roots = []         # visible task of each queued entry.
+        self.emitted = []       # task objects to signal after commit.
+        self._seen_objects = set()
+        self._seen_ids = set()
+
+    def reserve(self, task):
+        """
+        Record every id reachable from ``task``, so that the storage can
+        reject collisions before writing anything. Shared references are
+        visited once; two distinct tasks with the same id are an error.
+        """
+        if task is None or id(task) in self._seen_objects:
+            return
+        self._seen_objects.add(id(task))
+        if task.id in self._seen_ids:
+            raise BatchIdConflictError(
+                'Task id %r appears more than once in the batch.' % task.id)
+        self._seen_ids.add(task.id)
+        self.task_ids.append(task.id)
+        self.reserve(task.on_complete)
+        self.reserve(task.on_error)
+        if task.chord_config is not None:
+            self.reserve(task.chord_config.callback)
+
+    def add(self, huey, task, data):
+        if task.id in self._seen_ids:
+            raise BatchIdConflictError(
+                'Task id %r appears more than once in the batch.' % task.id)
+        self.reserve(task)
+        self.entries.append((data, task.priority))
+        self.roots.append(task)
+        self.emitted.append(task)
+
+    def fingerprint(self, huey, recipe):
+        identities = tuple(huey._task_identity(root) for root in self.roots)
+        index = {}
+        for i, task_id in enumerate(self.task_ids):
+            index.setdefault(task_id, i)
+        shape = _canonical_recipe(recipe, index)
+        # Protocol 4 is fixed so that independently-built batches agree
+        # regardless of the interpreter's default pickle protocol.
+        try:
+            payload = pickle.dumps((_canonical(identities),
+                                    _canonical(shape)), protocol=4)
+        except Exception as exc:
+            raise BatchPublishError(
+                'Cannot compute a stable fingerprint for this batch; all '
+                'task arguments must be picklable: %s' % exc) from exc
+        return hashlib.sha256(payload).hexdigest()
 
 
 class Huey(object):
@@ -369,6 +494,263 @@ class Huey(object):
             results.append(Result(self, task))
             task = task.on_complete
         return results
+
+    # -- Atomic batch publishing ------------------------------------------
+    #
+    # Batch publishing collects every task that would normally be written by
+    # repeated calls to enqueue() and writes them in a single SQLite
+    # transaction (see SqliteStorage.publish_batch). Graphs are planned
+    # without touching the database, so an unserializable member or a bad
+    # chord fails before anything is written.
+
+    def publish_batch(self, items, key=None):
+        """
+        Atomically enqueue a group of related tasks.
+
+        ``items`` is an iterable whose members are task signatures, ``group``
+        and ``chord`` instances, or a single such value. Members may contain
+        pipelines, and groups and chords may be nested. Either every member
+        becomes visible to consumers at once, or -- if serialization, an id
+        conflict or a database write fails -- none of them do.
+
+        :param items: iterable of tasks/groups/chords (see above).
+        :param str key: optional stable business identifier. Retrying the same
+            key with the same content returns the handles produced by the
+            first successful publish without writing anything again. The same
+            key with different content raises :py:class:`BatchConflictError`.
+        :return: a :py:class:`BatchResult` with one handle per input item, in
+            input order.
+
+        This is only supported by storage backends that can write a batch
+        atomically (currently :py:class:`SqliteStorage`, and therefore
+        :py:class:`SqliteHuey`). Other backends -- including
+        :py:class:`MemoryHuey` and :py:class:`CySqliteHuey` -- raise
+        :py:class:`BatchPublishError`; ordinary :py:meth:`enqueue` keeps its
+        usual per-task behavior everywhere.
+
+        Signals are emitted only after the transaction commits, and only for
+        an actually-created batch. A failing signal receiver is logged and
+        cannot roll the batch back.
+        """
+        if not getattr(self.storage, 'supports_batch_publish', False):
+            raise BatchPublishError(
+                'Atomic batch publishing is not supported by %s.' %
+                type(self.storage).__name__)
+        if self._immediate:
+            raise BatchPublishError(
+                'Atomic batch publishing is not available in immediate '
+                'mode, which executes tasks synchronously instead of '
+                'publishing them to a queue.')
+        if key is not None and (not isinstance(key, str) or not key):
+            raise TypeError('key must be a non-empty string.')
+        if isinstance(items, (Task, group, chord)):
+            items = (items,)
+        else:
+            items = tuple(items)
+
+        plan = _BatchPlan()
+        recipes = tuple(self._plan_node(item, plan) for item in items)
+        recipe = ('items', recipes)
+
+        if key is None:
+            fingerprint = payload = None
+        else:
+            fingerprint = plan.fingerprint(self, recipe)
+            payload = self.serializer.serialize(recipe)
+
+        created, stored = self.storage.publish_batch(
+            plan.entries,
+            batch_key=key,
+            fingerprint=fingerprint,
+            payload=payload,
+            task_ids=plan.task_ids)
+
+        if not created:
+            # A previous attempt committed. Return its result handles, do not
+            # re-publish and do not emit signals.
+            return self._batch_result(self.serializer.deserialize(stored))
+
+        # Only now that the transaction committed is the batch announced.
+        # Signal.send() already logs (and swallows) receiver errors, so a
+        # failing subscriber cannot make the caller think the batch failed.
+        for task in plan.emitted:
+            self._emit(S.SIGNAL_ENQUEUED, task)
+
+        return self._batch_result(recipe)
+
+    def get_batch(self, key):
+        """
+        Return the :py:class:`BatchResult` stored for a published batch key,
+        or ``None`` if no batch has committed under that key.
+
+        This is how a caller that never saw the outcome of
+        :py:meth:`publish_batch` (e.g. it crashed, or the response was lost)
+        determines whether the batch was committed, possibly from another
+        process.
+        """
+        if not getattr(self.storage, 'supports_batch_publish', False):
+            raise BatchPublishError(
+                'Atomic batch publishing is not supported by %s.' %
+                type(self.storage).__name__)
+        if not isinstance(key, str) or not key:
+            raise TypeError('key must be a non-empty string.')
+        payload = self.storage.get_batch(key)
+        if payload is EmptyData:
+            return None
+        return self._batch_result(self.serializer.deserialize(payload))
+
+    def _batch_result(self, recipe):
+        return BatchResult(self, self._handles_from_recipe(recipe))
+
+    def _handles_from_recipe(self, recipe):
+        kind = recipe[0]
+        if kind == 'none':
+            return None
+        elif kind == 'result':
+            return Result(self, Task(id=recipe[1]))
+        elif kind == 'group':
+            return ResultGroup([self._handles_from_recipe(r)
+                                for r in recipe[1]])
+        elif kind == 'items':
+            return [self._handles_from_recipe(r) for r in recipe[1]]
+        elif kind == 'pipeline':
+            return ResultGroup([self._handles_from_recipe(r)
+                                for r in recipe[1]])
+        elif kind == 'chord':
+            _, members, callback, pipeline = recipe
+            return ChordResult(
+                [self._handles_from_recipe(r) for r in members],
+                self._handles_from_recipe(callback),
+                (None if pipeline is None else
+                 self._handles_from_recipe(pipeline)))
+        raise ValueError('unknown recipe %r' % (recipe,))
+
+    def _plan_node(self, item, plan):
+        if isinstance(item, group):
+            recipes = tuple(self._plan_node(t, plan) for t in item.tasks)
+            return ('group', recipes)
+        elif isinstance(item, chord):
+            return self._plan_chord(item, plan)
+        elif isinstance(item, Task):
+            self._prepare_entry(item)
+            plan.add(self, item, self.serialize_task(item))
+            if not self.results:
+                return ('none',)
+            return self._recipe_for_pipeline(item)
+        raise TypeError('Cannot publish %r in a batch.' % (item,))
+
+    def _plan_chord(self, chord_obj, plan):
+        cid = str(uuid.uuid4())
+        size = len(chord_obj.tasks)
+        members = []
+        for i, task in enumerate(chord_obj.tasks):
+            if isinstance(task, group):
+                raise ValueError('cannot use `group` as a chord member - '
+                                 'use .then() to convert to a `chord` first.')
+            config = ChordConfig(cid, size, i, chord_obj.callback)
+            members.append(self._plan_chord_member(task, config, plan))
+
+        # The callback is enqueued by the consumer when the chord completes,
+        # so for a non-empty chord it is not written now -- but its id (and
+        # pipeline) must still be reserved and included in the batch's
+        # identity so a later batch cannot claim it. An empty chord enqueues
+        # the callback immediately, like Huey.enqueue does.
+        if size:
+            plan.reserve(chord_obj.callback)
+        else:
+            callback = copy.copy(chord_obj.callback)
+            callback.extend_data(([],))
+            self._prepare_entry(callback)
+            plan.add(self, callback, self.serialize_task(callback))
+
+        pipeline = self._pipeline_results(chord_obj.callback)
+        callback_recipe = ('result', chord_obj.callback.id)
+        pipeline_recipe = None
+        if len(pipeline) > 1:
+            pipeline_recipe = ('pipeline', tuple(
+                ('result', r.id) for r in pipeline))
+
+        return ('chord', tuple(members), callback_recipe, pipeline_recipe)
+
+    def _plan_chord_member(self, task, config, plan):
+        if isinstance(task, chord):
+            head = task.callback
+        else:
+            head = task
+
+        tail = head
+        while tail.on_complete is not None:
+            tail = tail.on_complete
+        tail.chord_config = config
+
+        if isinstance(task, chord):
+            self._plan_chord(task, plan)
+        else:
+            self._prepare_entry(head)
+            plan.add(self, head, self.serialize_task(head))
+        return ('result', tail.id)
+
+    def _recipe_for_pipeline(self, task):
+        results = self._pipeline_results(task)
+        if len(results) > 1:
+            return ('pipeline', tuple(('result', r.id) for r in results))
+        return ('result', task.id)
+
+    def _prepare_entry(self, task):
+        # Mirrors Huey.enqueue: expiration is resolved when the task is
+        # actually written. Successors in a pipeline are resolved later,
+        # when the consumer re-enqueues them.
+        if task.expires:
+            task.resolve_expires(self.utc)
+
+    def _task_identity(self, task):
+        """
+        Logical content of a task graph, used for idempotent batch retries.
+
+        Task ids generated by huey are random, so they are not part of the
+        identity. An eta may be: one derived from a relative delay is
+        resolved against the retry's own clock, so it is compared as
+        "scheduled", while an absolute eta is compared exactly. Ids
+        explicitly supplied by the caller are part of the identity, since
+        they define the result handles the caller expects.
+        """
+        kwargs = dict(task.kwargs)
+        if kwargs.get('task') is task:
+            kwargs.pop('task')  # Injected context-task argument.
+
+        if task.eta is None:
+            eta = None
+        elif task._eta_relative:
+            eta = ('relative',)
+        else:
+            eta = ('absolute', task.eta)
+
+        chord_config = None
+        if task.chord_config is not None:
+            cc = task.chord_config
+            # The chord id is generated per publish attempt, so it is not
+            # part of the batch's logical content; membership and callback
+            # are.
+            chord_config = ('chord', cc.size, cc.idx,
+                            self._task_identity(cc.callback))
+
+        return (
+            self._registry.task_to_string(type(task)),
+            (task.id if task._id_provided else None),
+            task.args,
+            kwargs,
+            eta,
+            task.retries,
+            task.retry_delay,
+            task.retry_backoff,
+            task.priority,
+            task.expires,
+            task.timeout,
+            (None if task.on_complete is None else
+             self._task_identity(task.on_complete)),
+            (None if task.on_error is None else
+             self._task_identity(task.on_error)),
+            chord_config)
 
     def dequeue(self):
         data = self.storage.dequeue()
@@ -807,9 +1189,19 @@ class Task(object):
         self.name = type(self).__name__
         self.args = () if args is None else args
         self.kwargs = {} if kwargs is None else kwargs
+        # Remember whether the id was supplied by the caller. Batch
+        # publishing uses this to build a stable content fingerprint: ids
+        # generated by huey are random per process, so they are not part of
+        # the batch's logical content. An empty id is treated as absent,
+        # matching the ``id or create_id()`` fallback below.
+        self._id_provided = bool(id)
         self.id = id or self.create_id()
         self.revoke_id = 'r:%s' % self.id
         self.eta = eta
+        # True when eta was computed from a relative delay. Batch identity
+        # treats relative etas as "scheduled" rather than as an exact time,
+        # because a retry resolves them against a later clock.
+        self._eta_relative = False
         self.retries = retries if retries is not None else self.default_retries
         self.retry_delay = retry_delay if retry_delay is not None else \
                 self.default_retry_delay
@@ -999,16 +1391,21 @@ class TaskWrapper(object):
     def schedule(self, args=None, kwargs=None, eta=None, delay=None,
                  priority=None, retries=None, retry_delay=None,
                  retry_backoff=None, expires=None, timeout=None, id=None):
+        relative = False
         if eta is None and delay is None:
             if isinstance(args, (int, float)):
                 delay = args
+                relative = True
             elif isinstance(args, datetime.timedelta):
                 delay = args.total_seconds()
+                relative = True
             elif isinstance(args, datetime.datetime):
                 eta = args
             else:
                 raise ValueError('schedule() missing required eta= or delay=')
             args = None
+        elif delay is not None:
+            relative = True
 
         if kwargs is not None and not isinstance(kwargs, dict):
             raise ValueError('schedule() kwargs argument must be a dict.')
@@ -1025,6 +1422,7 @@ class TaskWrapper(object):
             priority=priority,
             expires=expires,
             timeout=timeout)
+        task._eta_relative = relative
         return self.huey.enqueue(task)
 
     def _apply(self, it):
@@ -1044,12 +1442,13 @@ class TaskWrapper(object):
     def s(self, *args, **kwargs):
         eta = kwargs.pop('eta', None)
         delay = kwargs.pop('delay', None)
+        relative = delay is not None
         if delay is not None and isinstance(delay, datetime.timedelta):
             delay = delay.total_seconds()
         if eta is not None or delay is not None:
             eta = normalize_time(eta, delay, self.huey.utc)
 
-        return self.task_class(args, kwargs,
+        task = self.task_class(args, kwargs,
                                id=kwargs.pop('id', None),
                                eta=eta,
                                retries=kwargs.pop('retries', None),
@@ -1058,6 +1457,8 @@ class TaskWrapper(object):
                                priority=kwargs.pop('priority', None),
                                expires=kwargs.pop('expires', None),
                                timeout=kwargs.pop('timeout', None))
+        task._eta_relative = relative
+        return task
 
 
 class TaskLock(object):
@@ -1303,6 +1704,36 @@ class Result(object):
 
     def reset(self):
         self._result = EmptyData
+
+
+class BatchResult(object):
+    """
+    Handles produced by :py:meth:`Huey.publish_batch`.
+
+    ``members`` mirrors the input: one handle per published item, in input
+    order. For an empty batch ``members`` is an empty tuple.
+    """
+    def __init__(self, huey, members):
+        self.huey = huey
+        self.members = tuple(members)
+
+    def __len__(self):
+        return len(self.members)
+
+    def __iter__(self):
+        return iter(self.members)
+
+    def __getitem__(self, idx):
+        return self.members[idx]
+
+    def get(self, *args, **kwargs):
+        # With results disabled, a member is None, matching enqueue().
+        return [None if member is None else member.get(*args, **kwargs)
+                for member in self.members]
+    __call__ = get
+
+    def __repr__(self):
+        return '<BatchResult: %s members>' % len(self.members)
 
 
 class ResultGroup(object):

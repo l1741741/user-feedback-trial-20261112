@@ -3,6 +3,7 @@ __license__ = 'MIT'
 __version__ = '3.5.4'
 
 from huey.api import BlackHoleHuey
+from huey.api import BatchResult
 from huey.api import CySqliteHuey
 from huey.api import Huey
 from huey.api import FileHuey
@@ -17,6 +18,9 @@ from huey.api import chord
 from huey.api import crontab
 from huey.api import group
 from huey.exceptions import CancelExecution
+from huey.exceptions import BatchConflictError
+from huey.exceptions import BatchIdConflictError
+from huey.exceptions import BatchPublishError
 from huey.exceptions import RetryTask
 from huey.utils import Error
 from huey.utils import SKIPPED

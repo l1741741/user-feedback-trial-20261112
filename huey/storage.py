@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import heapq
 import itertools
+import logging
 import os
 import re
 import shutil
@@ -33,8 +34,14 @@ except ImportError:
     psycopg = None
 
 from huey.constants import EmptyData
+from huey.exceptions import BatchConflictError
+from huey.exceptions import BatchIdConflictError
+from huey.exceptions import BatchPublishError
 from huey.exceptions import ConfigurationError
 from huey.utils import FileLock
+
+
+logger = logging.getLogger('huey')
 
 
 class BaseStorage(object):
@@ -68,6 +75,39 @@ class BaseStorage(object):
         storage may raise a NotImplementedError for non-None priority values.
         """
         raise NotImplementedError
+
+    #: Whether the storage can publish a group of tasks atomically.
+    supports_batch_publish = False
+
+    def publish_batch(self, entries, batch_key=None, fingerprint=None,
+                      payload=None, task_ids=()):
+        """
+        Atomically append a set of serialized tasks to the queue.
+
+        Implementations must make all entries visible together, or none of
+        them. If ``batch_key`` is given the batch is idempotent: a retry with
+        the same key and fingerprint returns the previously stored payload
+        without writing anything, while a different fingerprint is rejected.
+
+        :param entries: sequence of ``(data, priority)`` pairs.
+        :param str batch_key: optional stable business identifier.
+        :param str fingerprint: digest of the batch content.
+        :param bytes payload: opaque result-handle recipe stored with the key.
+        :param task_ids: sequence of task ids to reserve for the batch.
+        :return: ``(created, payload)``.
+        """
+        raise NotImplementedError(
+            'Atomic batch publishing is not supported by %s.' %
+            type(self).__name__)
+
+    def get_batch(self, key):
+        """
+        Return the opaque payload stored for a batch key, or ``EmptyData`` if
+        no batch has committed under that key.
+        """
+        raise NotImplementedError(
+            'Atomic batch publishing is not supported by %s.' %
+            type(self).__name__)
 
     def dequeue(self):
         """
@@ -795,7 +835,10 @@ class BaseSqlStorage(BaseStorage):
     def __init__(self, *args, **kwargs):
         create_tables = kwargs.pop('create_tables', True)
         super(BaseSqlStorage, self).__init__(*args, **kwargs)
-        self.lock = threading.Lock()
+        # Reentrant so a caller that is already inside a db() block on this
+        # thread gets publish_batch's explicit "transaction is yours" error,
+        # rather than a self-deadlock. Ordinary callers are unaffected.
+        self.lock = threading.RLock()
         self._conn = None
         if create_tables:
             self.initialize_schema()
@@ -850,6 +893,7 @@ class BaseSqlStorage(BaseStorage):
 
 class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
+    supports_batch_publish = True
     integrity_error = getattr(sqlite3, 'IntegrityError', None)
     operational_error = getattr(sqlite3, 'OperationalError', None)
     table_kv = ('create table if not exists kv ('
@@ -870,8 +914,19 @@ class SqliteStorage(BaseSqlStorage):
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
+    # Idempotency records for publish_batch(). A committed batch key keeps the
+    # fingerprint of its content plus an opaque result-handle recipe.
+    table_batch = ('create table if not exists batch ('
+                   'queue text not null, key text not null, '
+                   'fingerprint text not null, payload blob, '
+                   'created real not null, primary key(queue, key))')
+    # Task ids reserved by published batches, so a later batch cannot reuse an
+    # id that has already been (or may already have been) consumed.
+    table_task_id = ('create table if not exists task_id ('
+                     'queue text not null, id text not null, '
+                     'primary key(queue, id))')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           table_counter, drop_index_task, table_batch, table_task_id]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
@@ -932,6 +987,118 @@ class SqliteStorage(BaseSqlStorage):
     def enqueue(self, data, priority=None):
         self.sql('insert into task (queue, data, priority) values (?, ?, ?)',
                  (self.name, self.to_blob(data), priority or 0), commit=True)
+
+    def publish_batch(self, entries, batch_key=None, fingerprint=None,
+                      payload=None, task_ids=()):
+        """
+        Insert every entry and the idempotency record in one exclusive
+        transaction. Readers in other connections cannot observe a partial
+        batch, and a failure at any point rolls the whole batch back.
+
+        The transaction is opened on huey's own connection and only ever
+        spans this call. If that connection already has a transaction open --
+        i.e. the caller has borrowed it -- this method refuses to touch it
+        rather than committing or rolling back work it does not own.
+        """
+        with self.lock:
+            conn = self.conn
+            if getattr(conn, 'in_transaction', False):
+                raise BatchPublishError(
+                    'Cannot publish a batch: the storage connection already '
+                    'has an open transaction that huey does not own. Commit '
+                    'or roll it back first.')
+
+            curs = conn.cursor()
+            try:
+                try:
+                    curs.execute(self.begin_sql)
+                except self.operational_error as exc:
+                    raise BatchPublishError(
+                        'Unable to begin batch transaction: %s' % exc) from exc
+                try:
+                    outcome = self._publish_batch_work(
+                        curs, entries, batch_key, fingerprint, payload,
+                        task_ids)
+                    try:
+                        conn.commit()
+                    except (BatchConflictError, BatchIdConflictError):
+                        raise
+                    except Exception as exc:
+                        # A commit that fails leaves the batch unpublished.
+                        # Roll back below, then report it as a publish error.
+                        raise BatchPublishError(
+                            'Unable to commit task batch: %s' % exc) from exc
+                except BaseException:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        logger.exception('Unable to roll back failed batch.')
+                    raise
+            finally:
+                curs.close()
+        return outcome
+
+    def _publish_batch_work(self, curs, entries, batch_key, fingerprint,
+                            payload, task_ids):
+        if batch_key is not None:
+            curs.execute('select fingerprint, payload from batch '
+                         'where queue = ? and key = ?',
+                         (self.name, batch_key))
+            row = curs.fetchone()
+            if row is not None:
+                stored_fp, stored_payload = row
+                if stored_fp != fingerprint:
+                    raise BatchConflictError(
+                        'Batch %r was already published with different '
+                        'content.' % batch_key)
+                return False, stored_payload
+
+        try:
+            for task_id in task_ids:
+                curs.execute('select 1 from task_id '
+                             'where queue = ? and id = ?',
+                             (self.name, task_id))
+                if curs.fetchone() is not None:
+                    raise BatchIdConflictError(
+                        'Task id %r has already been published by a batch.' %
+                        task_id)
+                curs.execute('insert into task_id (queue, id) values (?, ?)',
+                             (self.name, task_id))
+
+            for data, priority in entries:
+                curs.execute('insert into task (queue, data, priority) '
+                             'values (?, ?, ?)',
+                             (self.name, self.to_blob(data), priority or 0))
+
+            if batch_key is not None:
+                curs.execute('insert into batch '
+                             '(queue, key, fingerprint, payload, created) '
+                             'values (?, ?, ?, ?, ?)',
+                             (self.name, batch_key, fingerprint,
+                              (None if payload is None else
+                               self.to_blob(payload)), time.time()))
+        except (BatchConflictError, BatchIdConflictError):
+            raise
+        except Exception as exc:
+            raise BatchPublishError(
+                'Unable to write task batch: %s' % exc) from exc
+        return True, payload
+
+    def get_batch(self, key):
+        res = self.sql('select payload from batch where queue = ? and key = ?',
+                       (self.name, key), results=True)
+        return res[0][0] if res else EmptyData
+
+    def flush_batches(self):
+        self.sql('delete from batch where queue = ?', (self.name,), True)
+
+    def flush_task_ids(self):
+        self.sql('delete from task_id where queue = ?', (self.name,), True)
+
+    def flush_all(self):
+        super(SqliteStorage, self).flush_all()
+        self.flush_batches()
+        self.flush_task_ids()
 
     def dequeue(self):
         # Quick check without the full exclusive lock.
@@ -1078,6 +1245,17 @@ class SqliteStorage(BaseSqlStorage):
 
 
 class CySqliteStorage(SqliteStorage):
+    # Batch publishing is currently implemented against the stdlib sqlite3
+    # connection API used by SqliteStorage; cysqlite is not covered by the
+    # offline tests, so it advertises no support rather than risking a
+    # partially-visible batch.
+    supports_batch_publish = False
+
+    def publish_batch(self, *args, **kwargs):
+        raise BatchPublishError(
+            'Atomic batch publishing is not supported by %s.' %
+            type(self).__name__)
+
     def __init__(self, name='huey', filename='huey.db', pragmas=None,
                  timeout=5, strict_fifo=False, create_tables=True, **kwargs):
         if cysqlite is None:
