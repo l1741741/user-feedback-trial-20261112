@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<!--
+  Same geometry as feBlend_overlap_multiply.svg but each leaf carries the
+  filter itself and the node opacity is 0.5.  The opacity must be applied
+  exactly once: without a filter the same rect renders at alpha 128, and a
+  screen blend over an empty backdrop must not change color nor coverage.
+
+  Overlap of the two rectangles (source-over of two 50% sources):
+    a = .75 -> 192
+    straight (R=2/3, B=2/3) -> (170, 0, 170)
+  Before the opacity fix the coverage was squared to .25 (alpha 112).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40">
+  <defs>
+    <filter id="screen">
+      <feBlend mode="screen"/>
+    </filter>
+  </defs>
+  <g shape-rendering="crispEdges">
+    <rect x="5" y="5" width="30" height="30" fill="red"
+          opacity="0.5" filter="url(#screen)"/>
+    <rect x="20" y="5" width="30" height="30" fill="blue"
+          opacity="0.5" filter="url(#screen)"/>
+  </g>
+</svg>

@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<!--
+  Two 50%-opaque rectangles overlap, the whole group is composited with a
+  multiply feBlend filter.
+
+  Overlap backdrop inside the group (source-over, straight colors):
+    a = .5 + .5 * (1-.5) = .75
+    R = .5 * .5 / .75             = 1/3  -> straight 85
+    B = .5 / .75                  = 2/3  -> straight 170
+  Multiply over a fully transparent backdrop must keep these values
+  (blending against empty backdrop is a no-op on color and alpha):
+    premultiplied R = 1/3 * .75 = .25  -> 64 on 8 bits
+    premultiplied B = 2/3 * .75 = .5   -> 128 on 8 bits
+    alpha           = .75              -> 192
+  Non-overlap areas keep red/blue at alpha 128.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40">
+  <defs>
+    <filter id="multiply">
+      <feBlend mode="multiply"/>
+    </filter>
+  </defs>
+  <g filter="url(#multiply)" shape-rendering="crispEdges">
+    <rect x="5" y="5" width="30" height="30" fill="red" opacity="0.5"/>
+    <rect x="20" y="5" width="30" height="30" fill="blue" opacity="0.5"/>
+  </g>
+</svg>

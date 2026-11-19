@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<!--
+  A red gradient fading to fully transparent, painted through a multiply
+  filter over an empty backdrop.  Transparent stops carry a hidden red color
+  that must never appear in the output: at every x the straight color stays
+  pure red (255, 0, 0) while only the coverage fades, so there is no dark
+  fringe ("black frame") at the transparent edge.
+
+  Gradient alpha at column x (40 columns, no scaling):
+    a(x) = 1 - x/39
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"
+     shape-rendering="crispEdges">
+  <defs>
+    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="red" stop-opacity="1"/>
+      <stop offset="1" stop-color="red" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="multiply">
+      <feBlend mode="multiply"/>
+    </filter>
+  </defs>
+  <rect x="0" y="0" width="40" height="20" fill="url(#fade)"
+        filter="url(#multiply)"/>
+</svg>

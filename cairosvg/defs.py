@@ -5,6 +5,8 @@ This module handles clips, gradients, masks, patterns and external nodes.
 
 """
 
+import warnings
+
 from .bounding_box import calculate_bounding_box, is_non_empty_bounding_box
 from .features import match_features
 from .helpers import paint, size, transform
@@ -13,6 +15,12 @@ from .shapes import rect
 from .surface import cairo
 from .url import parse_url
 
+# feBlend modes defined by the SVG 1.1 specification and available as
+# native Cairo operators.  Cairo implements the W3C compositing and
+# blending formula on premultiplied surfaces, i.e. fully transparent
+# inputs contribute neither color nor coverage (the hidden straight
+# color of a transparent pixel is ignored) and the output alpha is
+# ``as + ab * (1 - as)``.
 BLEND_OPERATORS = {
     'darken': cairo.OPERATOR_DARKEN,
     'lighten': cairo.OPERATOR_LIGHTEN,
@@ -287,18 +295,47 @@ def prepare_filter(surface, node, name):
                 surface.context.translate(dx, dy)
 
 
+def blend_operator(filter_node):
+    """Return the Cairo operator selected by the ``feBlend`` children.
+
+    The filter definition is shared by every node referencing it, so this
+    function only reads it and never stores state on the node: rendering a
+    filter twice must give twice the exact same result.
+
+    A filter without ``feBlend`` keeps the default source-over compositing.
+    An unsupported blend mode keeps this historical behavior (normal
+    compositing) and emits an explicit warning instead of failing silently.
+
+    """
+    operator = BLEND_OPERATORS['normal']
+    for child in filter_node.children:
+        if child.tag != 'feBlend':
+            continue
+        mode = child.get('mode', 'normal')
+        if mode in BLEND_OPERATORS:
+            operator = BLEND_OPERATORS[mode]
+        else:
+            warnings.warn(
+                f'feBlend mode {mode!r} is not supported by CairoSVG, '
+                'falling back to normal compositing',
+                RuntimeWarning, stacklevel=2)
+    return operator
+
+
 def apply_filter_before_painting(surface, node, name):
-    """Apply a filter transforming the painting operations."""
+    """Apply a filter transforming the painting operations.
+
+    The painted group is the source and the surface below the filtered
+    node is the backdrop; Cairo composites them with the selected blend
+    operator following the W3C compositing formula, so colors and alpha
+    are handled together on premultiplied data.
+
+    """
     if 'id' in node and node['id'] in surface.masks:
         return
 
     if name in surface.filters:
-        filter_node = surface.filters[name]
-        for child in filter_node.children:
-            # Blend
-            if child.tag == 'feBlend':
-                surface.context.set_operator(BLEND_OPERATORS.get(
-                    child.get('mode', 'normal'), BLEND_OPERATORS['normal']))
+        surface.context.set_operator(blend_operator(surface.filters[name]))
 
 
 def apply_filter_after_painting(surface, node, name):

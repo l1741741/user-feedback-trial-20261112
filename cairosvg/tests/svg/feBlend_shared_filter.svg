@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!--
+  Two leaves reference the same multiply filter definition.  The filter node
+  is shared, so rendering the second rect must not depend on what happened
+  while rendering the first one: both 50%-opaque red rects over the empty
+  backdrop come out identical at straight red (255, 0, 0) with alpha 128.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20"
+     shape-rendering="crispEdges">
+  <defs>
+    <filter id="shared-multiply">
+      <feBlend mode="multiply"/>
+    </filter>
+  </defs>
+  <rect x="0"  y="0" width="20" height="20" fill="red"
+        opacity="0.5" filter="url(#shared-multiply)"/>
+  <rect x="40" y="0" width="20" height="20" fill="red"
+        opacity="0.5" filter="url(#shared-multiply)"/>
+</svg>

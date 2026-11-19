@@ -414,7 +414,12 @@ class Surface(object):
         # Get stroke and fill opacity
         stroke_opacity = float(node.get('stroke-opacity', 1))
         fill_opacity = float(node.get('fill-opacity', 1))
-        if opacity < 1 and not node.children:
+        # For a leaf node without a filter/mask, the node opacity is baked
+        # into the single paint operation below.  A filtered leaf is painted
+        # from a pushed group (see the end of this method): the group must
+        # keep the source colors and coverage untouched, and the node opacity
+        # is applied once when the group is composited with its backdrop.
+        if (opacity < 1 and not node.children and not (filter_ or mask)):
             stroke_opacity *= opacity
             fill_opacity *= opacity
 
@@ -484,6 +489,11 @@ class Surface(object):
             if mask in self.masks:
                 paint_mask(self, node, mask, opacity)
             else:
+                # The node opacity is applied to the group content here.
+                # A filtered node is painted through a blend operator: the
+                # operator already consumes the source group as-is, so the
+                # opacity must be given to paint_with_alpha exactly once,
+                # not multiplied into the group itself beforehand.
                 self.context.paint_with_alpha(opacity)
             if filter_:
                 apply_filter_after_painting(self, node, filter_)

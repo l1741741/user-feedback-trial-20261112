@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<!--
+  Baseline without any filter: same two overlapping 50%-opaque rectangles as
+  feBlend_overlap_multiply.svg, rendered with plain source-over compositing.
+  A multiply filter over an empty backdrop must reproduce this exactly,
+  which is what asserts the "transparent input adds no hidden color" rule.
+
+  Overlap: alpha .75 (192), straight (R=1/3, B=2/3) -> (85, 0, 170).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40"
+     shape-rendering="crispEdges">
+  <rect x="5" y="5" width="30" height="30" fill="red" opacity="0.5"/>
+  <rect x="20" y="5" width="30" height="30" fill="blue" opacity="0.5"/>
+</svg>

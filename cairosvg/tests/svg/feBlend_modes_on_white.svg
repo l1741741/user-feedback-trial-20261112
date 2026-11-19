@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<!--
+  A 50%-opaque red rect blended with an opaque white backdrop using each
+  supported feBlend mode.  W3C formulas with cs=red, cb=white, as=0.5:
+
+    normal:   co = .5*red + .5*white = (255, 128, 128), a = 255
+    multiply: B = red*white = red, same (255, 128, 128)
+    screen:   B = white -> co = white (255, 255, 255)
+    darken:   B = red -> (255, 128, 128)
+    lighten:  B = white -> (255, 255, 255)
+
+  The filter is on the leaf node together with opacity=0.5; the opacity must
+  act once, so the backdrop remains fully opaque (alpha 255 everywhere).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="250" height="30"
+     shape-rendering="crispEdges">
+  <defs>
+    <filter id="normal"><feBlend mode="normal"/></filter>
+    <filter id="multiply"><feBlend mode="multiply"/></filter>
+    <filter id="screen"><feBlend mode="screen"/></filter>
+    <filter id="darken"><feBlend mode="darken"/></filter>
+    <filter id="lighten"><feBlend mode="lighten"/></filter>
+  </defs>
+  <rect x="0" y="0" width="250" height="30" fill="white"/>
+  <rect x="0"   y="5" width="40" height="20" fill="red"
+        opacity="0.5" filter="url(#normal)"/>
+  <rect x="50"  y="5" width="40" height="20" fill="red"
+        opacity="0.5" filter="url(#multiply)"/>
+  <rect x="100" y="5" width="40" height="20" fill="red"
+        opacity="0.5" filter="url(#screen)"/>
+  <rect x="150" y="5" width="40" height="20" fill="red"
+        opacity="0.5" filter="url(#darken)"/>
+  <rect x="200" y="5" width="40" height="20" fill="red"
+        opacity="0.5" filter="url(#lighten)"/>
+</svg>

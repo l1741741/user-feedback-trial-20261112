@@ -3,6 +3,18 @@
 ======
 
 
+Unreleased
+==========
+
+* Fix color and alpha handling of the supported ``feBlend`` modes
+  (``normal``, ``multiply``, ``screen``, ``darken``, ``lighten``):
+  the node/group opacity is now applied exactly once on filtered and
+  masked leaves instead of being squared, so semi-transparent overlaps
+  keep their correct visible color and coverage
+* Warn explicitly when an ``feBlend`` mode is not supported, keeping the
+  historical fallback to normal compositing
+
+
 Version 2.9.1 released on 2026-09-07
 ====================================
 
