@@ -28,6 +28,10 @@ from huey.exceptions import TaskTimeout
 from huey.registry import Registry
 from huey.serializer import Serializer
 from huey.storage import BlackHoleStorage
+from huey.storage import CHORD_COMPLETED
+from huey.storage import CHORD_DUPLICATE
+from huey.storage import CHORD_STATE_DELIVERED
+from huey.storage import CHORD_UNKNOWN
 from huey.storage import CySqliteStorage
 from huey.storage import FileStorage
 from huey.storage import MemoryStorage
@@ -95,7 +99,8 @@ class Huey(object):
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
                  use_zlib=False, immediate_use_memory=True, storage_class=None,
-                 store_intermediate_errors=True, **storage_kwargs):
+                 store_intermediate_errors=True, durable_chord=False,
+                 **storage_kwargs):
 
         self.name = name
         self.results = results
@@ -107,6 +112,27 @@ class Huey(object):
         if serializer is None:
             serializer = Serializer(compression, use_zlib=use_zlib)
         self.serializer = serializer
+
+        # Recoverable chord mode. When enabled, chord bookkeeping lives in
+        # durable storage so duplicate completion notifications cannot trigger
+        # the callback twice and a process exit at the join point cannot lose
+        # it. Backends without the required primitives are rejected up-front.
+        self.durable_chord = durable_chord
+        if durable_chord:
+            if immediate and immediate_use_memory:
+                raise ConfigurationError(
+                    'durable_chord=True is incompatible with immediate mode, '
+                    'which executes tasks in-process without durable storage.')
+            storage_cls = storage_class if storage_class is not None \
+                else self.storage_class
+            if storage_cls is None or not getattr(storage_cls,
+                                                  'supports_durable_chord',
+                                                  False):
+                raise ConfigurationError(
+                    'durable_chord=True requires a storage backend that '
+                    'implements the recoverable chord protocol (e.g. '
+                    'SqliteStorage).')
+            storage_kwargs['durable_chord'] = True
 
         # Initialize storage.
         self.storage_kwargs = storage_kwargs
@@ -327,14 +353,38 @@ class Huey(object):
     def _enqueue_chord(self, chord_obj):
         cid = str(uuid.uuid4())
         size = len(chord_obj.tasks)
-        results = []
+        configs = []
+        tails = []
         for i, task in enumerate(chord_obj.tasks):
             if isinstance(task, group):
                 raise ValueError('cannot use `group` as a chord member - '
                                  'use .then() to convert to a `chord` first.')
+            head = task.callback if isinstance(task, chord) else task
+            tail = head
+            while tail.on_complete is not None:
+                tail = tail.on_complete
+            tails.append(tail)
+            configs.append(ChordConfig(cid, size, i, chord_obj.callback))
 
-            config = ChordConfig(cid, size, i, chord_obj.callback)
-            results.append(self._enqueue_chord_member(task, config))
+        if self.durable_chord and size:
+            # Persist the membership and callback BEFORE any member is
+            # enqueued, so a completion notification can never arrive for an
+            # unknown chord, and a crash before all enqueues leaves a
+            # recoverable open chord rather than a lost join.
+            self._durable_chord_init(cid, size, chord_obj.callback, tails)
+
+        results = []
+        for i, task in enumerate(chord_obj.tasks):
+            tail = tails[i]
+            tail.chord_config = configs[i]
+            if isinstance(task, chord):
+                # Re-uses the already-attached config on the tail task.
+                self._enqueue_chord(task)
+            else:
+                # The pipeline chain is attached via on_complete, so
+                # enqueuing the member enqueues its full chain.
+                self.enqueue(task)
+            results.append(Result(self, tail))
 
         if not size:
             callback = copy.copy(chord_obj.callback)
@@ -345,11 +395,16 @@ class Huey(object):
         return ChordResult(results, pipeline[0],
                            ResultGroup(pipeline) if len(pipeline) > 1 else None)
 
+    def _durable_chord_init(self, cid, size, callback, tails):
+        callback_blob = self.serializer.serialize(
+            self._registry.create_message(callback))
+        self.storage.chord_init(cid, size, callback_blob,
+                                [tail.id for tail in tails])
+
     def _enqueue_chord_member(self, task, config):
-        if isinstance(task, chord):
-            head = task.callback
-        else:
-            head = task
+        # Retained for backwards compatibility with external callers; the
+        # normal enqueue path is handled directly by _enqueue_chord().
+        head = task.callback if isinstance(task, chord) else task
 
         tail = head
         while tail.on_complete is not None:
@@ -551,6 +606,10 @@ class Huey(object):
             task = task.on_complete
 
     def _check_chord(self, cc, value):
+        if self.durable_chord:
+            self._check_chord_durable(cc, value)
+            return
+
         chord_key = 'chord:%s' % cc.cid
         result_key = 'chord:%s:%s' % (cc.cid, cc.idx)
         self.put_result(result_key, value)
@@ -568,6 +627,123 @@ class Huey(object):
             callback = cc.callback
             callback.extend_data((results,))
             self.enqueue(callback)
+
+    def _check_chord_durable(self, cc, value):
+        # The storage call is one exclusive transaction: the value is
+        # written at the member's position, duplicates are rejected, and the
+        # open -> ready transition happens atomically with the last write.
+        value_blob = self.serializer.serialize(value)
+        status = self.storage.chord_report(cc.cid, cc.idx, value_blob)
+        if status == CHORD_COMPLETED:
+            self._chord_deliver(cc.cid)
+        # CHORD_RECORDED: more members remain. CHORD_DUPLICATE: a repeated
+        # notification, ignored. CHORD_UNKNOWN: already swept/recovered.
+
+    def _chord_deliver(self, cid):
+        """
+        Assemble the ordered member results and hand the callback to the
+        queue. Fetch and enqueue use separate transactions, but the ready ->
+        delivered transition is conditional, so a crash between them or two
+        racing workers produce exactly one callback task in the queue.
+        """
+        fetched = self.storage.chord_fetch_ready(cid)
+        if fetched is None:
+            return  # Another process delivered it, or the chord vanished.
+        callback_blob, value_blobs = fetched
+        callback = self.deserialize_task(bytes(callback_blob))
+        results = [self.serializer.deserialize(bytes(blob))
+                   for blob in value_blobs]
+        callback.extend_data((results,))
+        data = self.serialize_task(callback)
+        if not self.storage.chord_enqueue_ready(cid, data, callback.priority):
+            # Lost the race (or a retry after a crash): the callback is
+            # already in the queue, do not publish a second copy.
+            return
+
+    def chord_sweep(self, grace=300, retention=3600, now=None):
+        """
+        Recover durable chords after crashes and lost deliveries.
+
+        1. Every "ready" chord gets its callback enqueued exactly once.
+        2. "open" chords whose members have all left the queue and schedule
+           and have been idle past `grace` seconds are reconciled: missing
+           slots are filled with an explicit Error so a poison message or a
+           hard-killed worker cannot hang the batch forever.
+        3. Delivered rows older than `retention` seconds are removed, but
+           never before the delivery in (1) has had a chance to run.
+
+        Returns a dict describing what was recovered, useful for tests and
+        operational diagnostics.
+        """
+        if not self.durable_chord:
+            return {'delivered': [], 'reconciled': [], 'removed': 0}
+        if now is None:
+            now = time.time()
+
+        delivered = []
+        for cid in self.storage.chord_ready_cids():
+            self._chord_deliver(cid)
+            if self.storage.chord_state(cid) == CHORD_STATE_DELIVERED:
+                delivered.append(cid)
+
+        reconciled = []
+        pending_ids = self._chord_pending_task_ids()
+        for cid in self.storage.chord_open_cids():
+            members = self.storage.chord_members(cid)
+            if any(task_id in pending_ids for _, task_id in members):
+                continue
+            # Nothing of this chord is still queued or scheduled. Require a
+            # grace period so a task that is merely in-flight (dequeued but
+            # not yet reporting) is not mistaken for a lost member.
+            if now - self.storage.chord_updated(cid) < grace:
+                continue
+            present = set(self.storage.chord_present_slots(cid))
+            missing = {}
+            for idx, task_id in members:
+                if idx not in present:
+                    missing[idx] = self.serializer.serialize(Error({
+                        'error': ('chord member %s was lost (worker killed '
+                                  'or undeliverable message)' % task_id),
+                        'retries': 0,
+                        'traceback': '',
+                        'task_id': task_id,
+                    }))
+            if self.storage.chord_fill_and_complete(cid, missing, ts=now):
+                reconciled.append(cid)
+                self._chord_deliver(cid)
+
+        removed = self.storage.chord_delete_delivered(now - retention)
+        return {'delivered': delivered, 'reconciled': reconciled,
+                'removed': removed}
+
+    def _chord_pending_task_ids(self):
+        """
+        Ids of tasks currently queued or scheduled (including retries and
+        pipeline continuation tasks), computed by walking on_complete
+        chains. A member whose whole chain is absent from both stores is
+        treated as gone.
+        """
+        ids = set()
+        for data in self.storage.enqueued_items():
+            try:
+                task = self.deserialize_task(data)
+            except Exception:
+                logger.exception('chord sweep: unreadable queued message.')
+                continue
+            self._collect_task_ids(task, ids)
+        for data in self.storage.scheduled_items():
+            try:
+                task = self.deserialize_task(data)
+            except Exception:
+                logger.exception('chord sweep: unreadable scheduled message.')
+                continue
+            self._collect_task_ids(task, ids)
+        return ids
+
+    def _collect_task_ids(self, task, ids):
+        while task is not None:
+            ids.add(task.id)
+            task = task.on_complete
 
     def _requeue_task(self, task, timestamp, retry_eta=None):
         task.retries -= 1

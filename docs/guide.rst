@@ -1227,7 +1227,11 @@ What happens when a :py:class:`chord` is enqueued?
     completion and contributes ``huey.SKIPPED`` as its result. A sub-task
     that is interrupted by an abrupt consumer shutdown, however, is lost
     (tasks are delivered at-most-once), in which case the callback will not
-    fire.
+    fire. The SQLite backend's :ref:`recoverable-chord` mode removes this
+    failure mode: chord state is persisted transactionally, a process killed
+    at the join is repaired by the recovery sweep, and a member whose
+    message is lost is reconciled with an explicit ``Error`` instead of
+    hanging the batch.
 
 Enqueueing a :py:class:`chord` returns a :py:class:`ChordResult`:
 
@@ -1439,6 +1443,98 @@ In this example, ``alert_admin`` runs if ``aggregate`` raises an exception,
     regardless of the ``store_none`` setting. The member's own
     :py:class:`Result`, reached through ``ChordResult.results``, still obeys
     ``store_none``.
+
+
+.. _recoverable-chord:
+
+Recoverable chords (SQLite)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The default chord bookkeeping uses an in-storage counter and per-member
+keys. It is simple and works on every backend, but two failure modes remain:
+
+* a duplicated completion notification can race the counter increment, and
+  the join logic lives in application code rather than a single transaction;
+* if the process executing the final member exits between collecting the
+  results and enqueueing the callback, the callback is never published and
+  the batch hangs forever.
+
+The SQLite backend offers an opt-in **recoverable chord** mode that moves
+the whole join into dedicated tables and exclusive SQLite transactions:
+
+.. code-block:: python
+
+    from huey import SqliteHuey
+
+    huey = SqliteHuey('docs', filename='queue.db', durable_chord=True)
+
+Enabling the flag on a backend without the protocol raises
+:py:class:`~huey.exceptions.ConfigurationError` immediately; storages that
+predate the feature keep their legacy behavior unchanged. The public
+:py:class:`group`, :py:class:`chord` and :py:class:`Result` interfaces are
+identical in both modes.
+
+Lifecycle of a durable chord:
+
+1. When the chord is enqueued, a row holding the serialized callback and one
+   row per member (position index + task id) are committed **before** any
+   member task is published.
+2. Each terminal completion — success, permanent failure
+   (:py:class:`Error`), revocation/expiry/cancellation (``SKIPPED``) —
+   writes the member's value at its original position in one exclusive
+   transaction. A member still retrying has not terminated and writes
+   nothing, so a retry can never consume two slots.
+3. A repeated notification for the same member is rejected by the table's
+   primary key; it never increments the completion count. When two workers
+   finish the final members concurrently, SQLite serializes their
+   transactions and exactly one of them observes the full set.
+4. The last report transitions the chord from ``open`` to ``ready``. The
+   callback enqueue and the ``ready`` -> ``delivered`` transition happen in
+   one transaction with a conditional state check, so racing processes (and
+   retries after a crash) create exactly one callback task in the queue.
+5. Member values are stored by index, so the callback always receives them
+   in enqueue order regardless of completion order.
+
+Recovery
+""""""""
+
+If a process dies while a chord is ``ready`` — or leaves an ``open`` chord
+whose member tasks have all vanished from the queue and schedule — the
+:py:meth:`Huey.chord_sweep` method repairs it:
+
+* every ``ready`` chord gets its callback delivered exactly once;
+* ``open`` chords idle past a grace period (default 300 s) with no member
+  left in any store are reconciled: missing positions are filled with an
+  explicit :py:class:`Error` describing the lost task id, so one bad or
+  lost message can never pin the batch forever;
+* bookkeeping rows are only deleted after delivery **and** a retention
+  window (default 3600 s), so cleanup can never remove evidence before a
+  pending recovery has run.
+
+The :py:class:`Consumer` calls the sweep once at startup (before workers are
+spawned) and periodically from the scheduler. The cadence and windows are
+configurable:
+
+.. code-block:: python
+
+    consumer = huey.create_consumer(
+        workers=4,
+        worker_type='process',
+        chord_sweep_interval=5,     # scheduler sweep cadence in seconds
+        chord_sweep_grace=300,      # idle time before reconciling an open
+        chord_sweep_retention=3600) # keep delivered evidence for this long
+
+A terminal reproduction with real subprocesses lives in
+``examples/recoverable_chord`` and the protocol-level guarantees are covered
+by ``huey/tests/test_durable_chord.py`` and the multi-process suite in
+``huey/tests/test_durable_chord_multiproc.py``.
+
+.. note::
+    "Exactly one delivery" refers to the handoff between the chord join and
+    the task queue **within one SQLite database**. Huey remains an
+    at-most-once task system overall: a worker that crashes after
+    dequeueing but before finishing a callback can still cause that
+    callback's *function* to be re-executed by higher-level retries.
 
 
 Dynamic fan-out

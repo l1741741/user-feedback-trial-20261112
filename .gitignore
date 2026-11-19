@@ -8,3 +8,6 @@ huey.db
 build/
 dist/
 .mypy_cache/
+examples/recoverable_chord/demo.db*
+examples/recoverable_chord/attempt-*
+examples/recoverable_chord/submitted.txt

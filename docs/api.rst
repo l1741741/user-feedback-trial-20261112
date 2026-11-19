@@ -133,6 +133,9 @@ Huey types
         corruption in the event of sudden power loss. By default will use the
         SQLite library's ``synchronous`` setting (typically ``1``, which
         provides a good balance between durability and performance).
+    :param bool durable_chord: persist chord joins in dedicated tables so the
+        callback survives process exits and duplicate member notifications
+        cannot trigger it twice. See :ref:`recoverable-chord`.
 
     SqliteHuey fully supports task priorities.
 
@@ -231,7 +234,7 @@ Huey types
 Huey object
 -----------
 
-.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, storage_class=None, store_intermediate_errors=True, **storage_kwargs)
+.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, storage_class=None, store_intermediate_errors=True, durable_chord=False, **storage_kwargs)
 
     :param str name: the name of the task queue, e.g. your application's name.
     :param bool results: whether to store task results.
@@ -243,6 +246,11 @@ Huey object
         lock rejection with a retry pending is not a failure and is never
         stored. Defaults to ``True`` for backwards
         compatibility. See :ref:`store-intermediate-errors`.
+    :param bool durable_chord: enable the recoverable chord protocol. Backends
+        without the required storage primitives raise
+        :py:class:`~huey.exceptions.ConfigurationError`; supported backends
+        (currently SQLite) additionally receive ``durable_chord=True`` in
+        their storage keyword arguments. See :ref:`recoverable-chord`.
     :param bool utc: use UTC internally, convert naive datetimes from local
         time to UTC (if local time is other than UTC).
     :param bool immediate: useful for debugging, causes tasks to be executed

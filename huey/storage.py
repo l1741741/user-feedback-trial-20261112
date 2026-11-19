@@ -37,12 +37,27 @@ from huey.exceptions import ConfigurationError
 from huey.utils import FileLock
 
 
+# Durable chord lifecycle states (stored in the chord table).
+CHORD_STATE_OPEN = 'open'            # Members are still reporting in.
+CHORD_STATE_READY = 'ready'          # All results collected, callback pending.
+CHORD_STATE_DELIVERED = 'delivered'  # Callback task was enqueued.
+
+# Outcomes of a durable chord member report.
+CHORD_UNKNOWN = 'unknown'      # No chord with this id, report was a no-op.
+CHORD_DUPLICATE = 'duplicate'  # Member already reported (or chord sealed).
+CHORD_RECORDED = 'recorded'    # Member result stored, more members remain.
+CHORD_COMPLETED = 'completed'  # This report filled the final slot.
+
+
 class BaseStorage(object):
     """
     Base storage-layer interface. Subclasses should implement all methods.
     """
     blocking = False  # Does dequeue() block until ready, or should we poll?
     priority = True
+    # Whether the storage implements the recoverable chord primitives
+    # (chord_init/chord_report/chord_enqueue_ready/chord_sweep helpers).
+    supports_durable_chord = False
 
     def __init__(self, name='huey', **storage_kwargs):
         self.name = name
@@ -296,6 +311,13 @@ class BaseStorage(object):
         """
         raise NotImplementedError
 
+    def flush_chords(self):
+        """
+        Delete all durable chord bookkeeping. No-op for storages without the
+        recoverable chord protocol.
+        """
+        pass
+
     def flush_all(self):
         """
         Remove all persistent or semi-persistent data.
@@ -306,6 +328,7 @@ class BaseStorage(object):
         self.flush_schedule()
         self.flush_results()
         self.flush_counters()
+        self.flush_chords()
 
 
 class BlackHoleStorage(BaseStorage):
@@ -852,6 +875,7 @@ class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
     integrity_error = getattr(sqlite3, 'IntegrityError', None)
     operational_error = getattr(sqlite3, 'OperationalError', None)
+    supports_durable_chord = True
     table_kv = ('create table if not exists kv ('
                 'queue text not null, key text not null, value blob not null, '
                 'primary key(queue, key))')
@@ -870,17 +894,42 @@ class SqliteStorage(BaseSqlStorage):
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
+    # Recoverable chord protocol. A chord row is created in the "open" state
+    # before any member is enqueued, moves to "ready" once every member has
+    # reported a terminal value, and to "delivered" when its callback task is
+    # enqueued. The state transitions and the callback enqueue happen inside
+    # single exclusive transactions, so at most one callback delivery is ever
+    # produced per chord even with multiple processes racing on the last
+    # members. Rows are only removed after delivery plus a retention sweep.
+    table_chord = ('create table if not exists chord ('
+                   'queue text not null, cid text not null, '
+                   'size integer not null, state text not null, '
+                   'created real not null, updated real not null, '
+                   'callback blob, primary key(queue, cid))')
+    table_chord_member = ('create table if not exists chord_member ('
+                          'queue text not null, cid text not null, '
+                          'idx integer not null, task_id text not null, '
+                          'primary key(queue, cid, idx))')
+    table_chord_result = ('create table if not exists chord_result ('
+                          'queue text not null, cid text not null, '
+                          'idx integer not null, value blob not null, '
+                          'primary key(queue, cid, idx))')
+    index_chord_member_tid = ('create index if not exists '
+                              'chord_member_queue_task '
+                              'on chord_member (queue, task_id)')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           table_counter, drop_index_task, table_chord, table_chord_member,
+           table_chord_result, index_chord_member_tid]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
-                 create_tables=True, **kwargs):
+                 create_tables=True, durable_chord=False, **kwargs):
         self.filename = filename
         self._cache_mb = cache_mb
         self._fsync = fsync
         self._journal_mode = journal_mode
         self._timeout = timeout  # Busy timeout in seconds, default is 5.
+        self.durable_chord = durable_chord
         self._conn_kwargs = kwargs
 
         # By default Sqlite may reuse rowids when rows are removed. This means
@@ -1076,10 +1125,214 @@ class SqliteStorage(BaseSqlStorage):
     def flush_counters(self):
         self.sql('delete from counter where queue=?', (self.name,), True)
 
+    def flush_chords(self):
+        with self.db(commit=True) as curs:
+            curs.execute('delete from chord where queue=?', (self.name,))
+            curs.execute('delete from chord_member where queue=?',
+                         (self.name,))
+            curs.execute('delete from chord_result where queue=?',
+                         (self.name,))
+
+    # ------------------------------------------------------------------
+    # Recoverable chord primitives.
+    #
+    # Every method runs inside a single `begin exclusive` transaction, which
+    # serializes writers across processes as well as threads. All state
+    # transitions are conditional (where state = 'open' / 'ready'), so a
+    # process killed mid-protocol leaves the row in the previous state and a
+    # later call or the recovery sweep simply retries without producing
+    # duplicates.
+    # ------------------------------------------------------------------
+    def chord_init(self, cid, size, callback_blob, member_ids, ts=None):
+        """
+        Persist a chord's membership before any member task is enqueued.
+        Member ids are ordered by position.
+        """
+        if ts is None:
+            ts = time.time()
+        with self.db(commit=True) as curs:
+            curs.execute('insert into chord (queue, cid, size, state, '
+                         'created, updated, callback) '
+                         'values (?, ?, ?, ?, ?, ?, ?)',
+                         (self.name, cid, size, CHORD_STATE_OPEN, ts, ts,
+                          self.to_blob(callback_blob)))
+            curs.executemany(
+                'insert into chord_member (queue, cid, idx, task_id) '
+                'values (?, ?, ?, ?)',
+                [(self.name, cid, idx, task_id)
+                 for idx, task_id in enumerate(member_ids)])
+
+    def chord_report(self, cid, idx, value_blob, ts=None):
+        """
+        Record one member's terminal value, idempotently.
+
+        Returns one of the CHORD_* constants:
+        * CHORD_UNKNOWN: no chord with this id (a no-op).
+        * CHORD_DUPLICATE: this member already reported, or the chord is no
+          longer accepting reports (ready/delivered).
+        * CHORD_RECORDED: the value was stored but other members are pending.
+        * CHORD_COMPLETED: this report filled the last open slot; the chord
+          is now in the ready state and awaits callback delivery.
+        """
+        if ts is None:
+            ts = time.time()
+        with self.db(commit=True) as curs:
+            curs.execute('select size, state from chord where queue=? and '
+                         'cid=?', (self.name, cid))
+            row = curs.fetchone()
+            if row is None:
+                return CHORD_UNKNOWN
+            size, state = row
+            if state != CHORD_STATE_OPEN:
+                return CHORD_DUPLICATE
+            try:
+                curs.execute('insert into chord_result (queue, cid, idx, '
+                             'value) values (?, ?, ?, ?)',
+                             (self.name, cid, idx, self.to_blob(value_blob)))
+            except self.integrity_error:
+                # Same member reported again; do not count it twice.
+                return CHORD_DUPLICATE
+            curs.execute('update chord set updated=? where queue=? and cid=?',
+                         (ts, self.name, cid))
+            curs.execute('select count(*) from chord_result where queue=? '
+                         'and cid=?', (self.name, cid))
+            count = curs.fetchone()[0]
+            if count == size:
+                curs.execute('update chord set state=?, updated=? where '
+                             'queue=? and cid=? and state=?',
+                             (CHORD_STATE_READY, ts, self.name, cid,
+                              CHORD_STATE_OPEN))
+                return CHORD_COMPLETED
+            return CHORD_RECORDED
+
+    def chord_ready_cids(self):
+        """Ids of chords whose members all reported but whose callback is not
+        yet delivered. Used by the recovery sweep."""
+        rows = self.sql('select cid from chord where queue=? and state=?',
+                        (self.name, CHORD_STATE_READY), results=True)
+        return [cid for cid, in rows]
+
+    def chord_open_cids(self):
+        rows = self.sql('select cid from chord where queue=? and state=?',
+                        (self.name, CHORD_STATE_OPEN), results=True)
+        return [cid for cid, in rows]
+
+    def chord_members(self, cid):
+        """Ordered list of (idx, task_id) for the chord's members."""
+        rows = self.sql('select idx, task_id from chord_member where queue=? '
+                        'and cid=? order by idx', (self.name, cid),
+                        results=True)
+        return [(idx, task_id) for idx, task_id in rows]
+
+    def chord_present_slots(self, cid):
+        """Indices that already hold a reported member value."""
+        rows = self.sql('select idx from chord_result where queue=? and '
+                        'cid=? order by idx', (self.name, cid), results=True)
+        return [idx for idx, in rows]
+
+    def chord_updated(self, cid):
+        """Last activity timestamp for the chord row, or 0.0 if absent."""
+        rows = self.sql('select updated from chord where queue=? and cid=?',
+                        (self.name, cid), results=True)
+        return rows[0][0] if rows else 0.0
+
+    def chord_fetch_ready(self, cid):
+        """
+        Return (callback_blob, [value blobs in member order]) for a ready
+        chord, or None if it is not ready.
+        """
+        rows = self.sql(
+            'select c.callback, r.idx, r.value from chord as c '
+            'left join chord_result as r on r.queue = c.queue and '
+            'r.cid = c.cid where c.queue=? and c.cid=? and c.state=? '
+            'order by r.idx',
+            (self.name, cid, CHORD_STATE_READY), results=True)
+        if not rows:
+            return None
+        callback = rows[0][0]
+        values = [value for _, _, value in rows]
+        return callback, values
+
+    def chord_enqueue_ready(self, cid, data, priority=0.0):
+        """
+        Enqueue the callback task and mark the chord delivered in one
+        transaction. Returns True if the callback was enqueued, False if
+        another process already delivered it. Retrying after a crash is
+        safe: a delivered chord rejects the conditional state update.
+        """
+        with self.db(commit=True) as curs:
+            curs.execute('select 1 from chord where queue=? and cid=? and '
+                         'state=?', (self.name, cid, CHORD_STATE_READY))
+            if curs.fetchone() is None:
+                return False
+            curs.execute('insert into task (queue, data, priority) '
+                         'values (?, ?, ?)',
+                         (self.name, self.to_blob(data), priority or 0))
+            curs.execute('update chord set state=?, updated=? where '
+                         'queue=? and cid=? and state=?',
+                         (CHORD_STATE_DELIVERED, time.time(), self.name, cid,
+                          CHORD_STATE_READY))
+            return True
+
+    def chord_fill_and_complete(self, cid, missing, ts=None):
+        """
+        Recovery path: fill still-missing member slots with `missing`, a
+        mapping of idx -> value blob, and move the chord to ready. Returns
+        True if the chord became ready, False if it was already ready or
+        delivered.
+        """
+        if ts is None:
+            ts = time.time()
+        with self.db(commit=True) as curs:
+            curs.execute('select state from chord where queue=? and cid=?',
+                         (self.name, cid))
+            row = curs.fetchone()
+            if row is None or row[0] != CHORD_STATE_OPEN:
+                return False
+            curs.executemany(
+                'insert or ignore into chord_result (queue, cid, idx, value) '
+                'values (?, ?, ?, ?)',
+                [(self.name, cid, idx, self.to_blob(blob))
+                 for idx, blob in missing.items()])
+            curs.execute('update chord set state=?, updated=? where '
+                         'queue=? and cid=? and state=?',
+                         (CHORD_STATE_READY, ts, self.name, cid,
+                          CHORD_STATE_OPEN))
+            return True
+
+    def chord_delete_delivered(self, older_than_ts):
+        """
+        Remove bookkeeping for delivered chords, but only once their
+        evidence has aged past `older_than_ts` so an in-flight recovery can
+        never have the rows swept away underneath it.
+        """
+        with self.db(commit=True) as curs:
+            curs.execute('select cid from chord where queue=? and state=? '
+                         'and updated < ?',
+                         (self.name, CHORD_STATE_DELIVERED, older_than_ts))
+            cids = [cid for cid, in curs.fetchall()]
+            for cid in cids:
+                curs.execute('delete from chord where queue=? and cid=?',
+                             (self.name, cid))
+                curs.execute('delete from chord_member where queue=? and '
+                             'cid=?', (self.name, cid))
+                curs.execute('delete from chord_result where queue=? and '
+                             'cid=?', (self.name, cid))
+            return len(cids)
+
+    def chord_state(self, cid):
+        """Inspection helper used by tests and the recovery diagnostics."""
+        rows = self.sql('select state from chord where queue=? and cid=?',
+                        (self.name, cid), results=True)
+        return rows[0][0] if rows else None
+
 
 class CySqliteStorage(SqliteStorage):
+    supports_durable_chord = True
+
     def __init__(self, name='huey', filename='huey.db', pragmas=None,
-                 timeout=5, strict_fifo=False, create_tables=True, **kwargs):
+                 timeout=5, strict_fifo=False, create_tables=True,
+                 durable_chord=False, **kwargs):
         if cysqlite is None:
             raise ConfigurationError('"cysqlite" not found. Run "pip install '
                                      'cysqlite" to install.')
@@ -1099,6 +1352,7 @@ class CySqliteStorage(SqliteStorage):
             timeout=timeout,
             strict_fifo=strict_fifo,
             create_tables=create_tables,
+            durable_chord=durable_chord,
             pragmas=pragmas,
             **kwargs)
 

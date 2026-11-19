@@ -160,11 +160,17 @@ class Scheduler(BaseProcess):
     periodic_task_seconds = 60
     process_name = 'Scheduler'
 
-    def __init__(self, huey, stop_flag, interval, periodic):
+    def __init__(self, huey, stop_flag, interval, periodic,
+                 chord_sweep_interval=5, chord_sweep_grace=300,
+                 chord_sweep_retention=3600):
         super(Scheduler, self).__init__(huey, stop_flag)
         self.interval = max(min(interval, 60), 1)
 
         self.periodic = periodic
+        self.chord_sweep_interval = max(chord_sweep_interval, 0)
+        self.chord_sweep_grace = chord_sweep_grace
+        self.chord_sweep_retention = chord_sweep_retention
+        self._next_chord_sweep = time.monotonic()
         self._next_loop = time.monotonic()
         self._next_periodic = time.monotonic()
 
@@ -188,6 +194,8 @@ class Scheduler(BaseProcess):
                 except Exception:
                     self._logger.exception('Error enqueueing %s.', task)
 
+        self._run_chord_sweep()
+
         if self.periodic and self._next_periodic <= time.monotonic():
             # Skip checks missed during a stall (e.g. suspend) to avoid dupes.
             while self._next_periodic <= time.monotonic():
@@ -195,6 +203,26 @@ class Scheduler(BaseProcess):
             self.enqueue_periodic_tasks(now)
 
         self.sleep_for_interval(current, self.interval)
+
+    def _run_chord_sweep(self):
+        if (not self.chord_sweep_interval or
+                self._next_chord_sweep > time.monotonic()):
+            return
+        self._next_chord_sweep = (time.monotonic() +
+                                  self.chord_sweep_interval)
+        if not getattr(self.huey, 'durable_chord', False):
+            return
+        try:
+            result = self.huey.chord_sweep(
+                grace=self.chord_sweep_grace,
+                retention=self.chord_sweep_retention)
+        except Exception:
+            self._logger.exception('Error running recoverable chord sweep.')
+            return
+        if result['delivered'] or result['reconciled']:
+            self._logger.info(
+                'Recoverable chord sweep delivered %s, reconciled %s.',
+                len(result['delivered']), len(result['reconciled']))
 
     def enqueue_periodic_tasks(self, now):
         self._logger.debug('Checking periodic tasks')
@@ -394,7 +422,8 @@ class Consumer(object):
                  worker_type=WORKER_THREAD, check_worker_health=True,
                  health_check_interval=10, flush_locks=False,
                  extra_locks=None, max_tasks=None, shutdown_timeout=None,
-                 graceful_signal='INT'):
+                 graceful_signal='INT', chord_sweep_interval=5,
+                 chord_sweep_grace=300, chord_sweep_retention=3600):
 
         self._logger = logging.getLogger('huey.consumer')
         if huey.immediate:
@@ -442,6 +471,11 @@ class Consumer(object):
         self._signum = None
         self._restart = False
         self._graceful = True
+
+        # Recoverable chord recovery parameters.
+        self.chord_sweep_interval = chord_sweep_interval
+        self.chord_sweep_grace = chord_sweep_grace
+        self.chord_sweep_retention = chord_sweep_retention
 
         # Create the execution environment helper.
         self.environment = self.get_environment(self.worker_type)
@@ -497,7 +531,10 @@ class Consumer(object):
             huey=self.huey,
             stop_flag=self.stop_flag,
             interval=self.scheduler_interval,
-            periodic=self.periodic)
+            periodic=self.periodic,
+            chord_sweep_interval=self.chord_sweep_interval,
+            chord_sweep_grace=self.chord_sweep_grace,
+            chord_sweep_retention=self.chord_sweep_retention)
 
     def _create_process(self, process, name):
         """
@@ -547,6 +584,23 @@ class Consumer(object):
             msg.append('+ %s' % command)
 
         self._logger.info('\n'.join(msg))
+
+        # Recover any chord that reached the ready state (or was abandoned)
+        # in a previous process lifetime before workers can touch the queue.
+        # Runs while this process still owns its storage connection.
+        if getattr(self.huey, 'durable_chord', False):
+            try:
+                result = self.huey.chord_sweep(
+                    grace=self.chord_sweep_grace,
+                    retention=self.chord_sweep_retention)
+                if result['delivered'] or result['reconciled']:
+                    self._logger.info(
+                        'Startup chord sweep delivered %s, reconciled %s.',
+                        len(result['delivered']),
+                        len(result['reconciled']))
+            except Exception:
+                self._logger.exception(
+                    'Startup recoverable chord sweep failed.')
 
         # Forked children must not share the parent's storage connection.
         if self.environment.forks:
