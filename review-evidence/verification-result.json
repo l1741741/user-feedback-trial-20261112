@@ -1,0 +1,34 @@
+{
+  "task_id": "middleware-startfix-20261120-13860-scheduled-handoff",
+  "final_sha": "2c48b8a4bf511550c39c89765d20459682d7fb9b",
+  "regression": {
+    "exit_code": 0,
+    "log": "/Users/lichao/Desktop/xpert/user-feedback/runs/middleware-20261120/middleware-startfix-20261120-13860-scheduled-handoff/regression-preparation.log",
+    "tests": 331,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 112
+  },
+  "targets": [
+    "huey/tests/test_api.py",
+    "huey/tests/test_storage.py",
+    "huey/tests/test_consumer.py",
+    "huey/tests/test_serializer.py",
+    "huey/tests/test_priority.py",
+    "huey/tests/test_signals.py",
+    "huey/tests/test_schedule_handoff.py"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/guide.rst",
+    "huey/api.py",
+    "huey/consumer.py",
+    "huey/exceptions.py",
+    "huey/storage.py",
+    "huey/tests/__init__.py",
+    "huey/tests/handoff_driver.py",
+    "huey/tests/test_schedule_handoff.py"
+  ],
+  "review_status": "AWAITING_INDEPENDENT_MAIN_AGENT_REVIEW",
+  "independent_acceptance_required": true
+}

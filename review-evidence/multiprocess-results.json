@@ -1,0 +1,34 @@
+[
+  {
+    "uid": "13860",
+    "final_sha": "2c48b8a4bf511550c39c89765d20459682d7fb9b",
+    "command": [
+      "python3",
+      "/Users/lichao/Desktop/xpert/user-feedback/state/middleware-20261120/acceptance/multiprocess_boundaries.py",
+      "handoff",
+      "/Users/lichao/Desktop/xpert/user-feedback/runs/middleware-20261120/middleware-startfix-20261120-13860-scheduled-handoff/local-frozen-source"
+    ],
+    "exit_code": 1,
+    "log": "/Users/lichao/Desktop/xpert/user-feedback/state/middleware-20261120/acceptance/13860-multiprocess.log",
+    "log_sha256": "09606d2ea295dd8d2f31b8392f3255bd51904d8ea6e40bc3ebf1baac1fbac9b0",
+    "script_sha256": "ce471feec93cbdcf4f1b8f604d424acb252684a0644dcbbca0a88f61e4fc86b5",
+    "real_subprocesses": 3,
+    "source_unchanged": true
+  },
+  {
+    "uid": "13864",
+    "final_sha": "938591fb866a73ac37c4331eb58e13caeef7f87f",
+    "command": [
+      "python3",
+      "/Users/lichao/Desktop/xpert/user-feedback/state/middleware-20261120/acceptance/multiprocess_boundaries.py",
+      "keyspace",
+      "/Users/lichao/Desktop/xpert/user-feedback/runs/middleware-20261120/middleware-startfix-20261120-13864-control-keyspaces/local-frozen-source"
+    ],
+    "exit_code": 1,
+    "log": "/Users/lichao/Desktop/xpert/user-feedback/state/middleware-20261120/acceptance/13864-multiprocess.log",
+    "log_sha256": "0e139595bdeac963d19fd9c77f83a2e57b0a8aa69d3e132dc701f98a03a1bd6b",
+    "script_sha256": "ce471feec93cbdcf4f1b8f604d424acb252684a0644dcbbca0a88f61e4fc86b5",
+    "real_subprocesses": 3,
+    "source_unchanged": true
+  }
+]

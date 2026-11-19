@@ -1,0 +1,6 @@
+{"processes": 3, "old": {"handoff_id": 1, "data": "first"}, "new": {"new_handoff_id": 1, "data": "next"}, "result": {"stale_accepted": true, "queue": ["first", "first"], "handoff_left": 0}}
+Traceback (most recent call last):
+  File "/Users/lichao/Desktop/xpert/user-feedback/state/middleware-20261120/acceptance/multiprocess_boundaries.py", line 44, in <module>
+    assert not stale['stale_accepted'] and stale['handoff_left']==1, 'stale operation consumed later durable handoff after process restart'
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: stale operation consumed later durable handoff after process restart

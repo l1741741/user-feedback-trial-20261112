@@ -1,0 +1,6 @@
+{"old_handoff_id": 1, "new_handoff_id": 1, "stale_accepted": true, "new_accepted": false, "actual_queue": ["first-task", "first-task"], "remaining_handoff": 0}
+Traceback (most recent call last):
+  File "/Users/lichao/Desktop/xpert/user-feedback/state/middleware-20261120/acceptance/probe_13860_stale_publish.py", line 19, in <module>
+    assert sorted(got)==[b'first-task',b'new-task'], 'stale publisher duplicated old task and removed the later handoff'
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: stale publisher duplicated old task and removed the later handoff
