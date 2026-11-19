@@ -18,6 +18,7 @@ from huey.constants import EmptyData
 from huey.consumer import Consumer
 from huey.exceptions import CancelExecution
 from huey.exceptions import ConfigurationError
+from huey.exceptions import HandoffConflict
 from huey.exceptions import RateLimitExceeded
 from huey.exceptions import RETRYING_EXCEPTIONS
 from huey.exceptions import ResultTimeout
@@ -95,7 +96,8 @@ class Huey(object):
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
                  use_zlib=False, immediate_use_memory=True, storage_class=None,
-                 store_intermediate_errors=True, **storage_kwargs):
+                 store_intermediate_errors=True, reliable_schedule=False,
+                 **storage_kwargs):
 
         self.name = name
         self.results = results
@@ -104,6 +106,10 @@ class Huey(object):
         self.utc = utc
         self._immediate = immediate
         self.immediate_use_memory = immediate_use_memory
+        # Opt-in durable schedule-to-queue handoff. Consumed here rather than
+        # forwarded, so storage backends that do not know the flag still
+        # construct cleanly; capability is validated right after construction.
+        self.reliable_schedule = reliable_schedule
         if serializer is None:
             serializer = Serializer(compression, use_zlib=use_zlib)
         self.serializer = serializer
@@ -113,6 +119,7 @@ class Huey(object):
         if storage_class is not None:
             self.storage_class = storage_class
         self.storage = self.create_storage()
+        self._check_reliable_schedule_support()
 
         # Allow overriding the default TaskWrapper implementation.
         self.task_wrapper_class = self.get_task_wrapper_class()
@@ -138,7 +145,13 @@ class Huey(object):
         if self._immediate and self.immediate_use_memory:
             return self.get_immediate_storage()
 
-        return self.get_storage(**self.storage_kwargs)
+        # SqliteStorage accepts the flag directly so it can create the
+        # handoff table; other backends ignore kwargs and are gated by the
+        # capability check performed after construction.
+        kwargs = dict(self.storage_kwargs)
+        if self.reliable_schedule:
+            kwargs.setdefault('reliable_schedule', True)
+        return self.get_storage(**kwargs)
 
     def get_immediate_storage(self):
         return MemoryStorage(self.name)
@@ -151,6 +164,17 @@ class Huey(object):
         else:
             Storage = self.storage_class
         return Storage(self.name, **kwargs)
+
+    def _check_reliable_schedule_support(self):
+        # Fails fast at configuration time, before any schedule row is read
+        # or deleted, with a message that names the offending backend.
+        if self.reliable_schedule and not getattr(
+                self.storage, 'supports_reliable_schedule', False):
+            raise ConfigurationError(
+                'reliable_schedule is not supported by storage backend %s. '
+                'Use a SqliteHuey/SqliteStorage backend, or leave '
+                'reliable_schedule disabled.' %
+                type(self.storage).__name__)
 
     @property
     def immediate(self):
@@ -706,6 +730,77 @@ class Huey(object):
         if timestamp is None:
             timestamp = self._get_timestamp()
         return self._deserialize_all(self.storage.read_schedule(timestamp))
+
+    def handoff_scheduled(self, timestamp=None):
+        """
+        Reliably move due scheduled tasks into the execution queue.
+
+        Instead of destructively reading the schedule and then hoping the
+        in-process enqueue succeeds, this drives the storage's durable
+        two-phase handoff:
+
+        1. ``claim_scheduled`` atomically moves due tasks from the schedule
+           into a persistent handoff area (inside one database transaction).
+        2. Each task is published individually; publication enqueues the
+           task and removes its handoff row in one transaction.
+
+        Failure semantics are deliberately distinct:
+
+        * A failure *before* the publish transaction commits (serialization,
+          task-insert error, crash) leaves the handoff row in place and is
+          safe to retry -- nothing has reached the execution queue yet.
+        * A failure *after* the commit but before this method returns has
+          already removed the handoff row, so retrying cannot enqueue the
+          same task twice. The task is durably in the queue regardless.
+
+        One bad task never discards the rest of the batch, and successfully
+        handed-off tasks are never replayed. Returns the number of tasks
+        published. A poison task that cannot be serialized stays parked in
+        the handoff area (with an incremented attempt counter) and does not
+        block the other tasks.
+        """
+        if timestamp is None:
+            timestamp = self._get_timestamp()
+
+        published = 0
+        for handoff_id, data in self.storage.claim_scheduled(timestamp):
+            task = None
+            try:
+                task = self.deserialize_task(data)
+            except Exception:
+                # Keep the raw bytes durable for inspection; do not delete
+                # the handoff row and do not touch the other tasks.
+                logger.exception('Unable to deserialize scheduled task '
+                                 '(handoff id %s).', handoff_id)
+                self.storage.retry_scheduled(handoff_id)
+                continue
+
+            try:
+                # The storage makes enqueue + handoff completion atomic.
+                # A False result means another scheduler already published
+                # this exact handoff row, so we count it once and move on.
+                if self.storage.publish_scheduled(
+                        handoff_id, data, task.priority or 0):
+                    self._emit(S.SIGNAL_ENQUEUED, task)
+                    published += 1
+            except HandoffConflict:
+                # Defensive: a backend that raises instead of returning
+                # False for an already-completed handoff. Never re-enqueue.
+                logger.warning('Scheduled task handoff %s was already '
+                               'completed by another scheduler.', handoff_id)
+            except Exception:
+                # Publication did not commit: the handoff row survives and
+                # will be reclaimed on the next loop. Recording the attempt
+                # is itself best-effort and must not mask the original
+                # error. Do NOT blindly re-enqueue here.
+                logger.exception('Error publishing scheduled task %s.',
+                                 task)
+                try:
+                    self.storage.retry_scheduled(handoff_id)
+                except Exception:
+                    logger.exception('Unable to record failed handoff %s.',
+                                     handoff_id)
+        return published
 
     def _deserialize_all(self, messages):
         accum = []

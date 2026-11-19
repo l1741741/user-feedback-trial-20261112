@@ -108,6 +108,68 @@ What happens when we schedule a task?
 
 For more details, see the :py:meth:`~TaskWrapper.schedule` API documentation.
 
+.. _reliable-schedule-handoff:
+
+Reliable schedule handoff (Sqlite)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default the scheduler reads due tasks out of the schedule and then enqueues
+them in two separate steps. If the process exits, or an enqueue fails, after
+the schedule row is deleted but before the task reaches the execution queue,
+that task only existed in process memory and is lost. The SQLite storage
+backend offers an opt-in reliable handoff that closes this gap::
+
+    from huey import SqliteHuey
+
+    huey = SqliteHuey(filename='/tmp/demo.db', reliable_schedule=True)
+
+When ``reliable_schedule`` is enabled a dedicated ``schedule_handoff`` table is
+created alongside the usual queue/schedule/result tables, and the scheduler
+moves due tasks through a durable two-phase handoff:
+
+1. **Claim** -- all tasks due at or before the current timestamp are moved, in
+   a single SQLite transaction, from the schedule into the handoff table. A
+   due task is therefore always in exactly one durable place. Future-dated
+   tasks are never claimed early. Two schedulers connected to the same
+   database file serialize on SQLite's write lock, so the same due task can
+   never be claimed twice.
+2. **Publish** -- each claimed task is enqueued and its handoff row deleted in
+   a single transaction. Once that transaction commits, the task is durably in
+   the execution queue and the handoff is complete.
+
+The distinction between the two kinds of failure is what makes this safe:
+
+* A failure **before the publish transaction commits** (a serialization
+  problem, an insert error, or the process being killed) leaves the handoff
+  row in place. The next scheduler loop reclaims it and retries; nothing has
+  reached the queue yet, so retrying cannot create a duplicate.
+* A failure **after the commit but before the caller observes the result**
+  (e.g. the process dies as the commit returns) has already removed the
+  handoff row. A retry finds nothing to publish, so the task is never enqueued
+  twice. The task is safely in the queue regardless of whether the caller got
+  its answer.
+
+Handoff is performed one task at a time. One task that cannot be serialized
+or published is parked in the handoff table (with an incremented attempt
+counter) and does not cause the rest of the batch to be dropped or replayed.
+Such a "poison" row must be inspected and removed manually; it will otherwise
+be retried on every scheduler loop.
+
+Task id, ETA, priority and task-chain (``on_complete``) information are all
+carried through the handoff unchanged. This guarantee covers the *handoff*
+between the scheduling store and the execution store only -- it does not make
+your task functions exactly-once, since a worker can still fail after a task
+has started executing.
+
+Enabling the feature on an existing database is smooth: the handoff table is
+created on open, and tasks already sitting in the legacy schedule are claimed
+normally on the next scheduler loop. No data migration is required. Storage
+backends other than SQLite (and custom backends that do not implement the
+handoff primitives) raise a :py:class:`~huey.exceptions.ConfigurationError`
+at construction time when ``reliable_schedule=True`` is requested, before any
+scheduled data is read or deleted. The option defaults to ``False``, so
+existing deployments and all other backends keep their previous behavior.
+
 Periodic tasks
 --------------
 
@@ -1636,7 +1698,9 @@ Storage Options
 
     ``SqliteHuey`` may be a good choice for moderate workloads where the
     operational complexity of running a separate server process like Redis is
-    undesirable.
+    undesirable. Pass ``reliable_schedule=True`` to make the scheduler's
+    schedule-to-queue handoff durable across process exits and partial
+    failures -- see :ref:`reliable-schedule-handoff` above.
 
 :py:class:`CySqliteHuey`
     Same storage layout and characteristics as :py:class:`SqliteHuey`, but

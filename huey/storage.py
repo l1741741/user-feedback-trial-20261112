@@ -34,6 +34,7 @@ except ImportError:
 
 from huey.constants import EmptyData
 from huey.exceptions import ConfigurationError
+from huey.exceptions import HandoffConflict
 from huey.utils import FileLock
 
 
@@ -43,6 +44,10 @@ class BaseStorage(object):
     """
     blocking = False  # Does dequeue() block until ready, or should we poll?
     priority = True
+    # Whether the storage supports a durable handoff from the schedule store
+    # to the execution queue. When False, enabling reliable_schedule on the
+    # Huey instance raises a ConfigurationError before any data is touched.
+    supports_reliable_schedule = False
 
     def __init__(self, name='huey', **storage_kwargs):
         self.name = name
@@ -150,6 +155,63 @@ class BaseStorage(object):
         :return: No return value.
         """
         raise NotImplementedError
+
+    # Reliable schedule-to-queue handoff primitives. Backends that set
+    # supports_reliable_schedule = True must implement all four methods.
+
+    def claim_scheduled(self, ts):
+        """
+        Atomically move all tasks that are due at or before ``ts`` from the
+        schedule into a durable handoff area, returning their handoff row
+        identifiers and serialized task data. Tasks already parked in the
+        handoff area by a previous (interrupted) run are returned as well, so
+        no due task can get stuck. Future tasks (timestamp greater than
+        ``ts``) must not be claimed.
+
+        :param datetime ts: Timestamp.
+        :return: A list of ``(handoff_id, data)`` tuples.
+        """
+        raise NotImplementedError(
+            'Reliable schedule handoff is not supported by this storage '
+            'backend (%s).' % type(self).__name__)
+
+    def publish_scheduled(self, handoff_id, data, priority=0.0):
+        """
+        Atomically enqueue the serialized task ``data`` with the given
+        priority and remove its handoff row. Returns True when the task was
+        published, False when another scheduler had already published the
+        same handoff row (the enqueue is rolled back in that case, so the
+        task is never enqueued twice).
+
+        A failure before the transaction commits leaves the handoff row in
+        place, so the caller can safely retry; a successful commit means the
+        task is durably in the execution queue and the handoff is complete.
+
+        :return: Boolean indicating whether this call published the task.
+        """
+        raise NotImplementedError(
+            'Reliable schedule handoff is not supported by this storage '
+            'backend (%s).' % type(self).__name__)
+
+    def retry_scheduled(self, handoff_id):
+        """
+        Record a failed publication attempt for a handoff row without
+        deleting it. The row stays durable and is reclaimed by the next
+        ``claim_scheduled`` call.
+
+        :return: Boolean indicating whether the row still exists.
+        """
+        raise NotImplementedError(
+            'Reliable schedule handoff is not supported by this storage '
+            'backend (%s).' % type(self).__name__)
+
+    def handoff_size(self):
+        """
+        :return: The number of tasks parked in the handoff area.
+        """
+        raise NotImplementedError(
+            'Reliable schedule handoff is not supported by this storage '
+            'backend (%s).' % type(self).__name__)
 
     def put_data(self, key, value, is_result=False):
         """
@@ -852,6 +914,7 @@ class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
     integrity_error = getattr(sqlite3, 'IntegrityError', None)
     operational_error = getattr(sqlite3, 'OperationalError', None)
+    supports_reliable_schedule = True
     table_kv = ('create table if not exists kv ('
                 'queue text not null, key text not null, value blob not null, '
                 'primary key(queue, key))')
@@ -870,18 +933,28 @@ class SqliteStorage(BaseSqlStorage):
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
+    # Durable parking area for scheduled tasks that have been claimed from the
+    # schedule but not yet published into the task queue. Only created when
+    # reliable_schedule is enabled.
+    table_handoff = ('create table if not exists schedule_handoff ('
+                     'id integer not null primary key, queue text not null, '
+                     'data blob not null, attempts integer not null default 0, '
+                     'created_at real not null)')
+    index_handoff = ('create index if not exists schedule_handoff_queue_id '
+                     'on schedule_handoff (queue, id)')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
            table_counter, drop_index_task]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
-                 create_tables=True, **kwargs):
+                 create_tables=True, reliable_schedule=False, **kwargs):
         self.filename = filename
         self._cache_mb = cache_mb
         self._fsync = fsync
         self._journal_mode = journal_mode
         self._timeout = timeout  # Busy timeout in seconds, default is 5.
         self._conn_kwargs = kwargs
+        self.reliable_schedule = reliable_schedule
 
         # By default Sqlite may reuse rowids when rows are removed. This means
         # that SqliteHuey may not strictly be a FIFO. If strict FIFO ordering
@@ -895,6 +968,11 @@ class SqliteStorage(BaseSqlStorage):
                 'primary key',
                 'primary key autoincrement')
             self.ddl = ddl
+
+        if reliable_schedule:
+            # Extra DDL appended so the indices of the default DDL stay stable.
+            self.ddl = list(self.ddl) + [self.table_handoff,
+                                         self.index_handoff]
 
         self.to_blob = memoryview
 
@@ -986,6 +1064,75 @@ class SqliteStorage(BaseSqlStorage):
                              ','.join('?' * len(chunk)), chunk)
             return data
 
+    def claim_scheduled(self, ts):
+        # Single "begin exclusive" transaction: rows are moved from the
+        # schedule into the handoff table, so a due task is always in exactly
+        # one durable place. Two schedulers connecting to the same database
+        # serialize on the write lock, and the second one finds nothing left
+        # to move. Leftover handoff rows from an interrupted run are returned
+        # first so the handoff can always resume.
+        now = time.time()
+        with self.db(commit=True) as curs:
+            curs.execute('select id, data from schedule_handoff where '
+                         'queue = ? order by id', (self.name,))
+            leftovers = curs.fetchall()
+
+            curs.execute('insert into schedule_handoff '
+                         '(queue, data, attempts, created_at) '
+                         'select queue, data, 0, ? from schedule where '
+                         'queue = ? and timestamp <= ? order by timestamp, id',
+                         (now, self.name, ts.timestamp()))
+            claimed = curs.rowcount
+
+            curs.execute('delete from schedule where queue = ? and '
+                         'timestamp <= ?', (self.name, ts.timestamp()))
+            if curs.rowcount != claimed:
+                # Should be impossible inside one exclusive transaction; fail
+                # loudly rather than leave schedule and handoff inconsistent.
+                raise HandoffConflict('schedule claim count mismatch')
+
+            curs.execute('select id, data from schedule_handoff where '
+                         'queue = ? order by id', (self.name,))
+            return curs.fetchall()
+
+    def publish_scheduled(self, handoff_id, data, priority=0.0):
+        # One transaction performs the enqueue and the handoff completion.
+        # If the task insert or the commit fails, nothing is durable in the
+        # task table and the handoff row survives, so the caller can retry
+        # safely. Once the commit succeeds the task is durably enqueued and
+        # the handoff row is gone: even if the caller never receives the
+        # result, a retry finds nothing to publish and cannot enqueue twice.
+        try:
+            with self.db(commit=True) as curs:
+                curs.execute('insert into task (queue, data, priority) '
+                             'values (?, ?, ?)',
+                             (self.name, self.to_blob(data), priority or 0))
+                curs.execute('delete from schedule_handoff where id = ? '
+                             'and queue = ?', (handoff_id, self.name))
+                if curs.rowcount != 1:
+                    # Another scheduler already completed this handoff. Roll
+                    # back the insert so the task is not published twice.
+                    raise HandoffConflict('handoff row already completed')
+        except HandoffConflict:
+            return False
+        return True
+
+    def retry_scheduled(self, handoff_id):
+        with self.db(commit=True) as curs:
+            curs.execute('update schedule_handoff set attempts = attempts + 1 '
+                         'where id = ? and queue = ?',
+                         (handoff_id, self.name))
+            return curs.rowcount == 1
+
+    def handoff_size(self):
+        return self.sql('select count(id) from schedule_handoff where queue=?',
+                        (self.name,), results=True)[0][0]
+
+    def handoff_items(self):
+        return [i for i, in self.sql(
+            'select data from schedule_handoff where queue=? order by id',
+            (self.name,), results=True)]
+
     def schedule_size(self):
         return self.sql('select count(id) from schedule where queue=?',
                         (self.name,), results=True)[0][0]
@@ -1001,6 +1148,11 @@ class SqliteStorage(BaseSqlStorage):
 
     def flush_schedule(self):
         self.sql('delete from schedule where queue = ?', (self.name,), True)
+        if self.reliable_schedule:
+            # The handoff area is part of the scheduling state and must be
+            # cleared alongside the schedule itself.
+            self.sql('delete from schedule_handoff where queue = ?',
+                     (self.name,), True)
 
     def put_data(self, key, value, is_result=False):
         self.sql('insert or replace into kv (queue, key, value) '

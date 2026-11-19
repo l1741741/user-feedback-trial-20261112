@@ -177,16 +177,21 @@ class Scheduler(BaseProcess):
             return
 
         try:
-            task_list = self.huey.read_schedule(now)
+            if getattr(self.huey, 'reliable_schedule', False):
+                # Durable handoff: the storage moves due tasks into the queue
+                # transactionally and parks anything that cannot be published,
+                # so a crash or a single bad task cannot lose scheduled work.
+                self.huey.handoff_scheduled(now)
+            else:
+                task_list = self.huey.read_schedule(now)
+                for task in task_list:
+                    self._logger.debug('Enqueueing %s', task)
+                    try:
+                        self.huey.enqueue(task)
+                    except Exception:
+                        self._logger.exception('Error enqueueing %s.', task)
         except Exception:
             self._logger.exception('Error reading schedule.')
-        else:
-            for task in task_list:
-                self._logger.debug('Enqueueing %s', task)
-                try:
-                    self.huey.enqueue(task)
-                except Exception:
-                    self._logger.exception('Error enqueueing %s.', task)
 
         if self.periodic and self._next_periodic <= time.monotonic():
             # Skip checks missed during a stall (e.g. suspend) to avoid dupes.

@@ -35,3 +35,12 @@ class TaskException(Exception):
 
 # Not failures while a retry is pending.
 RETRYING_EXCEPTIONS = (RetryTask, RateLimitExceeded, TaskLockedException)
+
+
+class HandoffConflict(HueyException):
+    """
+    Raised internally by storage backends when a scheduled task being
+    published has already been handed off by another scheduler. It signals
+    that the enqueue must be rolled back so the task is not published twice.
+    """
+    pass

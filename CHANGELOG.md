@@ -5,6 +5,15 @@ Changelog
 
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
+* Add opt-in reliable schedule-to-queue handoff for the SQLite storage
+  backend (`SqliteHuey(reliable_schedule=True)`). Due scheduled tasks are
+  claimed into a durable handoff table and published into the execution queue
+  transactionally, so a process exit between the schedule read and the
+  enqueue, an enqueue failure, or two schedulers sharing one database can no
+  longer lose or double-publish a task. Failures before the publish commit are
+  safely retried; the post-commit/pre-result window cannot replay. Defaults to
+  off and other backends are unchanged.
+
 ## 3.5.4
 
 * Fix possible hang if worker holding the stop flag was killed while holding
