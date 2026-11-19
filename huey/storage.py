@@ -1,4 +1,5 @@
 from functools import cached_property
+from collections import namedtuple
 import contextlib
 import hashlib
 import heapq
@@ -13,6 +14,7 @@ except ImportError:
 import struct
 import threading
 import time
+import uuid
 
 try:
     import cysqlite
@@ -37,12 +39,23 @@ from huey.exceptions import ConfigurationError
 from huey.utils import FileLock
 
 
+# A leased delivery. The ticket uniquely identifies one delivery attempt: it is
+# regenerated whenever the task is handed to a (possibly different) consumer,
+# and is used to fence stale consumers out of ack/renew operations.
+Lease = namedtuple(
+    'Lease', ('ticket', 'data', 'priority', 'lease_expires', 'attempts'))
+
+
 class BaseStorage(object):
     """
     Base storage-layer interface. Subclasses should implement all methods.
     """
     blocking = False  # Does dequeue() block until ready, or should we poll?
     priority = True
+    # Whether the storage implements the leased-delivery API used by the
+    # consumer's opt-in reliable mode (claim_lease, renew_lease, ack_lease,
+    # retry_lease). Defaults to False; only the SQLite backends implement it.
+    supports_leases = False
 
     def __init__(self, name='huey', **storage_kwargs):
         self.name = name
@@ -306,6 +319,63 @@ class BaseStorage(object):
         self.flush_schedule()
         self.flush_results()
         self.flush_counters()
+
+    # Leased-delivery API. Implemented by the SQLite storages only; used when
+    # the consumer is created with ``reliable=True``. All operations are
+    # atomic with respect to other consumers.
+
+    def claim_lease(self, lease_seconds):
+        """
+        Atomically claim the next pending task or an expired delivery.
+
+        :param float lease_seconds: how long the returned lease is valid.
+        :return: a :py:class:`Lease` or ``None`` if nothing is available.
+        """
+        raise NotImplementedError('leased delivery is not supported by this '
+                                  'storage backend.')
+
+    def lease_count(self):
+        """
+        Number of currently in-flight (claimed but unacknowledged) deliveries.
+        """
+        raise NotImplementedError('leased delivery is not supported by this '
+                                  'storage backend.')
+
+    def renew_lease(self, lease, lease_seconds):
+        """
+        Extend a held lease if, and only if, it is still owned by the given
+        ticket and has not expired.
+
+        :return: ``True`` if the lease was renewed.
+        """
+        raise NotImplementedError('leased delivery is not supported by this '
+                                  'storage backend.')
+
+    def ack_lease(self, lease):
+        """
+        Acknowledge a delivery, removing it from the storage. Acknowledging a
+        lease whose ticket is no longer current is a no-op, and acknowledging
+        the same lease twice is a no-op.
+
+        :return: ``True`` if this call completed the delivery.
+        """
+        raise NotImplementedError('leased delivery is not supported by this '
+                                  'storage backend.')
+
+    def retry_lease(self, lease, data, ts, priority=None):
+        """
+        Atomically replace a leased delivery with a follow-up delivery. When
+        ``ts`` is ``None`` the follow-up is placed back on the queue; otherwise
+        it is added to the schedule with the given timestamp. Either way the
+        current delivery and the follow-up are swapped in a single
+        transaction, so there is no window in which the old delivery has been
+        deleted but the retry has not been persisted, and the old delivery is
+        never left in place to produce a duplicate follow-up.
+
+        :return: ``True`` if the swap was performed under the current ticket.
+        """
+        raise NotImplementedError('leased delivery is not supported by this '
+                                  'storage backend.')
 
 
 class BlackHoleStorage(BaseStorage):
@@ -852,6 +922,7 @@ class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
     integrity_error = getattr(sqlite3, 'IntegrityError', None)
     operational_error = getattr(sqlite3, 'OperationalError', None)
+    supports_leases = True
     table_kv = ('create table if not exists kv ('
                 'queue text not null, key text not null, value blob not null, '
                 'primary key(queue, key))')
@@ -870,8 +941,18 @@ class SqliteStorage(BaseSqlStorage):
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
+    # In-flight deliveries: a row is inserted when a task is claimed and
+    # removed when it is acknowledged. If the row survives (consumer died), it
+    # is reclaimable once lease_expires has passed.
+    table_lease = ('create table if not exists lease ('
+                   'ticket text not null primary key, queue text not null, '
+                   'data blob not null, priority real not null default 0.0, '
+                   'lease_expires real not null, '
+                   'attempts integer not null default 1)')
+    index_lease = ('create index if not exists lease_queue_expires '
+                   'on lease (queue, lease_expires)')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           table_counter, drop_index_task, table_lease, index_lease]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
@@ -964,6 +1045,114 @@ class SqliteStorage(BaseSqlStorage):
 
     def flush_queue(self):
         self.sql('delete from task where queue=?', (self.name,), commit=True)
+
+    def flush_all(self):
+        super(SqliteStorage, self).flush_all()
+        # The lease table may be absent in a database created before it was
+        # added (create_tables=False with an externally-managed schema).
+        # Flushing everything is still expected to succeed in that case.
+        try:
+            self.flush_leases()
+        except self.operational_error as exc:
+            if 'no such table' not in str(exc):
+                raise
+
+    def flush_leases(self):
+        self.sql('delete from lease where queue=?', (self.name,), commit=True)
+
+    def lease_count(self):
+        """
+        Number of currently in-flight (claimed but unacknowledged) deliveries.
+        """
+        return self.sql('select count(*) from lease where queue=?',
+                        (self.name,), results=True)[0][0]
+
+    def claim_lease(self, lease_seconds):
+        with self.db(commit=True) as curs:
+            # ``begin exclusive`` has acquired the write lock by now. Read the
+            # clock only after that: computing the expiry before waiting for
+            # the lock could hand back a lease that is already (nearly) expired.
+            now = time.time()
+            expires = now + lease_seconds
+            # Recover an expired delivery first, so work interrupted by a dead
+            # consumer is not starved by a backlog. Expired deliveries are
+            # themselves ordered by priority.
+            curs.execute(
+                'select ticket, data, priority, attempts '
+                'from lease where queue = ? and lease_expires <= ? '
+                'order by priority desc, lease_expires, ticket limit 1',
+                (self.name, now))
+            row = curs.fetchone()
+            if row is not None:
+                old_ticket, data, priority, attempts = row
+                # Deleting by ticket also fences any concurrent claim: the
+                # row is gone, so a second claim cannot select it.
+                curs.execute('delete from lease where ticket = ? and queue = ?',
+                             (old_ticket, self.name))
+                if curs.rowcount != 1:
+                    return
+                ticket = str(uuid.uuid4())
+                attempts += 1
+                curs.execute(
+                    'insert into lease (ticket, queue, data, priority, '
+                    'lease_expires, attempts) values (?, ?, ?, ?, ?, ?)',
+                    (ticket, self.name, data, priority, expires, attempts))
+                return Lease(ticket, bytes(data), priority, expires, attempts)
+
+            curs.execute('select id, data, priority from task where queue = ? '
+                         'order by priority desc, id limit 1', (self.name,))
+            row = curs.fetchone()
+            if row is None:
+                return
+            tid, data, priority = row
+            curs.execute('delete from task where id = ?', (tid,))
+            if curs.rowcount != 1:
+                return
+            ticket = str(uuid.uuid4())
+            curs.execute(
+                'insert into lease (ticket, queue, data, priority, '
+                'lease_expires, attempts) values (?, ?, ?, ?, ?, 1)',
+                (ticket, self.name, data, priority, expires))
+            return Lease(ticket, bytes(data), priority, expires, 1)
+
+    def renew_lease(self, lease, lease_seconds):
+        with self.db(commit=True) as curs:
+            # Read the clock only after the write lock is held, otherwise a
+            # renewal that waited on the lock could compute an expiry already
+            # in the past.
+            now = time.time()
+            curs.execute(
+                'update lease set lease_expires = ? '
+                'where ticket = ? and queue = ? and lease_expires > ?',
+                (now + lease_seconds, lease.ticket, self.name, now))
+            return curs.rowcount == 1
+
+    def ack_lease(self, lease):
+        with self.db(commit=True) as curs:
+            # A stale consumer's ticket has already been removed by the claim
+            # that took the delivery over, so this affects no rows. A repeated
+            # ack of the same lease likewise affects no rows.
+            curs.execute('delete from lease where ticket = ? and queue = ?',
+                         (lease.ticket, self.name))
+            return curs.rowcount == 1
+
+    def retry_lease(self, lease, data, ts, priority=None):
+        with self.db(commit=True) as curs:
+            curs.execute('delete from lease where ticket = ? and queue = ?',
+                         (lease.ticket, self.name))
+            if curs.rowcount != 1:
+                # This delivery was taken over while the task was running.
+                # Do not enqueue a follow-up on its behalf.
+                return False
+            if ts is None:
+                curs.execute('insert into task (queue, data, priority) '
+                             'values (?, ?, ?)',
+                             (self.name, self.to_blob(data), priority or 0))
+            else:
+                curs.execute('insert into schedule (queue, data, timestamp) '
+                             'values (?, ?, ?)',
+                             (self.name, self.to_blob(data), ts.timestamp()))
+            return True
 
     def add_to_schedule(self, data, ts):
         params = (self.name, self.to_blob(data), ts.timestamp())

@@ -24,6 +24,8 @@ config_defaults = (
     ('max_tasks', None),
     ('shutdown_timeout', None),
     ('graceful_signal', 'INT'),
+    ('reliable', False),
+    ('lease_seconds', 60.0),
 )
 config_keys = [param for param, _ in config_defaults]
 
@@ -85,6 +87,17 @@ class OptionParserHandler(object):
                    help=('signal that triggers graceful shutdown, INT or '
                          'TERM (default=INT). The other signal interrupts '
                          'running tasks.')),
+            option(('R', 'reliable'), action='store_true', dest='reliable',
+                   help=('enable leased, at-least-once delivery. Tasks are '
+                         'claimed under a lease and only removed once '
+                         'acknowledged, so work interrupted by a dead '
+                         'consumer is recovered. Requires a SQLite backend '
+                         '(default=disabled).')),
+            option(('e', 'lease-seconds'), metavar='SECONDS', type='float',
+                   dest='lease_seconds',
+                   help=('duration of the delivery lease used by --reliable. '
+                         'Long-running tasks renew their lease automatically '
+                         '(default=60).')),
         )
 
     def get_scheduler_options(self):
@@ -154,6 +167,10 @@ class ConsumerConfig(namedtuple('_ConsumerConfig', config_keys)):
                              '1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, or 60')
         if self.graceful_signal not in ('INT', 'TERM'):
             raise ValueError('The graceful signal must be INT or TERM.')
+        if self.reliable and (self.lease_seconds is None or
+                              self.lease_seconds <= 0):
+            raise ValueError('lease_seconds must be positive when reliable '
+                             'mode is enabled.')
 
     @property
     def loglevel(self):
@@ -188,5 +205,14 @@ class ConsumerConfig(namedtuple('_ConsumerConfig', config_keys)):
 
     @property
     def values(self):
-        return dict((key, getattr(self, key)) for key in config_keys
-                    if key not in ('logfile', 'verbose', 'simple_log'))
+        values = dict((key, getattr(self, key)) for key in config_keys
+                      if key not in ('logfile', 'verbose', 'simple_log'))
+        # Leave reliable-mode options unset unless opted in, so that the
+        # Consumer defaults apply (this also keeps create_consumer() callers
+        # from having to pass them explicitly).
+        if not self.reliable:
+            values.pop('reliable', None)
+            values.pop('lease_seconds', None)
+        elif values.get('lease_seconds') is None:
+            values.pop('lease_seconds', None)
+        return values

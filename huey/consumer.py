@@ -1,4 +1,5 @@
 import contextlib
+import inspect
 import logging
 import os
 import select
@@ -32,6 +33,42 @@ logger = logging.getLogger('huey.consumer')
 class ConsumerStopped(Exception): pass
 
 class WorkerRecycle(Exception): pass
+
+WORKER_THREAD_AND_PROCESS = (WORKER_THREAD, WORKER_PROCESS)
+
+
+class InFlightDeliveries(object):
+    """
+    Thread-safe registry of deliveries currently being executed by workers.
+
+    Used by reliable mode so that a forced shutdown can abandon unfinished
+    deliveries (leaving them for lease-based recovery) instead of
+    acknowledging them.
+    """
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._deliveries = set()
+
+    def add(self, delivery):
+        with self._lock:
+            self._deliveries.add(delivery)
+
+    def discard(self, delivery):
+        with self._lock:
+            self._deliveries.discard(delivery)
+
+    def abandon(self):
+        with self._lock:
+            deliveries = list(self._deliveries)
+        abandoned = []
+        for delivery in deliveries:
+            if delivery.release():
+                abandoned.append(delivery)
+        return abandoned
+
+    def __len__(self):
+        with self._lock:
+            return len(self._deliveries)
 
 
 class BaseProcess(object):
@@ -93,11 +130,17 @@ class Worker(BaseProcess):
     process_name = 'Worker'
 
     def __init__(self, huey, stop_flag, default_delay, max_delay, backoff,
-                 max_tasks=None):
+                 max_tasks=None, reliable=False, lease_seconds=60.0,
+                 deliveries=None):
         self.delay = self.default_delay = default_delay
         self.max_delay = max_delay
         self.backoff = backoff
         self.max_tasks = max_tasks
+        self.reliable = reliable
+        self.lease_seconds = lease_seconds
+        # Shared in-flight registry so the consumer can abandon unfinished
+        # deliveries on an abrupt shutdown. Only used in reliable mode.
+        self.deliveries = deliveries
         self.task_count = 0
         super(Worker, self).__init__(huey, stop_flag)
 
@@ -119,8 +162,13 @@ class Worker(BaseProcess):
 
     def loop(self, now=None):
         task = None
+        delivery = None
         try:
-            task = self.huey.dequeue()
+            if self.reliable:
+                delivery = self.huey.claim_lease(self.lease_seconds)
+                task = delivery.task if delivery is not None else None
+            else:
+                task = self.huey.dequeue()
         except Exception:
             self._logger.exception('Error reading from queue')
             self.sleep()
@@ -128,17 +176,35 @@ class Worker(BaseProcess):
             if task is not None:
                 self.delay = self.default_delay
                 self.task_count += 1
+                if delivery is not None and self.deliveries is not None:
+                    self.deliveries.add(delivery)
                 try:
-                    self.huey.execute(task, now)
+                    if delivery is not None:
+                        delivery.start_renewal()
+                        self.huey.execute(task, now, delivery=delivery)
+                    else:
+                        self.huey.execute(task, now)
                 except Exception:
                     self._logger.exception('Unhandled error during execution '
                                            'of task %s.', task.id)
+                finally:
+                    if delivery is not None and self.deliveries is not None:
+                        self.deliveries.discard(delivery)
                 if self.max_tasks and self.task_count >= self.max_tasks:
                     self._logger.info('Worker reached max tasks (%d), '
                                       'exiting.', self.max_tasks)
                     raise WorkerRecycle()
             elif not self.huey.storage.blocking:
                 self.sleep()
+        finally:
+            # Anything but a committed ack/retry (e.g. a worker killed by the
+            # graceful-shutdown interrupt, or an unexpected error) leaves the
+            # delivery in place so it is recovered when its lease expires.
+            # ``release()`` is a no-op if the delivery was already completed.
+            if delivery is not None:
+                delivery.release()
+                if self.deliveries is not None:
+                    self.deliveries.discard(delivery)
 
     def sleep(self):
         if self.delay > self.max_delay:
@@ -394,7 +460,7 @@ class Consumer(object):
                  worker_type=WORKER_THREAD, check_worker_health=True,
                  health_check_interval=10, flush_locks=False,
                  extra_locks=None, max_tasks=None, shutdown_timeout=None,
-                 graceful_signal='INT'):
+                 graceful_signal='INT', reliable=False, lease_seconds=60.0):
 
         self._logger = logging.getLogger('huey.consumer')
         if huey.immediate:
@@ -412,6 +478,13 @@ class Consumer(object):
         self.shutdown_timeout = shutdown_timeout
         self.graceful_signal = graceful_signal
 
+        # Opt-in reliable mode: tasks are claimed under a lease and only
+        # removed once acknowledged. Supported only by storage backends that
+        # implement the leased-delivery API, and rejected up-front otherwise.
+        self.reliable = bool(reliable)
+        self.lease_seconds = lease_seconds
+        self._deliveries = InFlightDeliveries()
+
         if max_tasks and not check_worker_health:
             raise ConfigurationError('max_tasks requires check_worker_health '
                                      'be enabled.')
@@ -423,6 +496,9 @@ class Consumer(object):
                                      'of 60, e.g. 1, 2, 3, 4, 5, 6, 10, 12...')
 
         self.worker_type = worker_type  # What process model are we using?
+
+        if self.reliable:
+            self._validate_reliable()
 
         # Configure health-check and consumer main-loop attributes.
         self._stop_flag_timeout = 0.1
@@ -469,6 +545,48 @@ class Consumer(object):
             # but it is referenced in the test-suite.
             self.worker_threads.append((worker, process))
 
+    def _validate_reliable(self):
+        """
+        Reject unsupported reliable-mode configurations before any task is
+        consumed, rather than silently falling back to at-most-once delivery.
+        """
+        if not getattr(self.huey.storage, 'supports_leases', False):
+            raise ConfigurationError(
+                'reliable=True requires a storage backend that supports '
+                'leased delivery, such as SqliteHuey or CySqliteHuey. The '
+                'configured storage (%s) does not.' %
+                type(self.huey.storage).__name__)
+
+        if isinstance(self.lease_seconds, bool) or not isinstance(
+                self.lease_seconds, (int, float)):
+            raise ConfigurationError('lease_seconds must be a number.')
+        if self.lease_seconds <= 0:
+            raise ConfigurationError('lease_seconds must be positive.')
+
+        if self.worker_type not in WORKER_THREAD_AND_PROCESS:
+            raise ConfigurationError(
+                'reliable=True supports the "thread" and "process" worker '
+                'types, not "%s". Lease renewal runs in a background thread '
+                'and cannot be relied upon with greenlets.' % self.worker_type)
+
+        # A worker may keep polling for new tasks; the lease interval only
+        # needs to be meaningful relative to how long a task can run. Guard
+        # against absurdly small values that would make renewal a busy-loop.
+        if self.lease_seconds < 0.5:
+            raise ConfigurationError('lease_seconds must be at least 0.5.')
+
+        # The lease table is created with the other tables by default. Probe
+        # it now so a database created with create_tables=False (or managed
+        # externally) fails here rather than while consuming tasks.
+        try:
+            self.huey.storage.lease_count()
+        except Exception as exc:
+            raise ConfigurationError(
+                'reliable=True requires the "lease" table, which could not '
+                'be read from the configured storage. Create the schema '
+                '(create_tables=True) or add the table before enabling '
+                'reliable mode. Original error: %s' % (exc,)) from exc
+
     def flush_locks(self, *names):
         self._logger.debug('Flushing locks before starting up.')
         flushed = self.huey.flush_locks(*names)
@@ -484,13 +602,34 @@ class Consumer(object):
                                                   self._interrupt_sig)
 
     def _create_worker(self):
-        return self.worker_class(
+        kwargs = dict(
             huey=self.huey,
             stop_flag=self.stop_flag,
             default_delay=self.default_delay,
             max_delay=self.max_delay,
             backoff=self.backoff,
             max_tasks=self.max_tasks)
+        if self._worker_accepts_reliable():
+            kwargs.update(
+                reliable=self.reliable,
+                lease_seconds=self.lease_seconds,
+                deliveries=self._deliveries)
+        elif self.reliable:
+            # Validated in _validate_reliable(), so this should be
+            # unreachable; guard against a subclass bypassing it.
+            raise ConfigurationError(
+                'reliable=True requires a worker class that accepts the '
+                '"reliable" keyword argument.')
+        return self.worker_class(**kwargs)
+
+    def _worker_accepts_reliable(self):
+        try:
+            params = inspect.signature(self.worker_class).parameters
+        except (TypeError, ValueError):
+            return True  # Cannot introspect; assume it is the built-in.
+        return ('reliable' in params or
+                any(p.kind is inspect.Parameter.VAR_KEYWORD
+                    for p in params.values()))
 
     def _create_scheduler(self):
         return self.scheduler_class(
@@ -541,6 +680,9 @@ class Consumer(object):
                           self.scheduler_interval)
         self._logger.info('Periodic tasks are %s.',
                           'enabled' if self.periodic else 'disabled')
+        if self.reliable:
+            self._logger.info('Reliable delivery is enabled '
+                              '(lease=%ss).', self.lease_seconds)
 
         msg = ['The following commands are available:']
         for command in self.huey._registry._registry:
@@ -584,11 +726,23 @@ class Consumer(object):
             self._logger.warning('Shutdown timeout of %ss elapsed, '
                                  'interrupting workers.',
                                  self.shutdown_timeout)
+            if self.reliable:
+                self._abandon_in_flight_deliveries()
         self._interrupt_workers()
         self._logger.info('Shutting down')
 
     def _interrupt_workers(self):
         self.environment.interrupt_workers([p for _, p in self.worker_threads])
+
+    def _abandon_in_flight_deliveries(self):
+        # Workers leave unacknowledged deliveries in place themselves; this is
+        # only a best-effort sweep for a worker that died without running its
+        # cleanup. Deliveries whose task finished normally are already done.
+        deliveries = self._deliveries.abandon()
+        for delivery in deliveries:
+            if delivery.task is not None:
+                self._logger.info('Leaving delivery for task %s in place for '
+                                  'recovery.', delivery.task.id)
 
     def _join_workers(self):
         deadline = None
@@ -614,6 +768,11 @@ class Consumer(object):
                 health_check_ts = self.loop(health_check_ts)
             except ConsumerStopped:
                 break
+
+        if self.reliable:
+            # Any delivery the workers have not acknowledged is left in place
+            # so it can be recovered once its lease expires.
+            self._abandon_in_flight_deliveries()
 
         self.huey.notify_interrupted_tasks()
 

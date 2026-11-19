@@ -4,6 +4,7 @@ import inspect
 import itertools
 import logging
 import re
+import threading
 import time
 import traceback
 import uuid
@@ -375,6 +376,44 @@ class Huey(object):
         if data is not None:
             return self.deserialize_task(data)
 
+    def claim_lease(self, lease_seconds):
+        """
+        Claim the next available task as a leased delivery, for use by a
+        consumer running in reliable mode.
+
+        :param float lease_seconds: duration, in seconds, of the lease granted
+            to this delivery.
+        :return: a :py:class:`Delivery`, or ``None`` if no task is available.
+        """
+        lease = self.storage.claim_lease(lease_seconds)
+        if lease is None:
+            return None
+        try:
+            task = self.deserialize_task(lease.data)
+        except Exception:
+            # Match the non-reliable path, where an undecodable message has
+            # already been removed from the queue by the time deserialization
+            # fails: acknowledge it (discarding it) rather than leaving a
+            # poisoned delivery in place forever.
+            logger.exception('Unable to deserialize leased task; discarding '
+                             'delivery %s.', lease.ticket)
+            self.storage.ack_lease(lease)
+            return None
+        return Delivery(self, task, lease, lease_seconds)
+
+    def in_flight_count(self):
+        """
+        Number of tasks that have been claimed by a consumer but not yet
+        acknowledged. Non-zero values indicate in-flight work, or deliveries
+        left behind by a consumer that died and awaiting recovery.
+
+        Backends without leased delivery never hold in-flight tasks, so this
+        returns 0 for them.
+        """
+        if not getattr(self.storage, 'supports_leases', False):
+            return 0
+        return self.storage.lease_count()
+
     def put(self, key, data):
         return self.storage.put_data(key, self.serializer.serialize(data))
 
@@ -410,32 +449,61 @@ class Huey(object):
         return (utcnow() if self.utc else
                 datetime.datetime.now())
 
-    def execute(self, task, timestamp=None):
+    def execute(self, task, timestamp=None, delivery=None):
         if timestamp is None:
             timestamp = self._get_timestamp()
 
         if not self.ready_to_run(task, timestamp):
-            self.add_schedule(task)
+            if delivery is not None:
+                # Move the delivery to the schedule in one transaction, so the
+                # lease is neither acknowledged early nor left behind.
+                eta = task.eta or datetime.datetime.fromtimestamp(0)
+                if delivery.retry(self.serialize_task(task), eta,
+                                  task.priority):
+                    logger.info('Rescheduled leased task %s, eta %s',
+                                task.id, eta)
+                    self._emit(S.SIGNAL_SCHEDULED, task)
+                else:
+                    logger.warning('Lease for task %s was lost before it '
+                                   'could be rescheduled.', task.id)
+            else:
+                self.add_schedule(task)
         elif self.is_revoked(task, timestamp, False):
             logger.warning('Task %s was revoked, not executing', task)
             self._emit(S.SIGNAL_REVOKED, task)
             self._abort_chord_member(task, SKIPPED)
+            self._lease_ack(delivery, task)
         elif task.expires_resolved and task.expires_resolved < timestamp:
             logger.info('Task %s expired, not executing.', task)
             self._emit(S.SIGNAL_EXPIRED, task)
             self._abort_chord_member(task, SKIPPED)
+            self._lease_ack(delivery, task)
         else:
             logger.info('Executing %s', task)
             self._emit(S.SIGNAL_EXECUTING, task)
-            return self._execute(task, timestamp)
+            return self._execute(task, timestamp, delivery)
 
-    def _execute(self, task, timestamp):
+    def _lease_ack(self, delivery, task=None):
+        # Delivery.ack() is fenced and idempotent: it returns False (and logs)
+        # when the delivery was already completed or has been taken over.
+        if delivery is None:
+            return True
+        return delivery.ack()
+
+    def _execute(self, task, timestamp, delivery=None):
+        if delivery is not None:
+            # Renew for the lifetime of the task body (including pre-execute
+            # hooks), regardless of whether the caller was the consumer or a
+            # direct user of execute(). Idempotent.
+            delivery.start_renewal()
+
         if self._pre_execute:
             try:
                 self._run_pre_execute(task)
             except CancelExecution:
                 self._emit(S.SIGNAL_CANCELED, task)
                 self._abort_chord_member(task, SKIPPED)
+                self._lease_ack(delivery, task)
                 return
 
         start = time.monotonic()
@@ -495,6 +563,8 @@ class Huey(object):
         except KeyboardInterrupt:
             logger.warning('Received exit signal, %s did not finish.', task.id)
             self._emit(S.SIGNAL_INTERRUPTED, task)
+            if delivery is not None:
+                delivery.release()
             return
         except Exception as exc:
             logger.exception('Unhandled exception in task %s.', task.id)
@@ -519,6 +589,10 @@ class Huey(object):
                 self.enqueue(task.on_complete)
             if task.chord_config is not None:
                 self._check_chord(task.chord_config, task_value)
+            # Acknowledge last: if the consumer dies after the task's work (or
+            # its follow-ups) is persisted but before the ack, the task is
+            # delivered again. That is the intended at-least-once trade-off.
+            self._lease_ack(delivery, task)
         else:
             final = not task.retries
             surface = final or (self.store_intermediate_errors and
@@ -537,9 +611,11 @@ class Huey(object):
                 self.enqueue(handler)
             if final:
                 self._abort_chord_member(task, error)
+                self._lease_ack(delivery, task)
             else:
                 self._emit(S.SIGNAL_RETRYING, task)
-                self._requeue_task(task, self._get_timestamp(), retry_eta)
+                self._requeue_task(task, self._get_timestamp(), retry_eta,
+                                   delivery)
 
         return task_value
 
@@ -569,17 +645,41 @@ class Huey(object):
             callback.extend_data((results,))
             self.enqueue(callback)
 
-    def _requeue_task(self, task, timestamp, retry_eta=None):
+    def _requeue_task(self, task, timestamp, retry_eta=None, delivery=None):
         task.retries -= 1
         logger.info('Requeueing %s, %s retries', task.id, task.retries)
+        eta = None
         if retry_eta is not None:
             task.eta = retry_eta
-            self.add_schedule(task)
+            eta = retry_eta
         elif task.retry_delay:
             delay = datetime.timedelta(seconds=task.retry_delay)
             task.eta = timestamp + delay
             if task.retry_backoff:
                 task.retry_delay *= task.retry_backoff
+            eta = task.eta
+
+        if delivery is not None:
+            # Replace the current delivery with the retry as a single atomic
+            # operation: there is no point at which the old delivery is gone
+            # but the retry has not been persisted, nor is the old delivery
+            # kept alongside the retry.
+            if eta is None and task.expires:
+                # The default path re-enqueues through ``enqueue()``, which
+                # resolves relative expiration times again. Do the same so a
+                # retried task does not inherit a stale expiry.
+                task.resolve_expires(self.utc)
+            data = self.serialize_task(task)
+            if not delivery.retry(data, eta, task.priority):
+                logger.warning('Task %s: lease lost while handing off retry.',
+                               task.id)
+            elif eta is not None:
+                self._emit(S.SIGNAL_SCHEDULED, task)
+            else:
+                # Matches the signal emitted by ``enqueue()`` on the default
+                # retry path.
+                self._emit(S.SIGNAL_ENQUEUED, task)
+        elif eta is not None:
             self.add_schedule(task)
         else:
             self.enqueue(task)
@@ -1180,6 +1280,180 @@ class chord(object):
     def error(self, task, *args, **kwargs):
         self.callback.error(task, *args, **kwargs)
         return self
+
+
+class Delivery(object):
+    """
+    A leased delivery of a task, used by the consumer's opt-in reliable mode.
+
+    A delivery is created by :py:meth:`Huey.claim_lease` and handed to
+    :py:meth:`Huey.execute`. It wraps a storage-level lease, identified by an
+    opaque ticket, and provides:
+
+    * Automatic lease renewal while the task is executing, so a task that runs
+      longer than the lease interval keeps its ownership.
+    * A fenced ``ack()`` that is a no-op once the delivery has been completed,
+      already acknowledged, or taken over because the lease expired and
+      another consumer reclaimed it.
+    * An atomic ``retry()`` that replaces the delivery with a follow-up
+      message in a single storage transaction.
+
+    Delivery is not part of the public API, but it appears in the call chain
+    of :py:meth:`Huey.execute`.
+    """
+
+    def __init__(self, huey, task, lease, lease_seconds, renew_interval=None):
+        self.huey = huey
+        self.task = task
+        self.lease = lease
+        self.ticket = lease.ticket
+        self.lease_seconds = lease_seconds
+        # Renew well before the lease expires, leaving margin for a slow
+        # storage operation or a scheduling hiccup.
+        self.renew_interval = (
+            renew_interval if renew_interval is not None
+            else max(lease_seconds / 3.0, 0.05))
+        self.attempt = lease.attempts
+        self._lock = threading.Lock()
+        # ``_done`` is terminal: an ack/retry has been attempted. ``_renewal``
+        # only tracks whether the background renewal loop is still running.
+        self._done = False
+        self._renewal_stopped = False
+        self._timer = None
+
+    def __repr__(self):
+        return '<Delivery: task %s ticket %s>' % (
+            self.task.id if self.task is not None else '?', self.ticket)
+
+    @property
+    def done(self):
+        return self._done
+
+    # -- lease renewal --------------------------------------------------------
+
+    def start_renewal(self):
+        """
+        Start the background renewal loop. Safe to call more than once.
+        """
+        with self._lock:
+            if (self._done or self._renewal_stopped or
+                    self._timer is not None):
+                return
+            timer = threading.Timer(self.renew_interval, self._renew_tick)
+            timer.daemon = True
+            self._timer = timer
+        timer.start()
+
+    def _stop_renewal_locked(self):
+        """Cancel any pending renewal timer. Caller must hold ``_lock``."""
+        self._renewal_stopped = True
+        timer, self._timer = self._timer, None
+        return timer
+
+    def _renew_tick(self):
+        with self._lock:
+            if self._done or self._renewal_stopped:
+                return
+        try:
+            renewed = self.huey.storage.renew_lease(self.lease,
+                                                    self.lease_seconds)
+        except Exception:
+            # A transient storage error (e.g. a locked SQLite database) must
+            # not kill the renewal thread and silently let the lease lapse
+            # while the task is still running. Try again next interval.
+            logger.exception('Error renewing lease for task %s; will retry.',
+                             self.task.id if self.task is not None else '?')
+            renewed = None
+
+        if renewed is False:
+            with self._lock:
+                if self._done:
+                    # The task was acknowledged while renewal was in flight.
+                    return
+                timer = self._stop_renewal_locked()
+            if timer is not None:
+                timer.cancel()
+            # The lease expired and another consumer may have reclaimed it.
+            # Do not mark the delivery done: a later ack()/retry() is still
+            # worth attempting, because the ticket fences out a takeover. If
+            # nobody took it over, the ack removes it and avoids a duplicate.
+            logger.warning('Lease for task %s may have expired; renewal '
+                           'stopped.', self.task.id if self.task is not None
+                           else '?')
+            return
+
+        with self._lock:
+            if self._done or self._renewal_stopped:
+                return
+            timer = threading.Timer(self.renew_interval, self._renew_tick)
+            timer.daemon = True
+            self._timer = timer
+        timer.start()
+
+    def _complete(self):
+        """
+        Mark the delivery finished and stop renewal. Returns ``True`` if this
+        call completed the delivery, or ``False`` if it was already finished.
+        """
+        with self._lock:
+            if self._done:
+                return False
+            self._done = True
+            timer = self._stop_renewal_locked()
+        if timer is not None:
+            timer.cancel()
+        return True
+
+    # -- completion -----------------------------------------------------------
+
+    def ack(self):
+        """
+        Acknowledge the delivery. Returns ``True`` if this call removed the
+        delivery, and ``False`` if it was already completed, acknowledged, or
+        taken over by another consumer.
+        """
+        if not self._complete():
+            return False
+        result = bool(self.huey.storage.ack_lease(self.lease))
+        if not result:
+            logger.warning('Task %s: ack for a stale delivery was ignored '
+                           '(another consumer has taken it over).',
+                           self.task.id if self.task is not None else '?')
+        return result
+
+    def retry(self, data, ts=None, priority=None):
+        """
+        Atomically replace this delivery with a follow-up message. When ``ts``
+        is ``None`` the follow-up is enqueued; otherwise it is scheduled for
+        ``ts``. Returns ``True`` if the swap was performed.
+        """
+        if not self._complete():
+            return False
+        result = bool(self.huey.storage.retry_lease(self.lease, data, ts,
+                                                    priority))
+        if not result:
+            logger.warning('Task %s: retry for a stale delivery was ignored '
+                           '(another consumer has taken it over).',
+                           self.task.id if self.task is not None else '?')
+        return result
+
+    def release(self):
+        """
+        Stop renewing the lease and abandon the delivery. The task becomes
+        reclaimable once its lease expires. It is *not* marked as completed:
+        if the task happens to finish anyway (e.g. a worker that could not be
+        interrupted), its ``ack()`` still succeeds and removes the delivery,
+        avoiding a needless duplicate.
+
+        Returns ``True`` if this call stopped an active renewal loop.
+        """
+        with self._lock:
+            if self._done or self._renewal_stopped:
+                return False
+            timer = self._stop_renewal_locked()
+        if timer is not None:
+            timer.cancel()
+        return True
 
 
 class Result(object):

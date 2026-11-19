@@ -612,6 +612,151 @@ class TestSqliteStorage(StorageTests, BaseTestCase):
         self.assertEqual([r[0] for r in curs.fetchall()],
                          ['task_queue_priority_id'])
 
+    # Leased-delivery API.
+
+    def test_lease_claim_and_ack(self):
+        self.s.enqueue(b'a1', priority=0)
+        self.s.enqueue(b'a2', priority=5)
+        self.assertEqual(self.s.lease_count(), 0)
+
+        lease = self.s.claim_lease(30)
+        self.assertEqual(lease.data, b'a2')  # Priority order preserved.
+        self.assertEqual(lease.attempts, 1)
+        self.assertEqual(self.s.queue_size(), 1)
+        self.assertEqual(self.s.lease_count(), 1)
+
+        # The delivery is no longer visible as a pending task.
+        self.assertEqual(self.s.enqueued_items(), [b'a1'])
+
+        self.assertTrue(self.s.ack_lease(lease))
+        self.assertEqual(self.s.lease_count(), 0)
+
+        # A repeated ack is a no-op.
+        self.assertFalse(self.s.ack_lease(lease))
+
+        lease = self.s.claim_lease(30)
+        self.assertEqual(lease.data, b'a1')
+        self.assertTrue(self.s.ack_lease(lease))
+        self.assertIsNone(self.s.claim_lease(30))
+
+    def test_lease_expiry_reclaim_and_fencing(self):
+        self.s.enqueue(b'x')
+        old = self.s.claim_lease(0.05)
+        self.assertIsNotNone(old)
+
+        # While the lease is live, nothing is claimable.
+        self.assertIsNone(self.s.claim_lease(0.05))
+        time.sleep(0.1)
+
+        new = self.s.claim_lease(30)
+        self.assertIsNotNone(new)
+        self.assertEqual(new.data, b'x')
+        self.assertNotEqual(new.ticket, old.ticket)
+        self.assertEqual(new.attempts, 2)
+
+        # The stale consumer cannot renew, ack, or replace the new delivery.
+        self.assertFalse(self.s.renew_lease(old, 30))
+        self.assertFalse(self.s.ack_lease(old))
+        self.assertFalse(self.s.retry_lease(old, b'old-retry', None))
+        self.assertEqual(self.s.lease_count(), 1)
+        self.assertEqual(self.s.queue_size(), 0)
+
+        # The current delivery still can.
+        self.assertTrue(self.s.renew_lease(new, 30))
+        self.assertTrue(self.s.ack_lease(new))
+
+    def test_lease_renewal(self):
+        self.s.enqueue(b'x')
+        lease = self.s.claim_lease(0.1)
+        time.sleep(0.06)
+        self.assertTrue(self.s.renew_lease(lease, 0.1))
+        time.sleep(0.06)
+        # Without the renewal this would be past its original expiry.
+        self.assertIsNone(self.s.claim_lease(0.1))
+        self.assertTrue(self.s.ack_lease(lease))
+
+    def test_lease_retry_handoff_queue(self):
+        self.s.enqueue(b'original')
+        lease = self.s.claim_lease(30)
+        self.assertTrue(self.s.retry_lease(lease, b'retry', None, priority=3))
+
+        # The old delivery is gone; exactly one replacement exists.
+        self.assertEqual(self.s.lease_count(), 0)
+        self.assertEqual(self.s.enqueued_items(), [b'retry'])
+        self.assertEqual(self.s.schedule_size(), 0)
+
+        # A stale retry cannot duplicate the replacement.
+        self.assertFalse(self.s.retry_lease(lease, b'retry', None))
+        self.assertEqual(self.s.enqueued_items(), [b'retry'])
+
+    def test_lease_retry_handoff_schedule(self):
+        self.s.enqueue(b'original')
+        lease = self.s.claim_lease(30)
+        ts = datetime.datetime.now() + datetime.timedelta(seconds=60)
+        self.assertTrue(self.s.retry_lease(lease, b'retry', ts))
+
+        self.assertEqual(self.s.lease_count(), 0)
+        self.assertEqual(self.s.queue_size(), 0)
+        self.assertEqual(self.s.scheduled_items(), [b'retry'])
+        self.assertFalse(self.s.retry_lease(lease, b'retry2', ts))
+        self.assertEqual(self.s.scheduled_items(), [b'retry'])
+
+    def test_lease_queue_isolation(self):
+        other = SqliteHuey(name='other', filename='huey_storage.db',
+                           timeout=3).storage
+        try:
+            self.s.enqueue(b'mine')
+            other.enqueue(b'theirs')
+            # Each queue only claims its own tasks, in its own namespace.
+            theirs = other.claim_lease(30)
+            self.assertEqual(theirs.data, b'theirs')
+            mine = self.s.claim_lease(30)
+            self.assertEqual(mine.data, b'mine')
+            self.assertEqual(other.lease_count(), 1)
+            self.assertEqual(self.s.lease_count(), 1)
+            self.assertTrue(self.s.ack_lease(mine))
+            self.assertTrue(other.ack_lease(theirs))
+            # flush_all also clears in-flight deliveries for the queue.
+            self.s.enqueue(b'mine-2')
+            lease = self.s.claim_lease(30)
+            self.assertTrue(lease is not None)
+            self.s.flush_all()
+            self.assertEqual(self.s.lease_count(), 0)
+            self.assertEqual(other.lease_count(), 0)
+        finally:
+            other.close()
+
+    def test_lease_claim_multithreaded(self):
+        # Concurrent claims never hand the same delivery to two workers.
+        nthreads, ntasks = 8, 40
+        for i in range(nthreads * ntasks):
+            self.s.enqueue(b'%d' % i)
+
+        out_q = Queue()
+
+        def claim_tasks():
+            while True:
+                lease = self.s.claim_lease(30)
+                if lease is None:
+                    break
+                out_q.put(lease.data)
+                self.s.ack_lease(lease)
+
+        threads = [threading.Thread(target=claim_tasks)
+                   for _ in range(nthreads)]
+        for t in threads: t.start()
+        for t in threads: t.join(timeout=10.)
+
+        seen = sorted(int(out_q.get()) for _ in range(out_q.qsize()))
+        self.assertEqual(seen, list(range(nthreads * ntasks)))
+        self.assertEqual(self.s.lease_count(), 0)
+
+    def test_lease_unsupported_backend(self):
+        storage = FileStorage('huey', os.path.join(TEST_TMP_DIR, 'leases'))
+        self.assertFalse(storage.supports_leases)
+        self.assertRaises(NotImplementedError, storage.claim_lease, 30)
+        self.assertRaises(NotImplementedError, storage.lease_count)
+
 
 @unittest.skipIf(cysqlite is None, 'requires cysqlite')
 class TestCySqliteStorage(StorageTests, BaseTestCase):

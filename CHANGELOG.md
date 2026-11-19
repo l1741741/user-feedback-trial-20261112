@@ -5,6 +5,15 @@ Changelog
 
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
+* Add opt-in reliable consumption for the SQLite backends (`-R/--reliable`,
+  `lease_seconds`). Tasks are claimed into a lease and only removed once
+  acknowledged, so work claimed by a consumer that dies is recovered after the
+  lease expires. Running tasks renew their lease, stale consumers are fenced
+  from acking a delivery that was taken over, and retries atomically replace
+  the delivery with their follow-up message. Other storages and the greenlet
+  worker type are rejected before consumption starts. Default behavior and the
+  existing API are unchanged. See :ref:`reliable-consumption`.
+
 ## 3.5.4
 
 * Fix possible hang if worker holding the stop flag was killed while holding

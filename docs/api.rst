@@ -136,7 +136,7 @@ Huey types
 
     SqliteHuey fully supports task priorities.
 
-    .. seealso:: :py:class:`SqliteStorage`
+    .. seealso:: :py:class:`SqliteStorage`, :ref:`reliable-consumption`
 
 .. py:class:: CySqliteHuey
 
@@ -153,7 +153,7 @@ Huey types
 
     CySqliteHuey fully supports task priorities.
 
-    .. seealso:: :py:class:`CySqliteStorage`
+    .. seealso:: :py:class:`CySqliteStorage`, :ref:`reliable-consumption`
 
 .. py:class:: PostgresHuey
 
@@ -1150,6 +1150,23 @@ Huey object
     .. py:method:: result_count()
 
         :returns: the number of key/value pairs in the result store.
+
+    .. py:method:: claim_lease(lease_seconds)
+
+        :param float lease_seconds: duration of the lease.
+        :returns: a delivery, or ``None`` when no task is available.
+
+        Claim the next task as a leased delivery. This is what the consumer
+        uses when created with ``reliable=True``; it is public mainly so that
+        tests and custom runners can drive the same code path. See
+        :ref:`reliable-consumption`.
+
+    .. py:method:: in_flight_count()
+
+        :returns: the number of claimed-but-unacknowledged deliveries.
+
+        Zero while idle. A non-zero value after a consumer has stopped can mean
+        deliveries awaiting lease expiry and recovery.
 
     .. py:method:: flush()
 
@@ -2170,9 +2187,19 @@ Result
 Consumer
 --------
 
-.. py:class:: Consumer(huey, workers=1, periodic=True, initial_delay=0.1, backoff=1.15, max_delay=10.0, scheduler_interval=1, worker_type='thread', check_worker_health=True, health_check_interval=10, flush_locks=False, extra_locks=None, max_tasks=None, shutdown_timeout=None, graceful_signal='INT')
+.. py:class:: Consumer(huey, workers=1, periodic=True, initial_delay=0.1, backoff=1.15, max_delay=10.0, scheduler_interval=1, worker_type='thread', check_worker_health=True, health_check_interval=10, flush_locks=False, extra_locks=None, max_tasks=None, shutdown_timeout=None, graceful_signal='INT', reliable=False, lease_seconds=60.0)
 
     :param huey: the :py:class:`Huey` instance whose queue will be consumed.
+    :param bool reliable: enable leased, at-least-once delivery. Requires a
+        storage backend that implements the leased-delivery API --
+        :py:class:`SqliteHuey` or :py:class:`CySqliteHuey` -- and the
+        ``thread`` or ``process`` worker type. Any other combination raises
+        :py:class:`~huey.exceptions.ConfigurationError` when the consumer is
+        created. Default is ``False``, which preserves the historical
+        at-most-once behavior. See :ref:`reliable-consumption`.
+    :param float lease_seconds: duration of a delivery lease when
+        ``reliable=True``. Long-running tasks renew automatically. Default is
+        60 seconds; values below 0.5 are rejected.
 
     Coordinates the workers and the scheduler, and installs the shutdown signal
     handlers. This is what the ``huey_consumer`` command-line tool runs, and
@@ -2207,6 +2234,10 @@ Consumer
         running tasks continue until they finish or the process exits. With
         ``graceful=True`` it blocks until every worker has finished the task it
         is currently executing, or until ``shutdown_timeout`` elapses.
+
+        With ``reliable=True`` any delivery that is not acknowledged before
+        shutdown is left in place, so it is recovered when its lease expires.
+        See :ref:`reliable-consumption`.
 
 Serializer
 ----------
@@ -2450,6 +2481,36 @@ Huey comes with several built-in storage implementations:
     :param bool create_tables: create tables if they do not exist.
     :param kwargs: Additional keyword arguments passed to the ``sqlite3``
         connection constructor.
+
+    SqliteStorage additionally implements the leased-delivery API used by the
+    consumer's opt-in ``reliable=True`` mode. See :ref:`reliable-consumption`.
+
+    .. py:method:: claim_lease(lease_seconds)
+
+        Atomically claim the next pending task, or an expired delivery left by
+        a consumer that died. Returns a :py:class:`Lease` (``ticket``, ``data``,
+        ``priority``, ``lease_expires``, ``attempts``) or ``None``.
+
+    .. py:method:: renew_lease(lease, lease_seconds)
+
+        Extend a lease if, and only if, ``lease.ticket`` is still current and
+        the lease has not expired. Returns a boolean.
+
+    .. py:method:: ack_lease(lease)
+
+        Remove a delivery. A stale ticket (taken over by another consumer) or a
+        repeated acknowledgement is a no-op. Returns ``True`` if this call
+        removed the delivery.
+
+    .. py:method:: retry_lease(lease, data, ts, priority=None)
+
+        Atomically replace the delivery with a follow-up message: enqueued when
+        ``ts`` is ``None``, otherwise added to the schedule for ``ts``. Returns
+        ``True`` if the swap was performed under the current ticket.
+
+    .. py:method:: lease_count()
+
+        Number of claimed-but-unacknowledged deliveries.
 
 
 .. py:class:: CySqliteStorage(name='huey', filename='huey.db', pragmas=None, timeout=5, strict_fifo=False, create_tables=True, **kwargs)

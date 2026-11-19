@@ -155,6 +155,17 @@ Options for the consumer
     every second, but you can increase the interval to as much as 60 seconds.
     The value must divide evenly into 60.
 
+``-R``, ``--reliable``
+    Enable leased, acknowledged delivery for at-least-once execution. Requires
+    a SQLite backend and the ``thread`` or ``process`` worker type; anything
+    else is rejected before the consumer starts. Disabled by default. See
+    :ref:`reliable-consumption`.
+
+``-e``, ``--lease-seconds``
+    Duration of the delivery lease used by ``--reliable``. Running tasks renew
+    their lease automatically, so this is the recovery delay after a consumer
+    dies, not a cap on task runtime. Default is 60 seconds.
+
 Examples
 ^^^^^^^^
 
@@ -267,6 +278,12 @@ acknowledgement of completed tasks. This means that if you terminate the
 consumer **without** letting it finish any currently-executing tasks, those
 tasks will be lost. To be alerted when this occurs, you can use Huey's
 :ref:`signals` (specifically ``signals.SIGNAL_INTERRUPTED``).
+
+If losing an interrupted task is unacceptable, and you are using a SQLite
+backend, you can opt in to leased, acknowledged delivery -- see
+:ref:`reliable-consumption`. With it enabled the consumer only removes a task
+once it has been acknowledged, and work claimed by a consumer that dies is
+recovered by another consumer after the lease expires.
 
 .. _consumer-deployments:
 
