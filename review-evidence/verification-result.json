@@ -1,0 +1,36 @@
+{
+  "task_id": "middleware-startfix-20261120-13865-atomic-publish",
+  "final_sha": "137cf61bdc03e27208233bba178b4b46bb7675c2",
+  "regression": {
+    "exit_code": 0,
+    "log": "/Users/lichao/Desktop/xpert/user-feedback/runs/middleware-20261120/middleware-startfix-20261120-13865-atomic-publish/regression-preparation.log",
+    "tests": 346,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 105
+  },
+  "targets": [
+    "huey/tests/test_api.py",
+    "huey/tests/test_storage.py",
+    "huey/tests/test_consumer.py",
+    "huey/tests/test_serializer.py",
+    "huey/tests/test_priority.py",
+    "huey/tests/test_signals.py",
+    "huey/tests/test_batch.py"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/api.rst",
+    "docs/guide.rst",
+    "docs/signals.rst",
+    "huey/__init__.py",
+    "huey/api.py",
+    "huey/exceptions.py",
+    "huey/storage.py",
+    "huey/tests/__init__.py",
+    "huey/tests/batch_procs.py",
+    "huey/tests/test_batch.py"
+  ],
+  "review_status": "AWAITING_INDEPENDENT_MAIN_AGENT_REVIEW",
+  "independent_acceptance_required": true
+}
