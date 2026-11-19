@@ -50,6 +50,21 @@ logger = logging.getLogger('huey')
 _sentinel = object()
 
 
+def _accepts_kwarg(obj, name):
+    # Whether obj's constructor (or a functools.partial wrapper) accepts the
+    # given keyword argument, either explicitly or via **kwargs.
+    target = getattr(obj, 'func', obj)
+    try:
+        sig = inspect.signature(target)
+    except (TypeError, ValueError):
+        return False
+    param = sig.parameters.get(name)
+    if param is not None:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD
+               for p in sig.parameters.values())
+
+
 class Huey(object):
     """
     Huey executes tasks by exposing function decorators that cause the function
@@ -72,6 +87,16 @@ class Huey(object):
     :param bool use_zlib: use zlib for compression instead of gzip.
     :param bool immediate_use_memory: automatically switch to a local in-memory
         storage backend when immediate-mode is enabled.
+    :param bool keyspace_isolation: keep internal control-state (task
+        revocation flags, task locks, rate-limit window markers and chord
+        counters) in a separate storage keyspace from task results and data
+        written via :py:meth:`Huey.put`. This guarantees that a custom task id
+        or business key can never collide with or overwrite control-state, and
+        that flushing results cannot clear locks, revocations or rate-limit
+        windows. Disabled by default for backwards compatibility. Only the
+        in-memory and SQLite storage backends support this mode; attempting to
+        enable it with another storage raises ``ConfigurationError`` before any
+        data is written.
     :param storage_kwargs: arbitrary keyword arguments that will be passed to
         the storage backend for additional configuration.
 
@@ -95,7 +120,8 @@ class Huey(object):
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
                  use_zlib=False, immediate_use_memory=True, storage_class=None,
-                 store_intermediate_errors=True, **storage_kwargs):
+                 store_intermediate_errors=True, keyspace_isolation=False,
+                 **storage_kwargs):
 
         self.name = name
         self.results = results
@@ -104,6 +130,7 @@ class Huey(object):
         self.utc = utc
         self._immediate = immediate
         self.immediate_use_memory = immediate_use_memory
+        self.keyspace_isolation = bool(keyspace_isolation)
         if serializer is None:
             serializer = Serializer(compression, use_zlib=use_zlib)
         self.serializer = serializer
@@ -113,6 +140,15 @@ class Huey(object):
         if storage_class is not None:
             self.storage_class = storage_class
         self.storage = self.create_storage()
+        if self.keyspace_isolation and not self.storage.supports_keyspace_isolation:
+            # Reject unsupported backends eagerly, before any task or
+            # control-state can be written: a partial run would leave the
+            # application believing isolation is active while the underlying
+            # store still shares a single keyspace.
+            raise ConfigurationError(
+                'Storage %s does not support keyspace isolation. Use '
+                'MemoryHuey or SqliteHuey, or disable keyspace_isolation.'
+                % type(self.storage).__name__)
 
         # Allow overriding the default TaskWrapper implementation.
         self.task_wrapper_class = self.get_task_wrapper_class()
@@ -141,7 +177,8 @@ class Huey(object):
         return self.get_storage(**self.storage_kwargs)
 
     def get_immediate_storage(self):
-        return MemoryStorage(self.name)
+        return MemoryStorage(self.name,
+                             keyspace_isolation=self.keyspace_isolation)
 
     def get_storage(self, **kwargs):
         if self.storage_class is None:
@@ -150,6 +187,21 @@ class Huey(object):
             Storage = RedisStorage
         else:
             Storage = self.storage_class
+
+        if self.keyspace_isolation:
+            # Reject storage implementations that cannot isolate keyspaces
+            # before instantiating (and therefore before any write).
+            if not getattr(Storage, 'supports_keyspace_isolation', False):
+                raise ConfigurationError(
+                    'Storage %s does not support keyspace isolation. Use '
+                    'MemoryHuey or SqliteHuey, or disable '
+                    'keyspace_isolation.' % Storage.__name__)
+            kwargs['keyspace_isolation'] = True
+        elif _accepts_kwarg(Storage, 'keyspace_isolation'):
+            # Only pass the flag to storage implementations that know about
+            # it, keeping third-party storage subclasses written against the
+            # older BaseStorage signature working in default mode.
+            kwargs['keyspace_isolation'] = False
         return Storage(self.name, **kwargs)
 
     @property
@@ -376,21 +428,31 @@ class Huey(object):
             return self.deserialize_task(data)
 
     def put(self, key, data):
-        return self.storage.put_data(key, self.serializer.serialize(data))
+        return self.storage.put_business(key, self.serializer.serialize(data))
 
     def put_result(self, key, data):
         return self.storage.put_data(key, self.serializer.serialize(data),
                                      is_result=True)
 
+    def get_result_raw(self, key, peek=False):
+        # Result objects read task results, which always live in the result
+        # keyspace - never in the business data keyspace.
+        if peek:
+            return self.storage.peek_data(key)
+        return self.storage.pop_data(key)
+
+    def delete_result(self, key):
+        return self.storage.delete_data(key)
+
     def put_if_empty(self, key, data, ttl=None):
-        return self.storage.put_if_empty(key, self.serializer.serialize(data),
-                                         ttl)
+        return self.storage.put_business_if_empty(
+            key, self.serializer.serialize(data), ttl)
 
     def get_raw(self, key, peek=False):
         if peek:
-            return self.storage.peek_data(key)
+            return self.storage.peek_business(key)
         else:
-            return self.storage.pop_data(key)
+            return self.storage.pop_business(key)
 
     def get(self, key, peek=False):
         data = self.get_raw(key, peek)
@@ -398,7 +460,40 @@ class Huey(object):
             return self.serializer.deserialize(data)
 
     def delete(self, key):
-        return self.storage.delete_data(key)
+        return self.storage.delete_business(key)
+
+    # ------------------------------------------------------------------
+    # Internal control-plane helpers.
+    #
+    # All internal control-state (revocation flags, locks, rate-limit window
+    # markers) goes through these methods rather than the public put/get/
+    # delete data APIs. When keyspace isolation is enabled the storage backend
+    # keeps it in a separate keyspace, so business keys and custom task ids can
+    # never collide with it; in legacy mode the backend delegates to the same
+    # shared store it always used.
+    # ------------------------------------------------------------------
+    def _put_control(self, key, data):
+        return self.storage.put_control(key, self.serializer.serialize(data))
+
+    def _peek_control(self, key):
+        data = self.storage.peek_control(key)
+        if data is not EmptyData:
+            return self.serializer.deserialize(data)
+
+    def _peek_control_many(self, keys):
+        raw = self.storage.peek_control_many(keys)
+        return {key: self.serializer.deserialize(data)
+                for key, data in raw.items()}
+
+    def _delete_control(self, key):
+        return self.storage.delete_control(key)
+
+    def _has_control_key(self, key):
+        return self.storage.has_control_key(key)
+
+    def _put_control_if_empty(self, key, data, ttl=None):
+        return self.storage.put_control_if_empty(
+            key, self.serializer.serialize(data), ttl)
 
     def _timeout_context(self, task):
         if not task.timeout or self._timeout_handler is None:
@@ -506,7 +601,7 @@ class Huey(object):
         # Clear the flag if this instance of the task was revoked after it
         # began executing. Expiring storages implement pop_data as a peek.
         if not isinstance(task, PeriodicTask):
-            self.delete(task.revoke_id)
+            self._delete_control(task.revoke_id)
 
         store = self.results and not isinstance(task, PeriodicTask)
         if exception is None:
@@ -562,8 +657,11 @@ class Huey(object):
             results = []
             for idx in range(cc.size):
                 key = 'chord:%s:%s' % (cc.cid, idx)
-                results.append(self.get(key, peek=True))
-                self.delete(key)
+                raw = self.get_result_raw(key, peek=True)
+                if raw is not EmptyData:
+                    raw = self.serializer.deserialize(raw)
+                results.append(raw)
+                self.delete_result(key)
 
             callback = cc.callback
             callback.extend_data((results,))
@@ -629,19 +727,20 @@ class Huey(object):
     def revoke_all(self, task_class, revoke_until=None, revoke_once=False):
         if revoke_until is not None:
             revoke_until = normalize_time(revoke_until, utc=self.utc)
-        self.put(self._task_key(task_class, 'rt'), (revoke_until, revoke_once))
+        self._put_control(self._task_key(task_class, 'rt'),
+                          (revoke_until, revoke_once))
 
     def restore_all(self, task_class):
-        return self.delete(self._task_key(task_class, 'rt'))
+        return self._delete_control(self._task_key(task_class, 'rt'))
 
     def revoke(self, task, revoke_until=None, revoke_once=False):
         if revoke_until is not None:
             revoke_until = normalize_time(revoke_until, utc=self.utc)
-        self.put(task.revoke_id, (revoke_until, revoke_once))
+        self._put_control(task.revoke_id, (revoke_until, revoke_once))
 
     def restore(self, task):
         # Return value indicates whether the task was in fact revoked.
-        return self.delete(task.revoke_id)
+        return self._delete_control(task.revoke_id)
 
     def revoke_by_id(self, id, revoke_until=None, revoke_once=False):
         return self.revoke(Task(id=id), revoke_until, revoke_once)
@@ -685,12 +784,12 @@ class Huey(object):
 
     def is_revoked(self, task, timestamp=None, peek=True):
         keys = self._revoke_keys(task)
-        data = self.storage.peek_many(keys)
+        data = self.storage.peek_control_many(keys)
         for key in keys:
             revoked, restore = self._check_revoked(
                 data.get(key, EmptyData), timestamp, peek)
             if restore:
-                self.delete(key)
+                self._delete_control(key)
             if revoked:
                 return True
         return False
@@ -769,7 +868,7 @@ class Huey(object):
             locks = itertools.chain(locks, named_locks)
 
         for lock_key in locks:
-            if self.delete(lock_key):
+            if self._delete_control(lock_key):
                 flushed.add(lock_key.split('.lock.', 1)[-1])
 
         return flushed
@@ -1073,7 +1172,7 @@ class TaskLock(object):
         self._huey._locks.add(self._key)
 
     def is_locked(self):
-        return self._huey.storage.has_data_for_key(self._key)
+        return self._huey._has_control_key(self._key)
     locked = is_locked
 
     def __call__(self, fn):
@@ -1088,15 +1187,15 @@ class TaskLock(object):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self._huey.delete(self._key)
+        self._huey._delete_control(self._key)
 
     def acquire(self):
-        if not self._huey.put_if_empty(self._key, '1', self._ttl):
+        if not self._huey._put_control_if_empty(self._key, '1', self._ttl):
             raise TaskLockedException('unable to acquire lock %s' % self._name)
         return True
 
     def clear(self):
-        return self._huey.delete(self._key)
+        return self._huey._delete_control(self._key)
     release = clear
 
 
@@ -1121,17 +1220,17 @@ class RateLimit(object):
         return window_end - now
 
     def reset(self):
-        self._huey.delete(self._window_key)
+        self._huey._delete_control(self._window_key)
         self._huey.storage.delete_counter(self._counter_key)
 
     def acquire(self):
         now = time.time()
         window = self._current_window(now)
 
-        stored = self._huey.get(self._window_key, peek=True)
+        stored = self._huey._peek_control(self._window_key)
         if stored != window:
             self._huey.storage.delete_counter(self._counter_key)
-            self._huey.put(self._window_key, window)
+            self._huey._put_control(self._window_key, window)
 
         count = self._huey.storage.incr(self._counter_key)
         if count > self._limit:
@@ -1227,7 +1326,7 @@ class Result(object):
     def _get(self, preserve=False):
         task_id = self.id
         if self._result is EmptyData:
-            res = self.huey.get_raw(task_id, peek=preserve)
+            res = self.huey.get_result_raw(task_id, peek=preserve)
 
             if res is not EmptyData:
                 self._result = self.huey.serializer.deserialize(res)

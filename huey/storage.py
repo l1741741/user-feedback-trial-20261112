@@ -44,8 +44,19 @@ class BaseStorage(object):
     blocking = False  # Does dequeue() block until ready, or should we poll?
     priority = True
 
-    def __init__(self, name='huey', **storage_kwargs):
+    # Indicates whether this backend supports keyspace isolation, i.e. keeping
+    # internal control-state (revocation flags, locks, rate-limit windows) in
+    # a separate keyspace from task results and user-provided data, so that a
+    # business key or a custom task id can never overwrite control-state.
+    supports_keyspace_isolation = False
+
+    def __init__(self, name='huey', keyspace_isolation=False,
+                 **storage_kwargs):
         self.name = name
+        # Only capable backends should ever receive a True value - the Huey
+        # instance validates this eagerly so an unsupported storage is
+        # rejected before any data is written.
+        self.keyspace_isolation = bool(keyspace_isolation)
 
     def close(self):
         """
@@ -265,6 +276,54 @@ class BaseStorage(object):
         """
         raise NotImplementedError
 
+    # ------------------------------------------------------------------
+    # Business data-plane methods.
+    #
+    # Values written by user code through Huey.put()/get()/delete(). In the
+    # legacy single-keyspace layout these share the same physical store as
+    # task results (that is why the default implementations delegate to the
+    # ``*_data`` methods); when keyspace isolation is enabled capable backends
+    # keep them in their own keyspace, separate from both task results and
+    # internal control-state.
+    # ------------------------------------------------------------------
+    def put_business(self, key, value):
+        self.put_data(key, value)
+
+    def peek_business(self, key):
+        return self.peek_data(key)
+
+    def pop_business(self, key):
+        return self.pop_data(key)
+
+    def delete_business(self, key):
+        return self.delete_data(key)
+
+    def has_business_key(self, key):
+        return self.has_data_for_key(key)
+
+    def put_business_if_empty(self, key, value, ttl=None):
+        return self.put_if_empty(key, value, ttl)
+
+    def business_store_size(self):
+        """
+        :return: Number of key/value pairs in the business data-store. In
+            legacy layout this equals the overall data-store size.
+        """
+        return self.result_store_size()
+
+    def business_items(self):
+        """
+        Non-destructively read all key/value pairs written by user code.
+        """
+        return self.result_items()
+
+    def flush_business(self):
+        """
+        Delete all user-provided key/value pairs. In legacy layout there is no
+        separate business keyspace, so this deletes the shared data-store.
+        """
+        self.flush_results()
+
     def result_store_size(self):
         """
         :return: Number of key/value pairs in the result store.
@@ -296,6 +355,69 @@ class BaseStorage(object):
         """
         raise NotImplementedError
 
+    # ------------------------------------------------------------------
+    # Control-plane key/value methods.
+    #
+    # Internal control-state (task revocation flags, task locks, rate-limit
+    # window markers) is written through these methods. When keyspace
+    # isolation is enabled, capable backends store them in a separate
+    # keyspace, whereas in the default (legacy) layout they share the same
+    # underlying store as task results and user data.
+    #
+    # The default implementations simply delegate to the shared data-store,
+    # which is exactly the legacy single-keyspace behavior.
+    # ------------------------------------------------------------------
+    def put_control(self, key, value):
+        self.put_data(key, value)
+
+    def peek_control(self, key):
+        return self.peek_data(key)
+
+    def peek_control_many(self, keys):
+        accum = {}
+        for key in keys:
+            value = self.peek_control(key)
+            if value is not EmptyData:
+                accum[key] = value
+        return accum
+
+    def pop_control(self, key):
+        return self.pop_data(key)
+
+    def delete_control(self, key):
+        return self.delete_data(key)
+
+    def has_control_key(self, key):
+        return self.has_data_for_key(key)
+
+    def put_control_if_empty(self, key, value, ttl=None):
+        return self.put_if_empty(key, value, ttl)
+
+    def control_store_size(self):
+        """
+        :return: Number of key/value pairs in the control store. In legacy
+            layout this equals the overall data-store size, as the two
+            keyspaces are not separated.
+        """
+        return self.result_store_size()
+
+    def control_items(self):
+        """
+        Non-destructively read all key/value pairs from the control store.
+        In legacy layout control-state shares the data-store with results and
+        user data, so this returns the whole data-store.
+        """
+        return self.result_items()
+
+    def flush_control(self):
+        """
+        Delete all control-state key/value pairs. In legacy layout there is no
+        separate control keyspace, so this deletes the shared data-store -
+        matching the behavior of ``flush_results()`` in Huey versions before
+        keyspace isolation existed.
+        """
+        self.flush_results()
+
     def flush_all(self):
         """
         Remove all persistent or semi-persistent data.
@@ -306,6 +428,11 @@ class BaseStorage(object):
         self.flush_schedule()
         self.flush_results()
         self.flush_counters()
+        if self.keyspace_isolation:
+            # Separate keyspaces only exist when isolation is enabled; in
+            # legacy mode flush_results() already covers the shared store.
+            self.flush_business()
+            self.flush_control()
 
 
 class BlackHoleStorage(BaseStorage):
@@ -333,11 +460,18 @@ class BlackHoleStorage(BaseStorage):
 
 
 class MemoryStorage(BaseStorage):
+    supports_keyspace_isolation = True
+
     def __init__(self, *args, **kwargs):
         super(MemoryStorage, self).__init__(*args, **kwargs)
         self._c = 0  # Counter to ensure FIFO behavior for queue.
         self._queue = []
         self._results = {}
+        # When keyspace isolation is enabled, user data and internal
+        # control-state each get their own dictionary and are never reachable
+        # through the result/data APIs. In legacy mode these stay unused.
+        self._business = {}
+        self._control = {}
         self._schedule = []
         self._counters = {}
         self._lock = threading.RLock()
@@ -437,6 +571,96 @@ class MemoryStorage(BaseStorage):
 
     def flush_counters(self):
         self._counters = {}
+
+    # Business data-plane: delegated to the shared data-store in legacy mode
+    # and to a separate dictionary when keyspace isolation is enabled.
+    def _business_store(self):
+        return self._business if self.keyspace_isolation else self._results
+
+    def put_business(self, key, value):
+        self._business_store()[key] = value
+
+    def peek_business(self, key):
+        return self._business_store().get(key, EmptyData)
+
+    def pop_business(self, key):
+        return self._business_store().pop(key, EmptyData)
+
+    def delete_business(self, key):
+        return self._business_store().pop(key, EmptyData) is not EmptyData
+
+    def has_business_key(self, key):
+        return key in self._business_store()
+
+    def put_business_if_empty(self, key, value, ttl=None):
+        if ttl is not None:
+            raise NotImplementedError('ttl is not supported by this storage.')
+        with self._lock:
+            store = self._business_store()
+            if key in store:
+                return False
+            store[key] = value
+            return True
+
+    def business_store_size(self):
+        return len(self._business_store())
+
+    def business_items(self):
+        return dict(self._business_store())
+
+    def flush_business(self):
+        if self.keyspace_isolation:
+            self._business = {}
+        else:
+            # Legacy layout: business data shares the data-store.
+            self._results = {}
+
+    # Control-plane: delegated to the shared data-store in legacy mode and to
+    # a separate dictionary when keyspace isolation is enabled.
+    def _control_store(self):
+        return self._control if self.keyspace_isolation else self._results
+
+    def put_control(self, key, value):
+        self._control_store()[key] = value
+
+    def peek_control(self, key):
+        return self._control_store().get(key, EmptyData)
+
+    def pop_control(self, key):
+        return self._control_store().pop(key, EmptyData)
+
+    def delete_control(self, key):
+        return self._control_store().pop(key, EmptyData) is not EmptyData
+
+    def has_control_key(self, key):
+        return key in self._control_store()
+
+    def put_control_if_empty(self, key, value, ttl=None):
+        if ttl is not None:
+            raise NotImplementedError('ttl is not supported by this storage.')
+        with self._lock:
+            store = self._control_store()
+            if key in store:
+                return False
+            store[key] = value
+            return True
+
+    def peek_control_many(self, keys):
+        store = self._control_store()
+        return {key: store[key] for key in keys if key in store}
+
+    def control_store_size(self):
+        return len(self._control_store())
+
+    def control_items(self):
+        return dict(self._control_store())
+
+    def flush_control(self):
+        if self.keyspace_isolation:
+            self._control = {}
+        else:
+            # Legacy layout: control-state shares the data-store.
+            self._results = {}
 
 
 # A custom lua script to pass to redis that will read tasks from the schedule
@@ -852,6 +1076,28 @@ class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
     integrity_error = getattr(sqlite3, 'IntegrityError', None)
     operational_error = getattr(sqlite3, 'OperationalError', None)
+    supports_keyspace_isolation = True
+
+    # Keyspace isolation markers, stored as part of the key in the kv table.
+    # They all begin with a 0x01 control byte, which never occurs in any key
+    # Huey or its documented public APIs generate (task ids are UUID strings,
+    # business keys and the lock / rate-limit / revoke key templates are plain
+    # text). A NUL byte cannot be used here: SQLite's LIKE/GLOB pattern
+    # matching treats embedded NUL bytes as a C-string terminator.
+    NS_BUSINESS = b'\x01b:'
+    NS_RESULT = b'\x01r:'
+    NS_CONTROL = b'\x01c:'
+
+    # All recognized keyspace markers, used to identify rows written by an
+    # isolated storage instance. Anything else in an existing database is
+    # legacy data of unknown ownership.
+    NS_MARKERS = (NS_BUSINESS, NS_RESULT, NS_CONTROL)
+
+    # How to react when a database created before keyspace isolation contains
+    # rows whose ownership cannot be determined:
+    #   "error"      - raise ConfigurationError and leave the file untouched
+    #   "quarantine" - move ambiguous legacy rows into a quarantine table
+    LEGACY_POLICIES = ('error', 'quarantine')
     table_kv = ('create table if not exists kv ('
                 'queue text not null, key text not null, value blob not null, '
                 'primary key(queue, key))')
@@ -875,13 +1121,20 @@ class SqliteStorage(BaseSqlStorage):
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
-                 create_tables=True, **kwargs):
+                 create_tables=True, keyspace_isolation=False,
+                 legacy_policy='error', **kwargs):
         self.filename = filename
         self._cache_mb = cache_mb
         self._fsync = fsync
         self._journal_mode = journal_mode
         self._timeout = timeout  # Busy timeout in seconds, default is 5.
         self._conn_kwargs = kwargs
+
+        if legacy_policy not in self.LEGACY_POLICIES:
+            raise ConfigurationError(
+                'legacy_policy must be one of %s, got %r' % (
+                    self.LEGACY_POLICIES, legacy_policy))
+        self._legacy_policy = legacy_policy
 
         # By default Sqlite may reuse rowids when rows are removed. This means
         # that SqliteHuey may not strictly be a FIFO. If strict FIFO ordering
@@ -898,7 +1151,9 @@ class SqliteStorage(BaseSqlStorage):
 
         self.to_blob = memoryview
 
-        super(SqliteStorage, self).__init__(name, create_tables=create_tables)
+        super(SqliteStorage, self).__init__(
+            name, keyspace_isolation=keyspace_isolation,
+            create_tables=create_tables)
 
     def _create_connection(self):
         conn = sqlite3.connect(self.filename, timeout=self._timeout,
@@ -1002,37 +1257,162 @@ class SqliteStorage(BaseSqlStorage):
     def flush_schedule(self):
         self.sql('delete from schedule where queue = ?', (self.name,), True)
 
+    # ------------------------------------------------------------------
+    # Keyspace isolation helpers.
+    #
+    # The physical kv table is shared by every queue (distinguished by the
+    # ``queue`` column) and by all logical keyspaces. The keyspace is encoded
+    # in the key itself with a NUL-prefixed marker, so every read, delete,
+    # batch lookup and flush is scoped by the same marker - there is no code
+    # path that falls back to the unmarked key.
+    # ------------------------------------------------------------------
+    def _encode_key(self, key, marker):
+        if isinstance(key, str):
+            key = key.encode('utf8')
+        return marker + key
+
+    def _business_key(self, key):
+        if not self.keyspace_isolation:
+            return key
+        return self._encode_key(key, self.NS_BUSINESS)
+
+    def _result_key(self, key):
+        if not self.keyspace_isolation:
+            return key
+        return self._encode_key(key, self.NS_RESULT)
+
+    def _control_key(self, key):
+        if not self.keyspace_isolation:
+            return key
+        return self._encode_key(key, self.NS_CONTROL)
+
+    def _strip_marker(self, key):
+        if isinstance(key, str):
+            key = key.encode('utf8')
+        for marker in self.NS_MARKERS:
+            if key.startswith(marker):
+                return key[len(marker):]
+        return key
+
+    def _unmarked_clause(self, prefix=''):
+        # SQL fragment selecting rows whose key carries none of the keyspace
+        # markers. ``prefix`` names the kv alias/column when needed.
+        col = (prefix + '.') if prefix else ''
+        conditions = ' and '.join(
+            'cast(%skey as blob) not like ?' % col
+            for _ in self.NS_MARKERS)
+        return conditions
+
+    def _unmarked_params(self):
+        return tuple(marker + b'%' for marker in self.NS_MARKERS)
+
+    def initialize_schema(self):
+        super(SqliteStorage, self).initialize_schema()
+        if self.keyspace_isolation:
+            try:
+                self._handle_legacy_kv()
+            except Exception:
+                # Do not leave an open connection (or a WAL lock) behind when
+                # refusing an ambiguous legacy database; the caller may want
+                # to inspect or re-open the same file immediately.
+                self.close()
+                raise
+
+    def _legacy_kv_count(self, curs):
+        # Count kv rows for this queue whose key carries no keyspace marker.
+        # The cast makes the comparison work whether the column stores the key
+        # as TEXT (default) or BLOB (bytes key written by an older client).
+        curs.execute(
+            'select count(*) from kv where queue = ? and ' +
+            self._unmarked_clause(),
+            (self.name,) + self._unmarked_params())
+        return curs.fetchone()[0]
+
+    def _handle_legacy_kv(self):
+        with self.db(commit=True) as curs:
+            # No kv table (create_tables=False) or an empty/new database:
+            # nothing ambiguous to decide.
+            curs.execute("select 1 from sqlite_master where type='table' "
+                         "and name='kv'")
+            if curs.fetchone() is None:
+                return
+            legacy_count = self._legacy_kv_count(curs)
+            if not legacy_count:
+                return
+
+            if self._legacy_policy == 'error':
+                raise ConfigurationError(
+                    'keyspace isolation was enabled on database %r which '
+                    'contains %d unmarked key/value row(s) for queue %r. '
+                    'Their ownership (task result, user data, or internal '
+                    'control-state) cannot be determined, so they will not be '
+                    'silently treated as control-state. Re-open with '
+                    'legacy_policy="quarantine" to move them into the '
+                    '"kv_legacy_quarantine" table, or resolve them manually '
+                    'before re-enabling isolation.' % (
+                        self.filename, legacy_count, self.name))
+
+            # Quarantine policy: preserve every ambiguous row verbatim in a
+            # separate table and remove it from the active store. Nothing is
+            # deleted and nothing is reinterpreted as control-state.
+            curs.execute(
+                'create table if not exists kv_legacy_quarantine ('
+                'queue text not null, key text not null, value blob not null, '
+                'quarantined_at real not null)')
+            curs.execute(
+                'insert into kv_legacy_quarantine '
+                '(queue, key, value, quarantined_at) '
+                "select queue, key, value, strftime('%s','now') from kv "
+                'where queue = ? and ' + self._unmarked_clause(),
+                (self.name,) + self._unmarked_params())
+            curs.execute(
+                'delete from kv where queue = ? and ' +
+                self._unmarked_clause(),
+                (self.name,) + self._unmarked_params())
+
     def put_data(self, key, value, is_result=False):
+        key = self._result_key(key)
         self.sql('insert or replace into kv (queue, key, value) '
                  'values (?, ?, ?)',
                  (self.name, key, self.to_blob(value)), True)
 
     def peek_data(self, key):
         res = self.sql('select value from kv where queue = ? and key = ?',
-                       (self.name, key), results=True)
+                       (self.name, self._result_key(key)), results=True)
         return res[0][0] if res else EmptyData
 
     def peek_many(self, keys):
-        return dict(self.sql(
+        if not keys:
+            return {}
+        marked = [self._result_key(key) for key in keys]
+        rows = self.sql(
             'select key, value from kv where queue = ? and key in (%s)' %
-            ','.join('?' * len(keys)), (self.name,) + tuple(keys),
-            results=True))
+            ','.join('?' * len(marked)), (self.name,) + tuple(marked),
+            results=True)
+        if not self.keyspace_isolation:
+            return dict(rows)
+        # Return values keyed by the caller's original (unmarked) keys.
+        by_marked = dict(rows)
+        return {key: by_marked[marked] for key, marked in
+                zip(keys, marked) if marked in by_marked}
 
     def pop_data(self, key):
+        marked = self._result_key(key)
         with self.db(commit=True) as curs:
             curs.execute('select value from kv where queue = ? and key = ?',
-                         (self.name, key))
+                         (self.name, marked))
             result = curs.fetchone()
             if result is not None:
                 curs.execute('delete from kv where queue=? and key=?',
-                             (self.name, key))
+                             (self.name, marked))
                 if curs.rowcount == 1:
                     return result[0]
             return EmptyData
 
     def has_data_for_key(self, key):
         return bool(self.sql('select 1 from kv where queue=? and key=?',
-                             (self.name, key), results=True))
+                             (self.name, self._result_key(key)),
+                             results=True))
 
     def put_if_empty(self, key, value, ttl=None):
         if ttl is not None:
@@ -1041,11 +1421,92 @@ class SqliteStorage(BaseSqlStorage):
             with self.db(commit=True) as curs:
                 curs.execute('insert or abort into kv '
                              '(queue, key, value) values (?, ?, ?)',
-                             (self.name, key, self.to_blob(value)))
+                             (self.name, self._result_key(key),
+                              self.to_blob(value)))
         except self.integrity_error:
             return False
         else:
             return True
+
+    # Business data-plane, scoped by the business marker when isolation is
+    # enabled. In legacy mode every helper resolves to the plain (unmarked)
+    # key, i.e. the historical shared data-store behavior.
+    def put_business(self, key, value):
+        self.sql('insert or replace into kv (queue, key, value) '
+                 'values (?, ?, ?)',
+                 (self.name, self._business_key(key), self.to_blob(value)),
+                 True)
+
+    def peek_business(self, key):
+        res = self.sql('select value from kv where queue = ? and key = ?',
+                       (self.name, self._business_key(key)), results=True)
+        return res[0][0] if res else EmptyData
+
+    def pop_business(self, key):
+        marked = self._business_key(key)
+        with self.db(commit=True) as curs:
+            curs.execute('select value from kv where queue = ? and key = ?',
+                         (self.name, marked))
+            result = curs.fetchone()
+            if result is not None:
+                curs.execute('delete from kv where queue=? and key=?',
+                             (self.name, marked))
+                if curs.rowcount == 1:
+                    return result[0]
+            return EmptyData
+
+    def delete_business(self, key):
+        with self.db(commit=True) as curs:
+            curs.execute('delete from kv where queue=? and key=?',
+                         (self.name, self._business_key(key)))
+            return curs.rowcount > 0
+
+    def has_business_key(self, key):
+        return bool(self.sql('select 1 from kv where queue=? and key=?',
+                             (self.name, self._business_key(key)),
+                             results=True))
+
+    def put_business_if_empty(self, key, value, ttl=None):
+        if ttl is not None:
+            raise NotImplementedError('ttl is not supported by this storage.')
+        try:
+            with self.db(commit=True) as curs:
+                curs.execute('insert or abort into kv '
+                             '(queue, key, value) values (?, ?, ?)',
+                             (self.name, self._business_key(key),
+                              self.to_blob(value)))
+        except self.integrity_error:
+            return False
+        else:
+            return True
+
+    def business_store_size(self):
+        if not self.keyspace_isolation:
+            return self.sql('select count(*) from kv where queue=?',
+                            (self.name,), results=True)[0][0]
+        return self.sql(
+            'select count(*) from kv where queue=? and '
+            'cast(key as blob) like ?',
+            (self.name, self.NS_BUSINESS + b'%'), results=True)[0][0]
+
+    def business_items(self):
+        if not self.keyspace_isolation:
+            res = self.sql('select key, value from kv where queue=?',
+                           (self.name,), results=True)
+            return dict((k, v) for k, v in res)
+        res = self.sql(
+            'select key, value from kv where queue=? and '
+            'cast(key as blob) like ?',
+            (self.name, self.NS_BUSINESS + b'%'), results=True)
+        return dict((self._strip_marker(k), v) for k, v in res)
+
+    def flush_business(self):
+        if not self.keyspace_isolation:
+            # Legacy layout: business data shares the data-store.
+            self.sql('delete from kv where queue=?', (self.name,), True)
+            return
+        self.sql('delete from kv where queue=? and cast(key as blob) like ?',
+                 (self.name, self.NS_BUSINESS + b'%'), True)
 
     def incr(self, key, amount=1):
         with self.db(commit=True) as curs:
@@ -1062,24 +1523,148 @@ class SqliteStorage(BaseSqlStorage):
                  (self.name, key), commit=True)
 
     def result_store_size(self):
-        return self.sql('select count(*) from kv where queue=?', (self.name,),
-                        results=True)[0][0]
+        if not self.keyspace_isolation:
+            return self.sql('select count(*) from kv where queue=?',
+                            (self.name,), results=True)[0][0]
+        return self.sql(
+            'select count(*) from kv where queue=? and '
+            'cast(key as blob) like ?',
+            (self.name, self.NS_RESULT + b'%'), results=True)[0][0]
 
     def result_items(self):
-        res = self.sql('select key, value from kv where queue=?', (self.name,),
-                       results=True)
-        return dict((k, v) for k, v in res)
+        if not self.keyspace_isolation:
+            res = self.sql('select key, value from kv where queue=?',
+                           (self.name,), results=True)
+            return dict((k, v) for k, v in res)
+        res = self.sql(
+            'select key, value from kv where queue=? and '
+            'cast(key as blob) like ?',
+            (self.name, self.NS_RESULT + b'%'), results=True)
+        return dict((self._strip_marker(k), v) for k, v in res)
 
     def flush_results(self):
-        self.sql('delete from kv where queue=?', (self.name,), True)
+        if not self.keyspace_isolation:
+            self.sql('delete from kv where queue=?', (self.name,), True)
+            return
+        self.sql('delete from kv where queue=? and cast(key as blob) like ?',
+                 (self.name, self.NS_RESULT + b'%'), True)
 
     def flush_counters(self):
         self.sql('delete from counter where queue=?', (self.name,), True)
 
+    # Control-plane key/value store, scoped by the control marker when
+    # isolation is enabled.
+    def put_control(self, key, value):
+        self.sql('insert or replace into kv (queue, key, value) '
+                 'values (?, ?, ?)',
+                 (self.name, self._control_key(key), self.to_blob(value)),
+                 True)
+
+    def peek_control(self, key):
+        res = self.sql('select value from kv where queue = ? and key = ?',
+                       (self.name, self._control_key(key)), results=True)
+        return res[0][0] if res else EmptyData
+
+    def peek_control_many(self, keys):
+        if not keys:
+            return {}
+        marked = [self._control_key(key) for key in keys]
+        rows = self.sql(
+            'select key, value from kv where queue = ? and key in (%s)' %
+            ','.join('?' * len(marked)), (self.name,) + tuple(marked),
+            results=True)
+        if not self.keyspace_isolation:
+            return dict(rows)
+        by_marked = dict(rows)
+        return {key: by_marked[marked] for key, marked in
+                zip(keys, marked) if marked in by_marked}
+
+    def pop_control(self, key):
+        marked = self._control_key(key)
+        with self.db(commit=True) as curs:
+            curs.execute('select value from kv where queue = ? and key = ?',
+                         (self.name, marked))
+            result = curs.fetchone()
+            if result is not None:
+                curs.execute('delete from kv where queue=? and key=?',
+                             (self.name, marked))
+                if curs.rowcount == 1:
+                    return result[0]
+            return EmptyData
+
+    def delete_control(self, key):
+        with self.db(commit=True) as curs:
+            curs.execute('delete from kv where queue=? and key=?',
+                         (self.name, self._control_key(key)))
+            return curs.rowcount > 0
+
+    def has_control_key(self, key):
+        return bool(self.sql('select 1 from kv where queue=? and key=?',
+                             (self.name, self._control_key(key)),
+                             results=True))
+
+    def put_control_if_empty(self, key, value, ttl=None):
+        if ttl is not None:
+            raise NotImplementedError('ttl is not supported by this storage.')
+        try:
+            with self.db(commit=True) as curs:
+                curs.execute('insert or abort into kv '
+                             '(queue, key, value) values (?, ?, ?)',
+                             (self.name, self._control_key(key),
+                              self.to_blob(value)))
+        except self.integrity_error:
+            return False
+        else:
+            return True
+
+    def control_store_size(self):
+        if not self.keyspace_isolation:
+            return self.sql('select count(*) from kv where queue=?',
+                            (self.name,), results=True)[0][0]
+        return self.sql(
+            'select count(*) from kv where queue=? and '
+            'cast(key as blob) like ?',
+            (self.name, self.NS_CONTROL + b'%'), results=True)[0][0]
+
+    def control_items(self):
+        if not self.keyspace_isolation:
+            res = self.sql('select key, value from kv where queue=?',
+                           (self.name,), results=True)
+            return dict((k, v) for k, v in res)
+        res = self.sql(
+            'select key, value from kv where queue=? and '
+            'cast(key as blob) like ?',
+            (self.name, self.NS_CONTROL + b'%'), results=True)
+        return dict((self._strip_marker(k), v) for k, v in res)
+
+    def flush_control(self):
+        if not self.keyspace_isolation:
+            # Legacy layout: control-state shares the data-store.
+            self.sql('delete from kv where queue=?', (self.name,), True)
+            return
+        self.sql('delete from kv where queue=? and cast(key as blob) like ?',
+                 (self.name, self.NS_CONTROL + b'%'), True)
+
+    def quarantine_info(self):
+        """
+        Return the number of rows held in the legacy quarantine table, or 0
+        if the table does not exist.
+        """
+        with self.db() as curs:
+            curs.execute("select 1 from sqlite_master where type='table' "
+                         "and name='kv_legacy_quarantine'")
+            if curs.fetchone() is None:
+                return 0
+            curs.execute(
+                'select count(*) from kv_legacy_quarantine where queue=?',
+                (self.name,))
+            return curs.fetchone()[0]
+
 
 class CySqliteStorage(SqliteStorage):
     def __init__(self, name='huey', filename='huey.db', pragmas=None,
-                 timeout=5, strict_fifo=False, create_tables=True, **kwargs):
+                 timeout=5, strict_fifo=False, create_tables=True,
+                 keyspace_isolation=False, legacy_policy='error', **kwargs):
         if cysqlite is None:
             raise ConfigurationError('"cysqlite" not found. Run "pip install '
                                      'cysqlite" to install.')
@@ -1099,6 +1684,8 @@ class CySqliteStorage(SqliteStorage):
             timeout=timeout,
             strict_fifo=strict_fifo,
             create_tables=create_tables,
+            keyspace_isolation=keyspace_isolation,
+            legacy_policy=legacy_policy,
             pragmas=pragmas,
             **kwargs)
 

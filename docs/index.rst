@@ -126,6 +126,7 @@ Table of contents
    monitoring
    imports
    shared_resources
+   keyspace_isolation
    signals
    api
    contrib

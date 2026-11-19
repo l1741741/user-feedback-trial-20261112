@@ -5,6 +5,17 @@ Changelog
 
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
+* Add opt-in `keyspace_isolation` mode (default off) for `MemoryHuey` and
+  `SqliteHuey`. Internal control-state (revocation flags, task locks,
+  rate-limit window markers and chord counters) is kept in a separate
+  keyspace from both task results and user data written via `Huey.put`, so a
+  custom task id or business key can no longer collide with control-state,
+  and flushing results can no longer clear locks, revocations or rate-limit
+  windows. Unsupported storage backends raise `ConfigurationError` before any
+  data is written. SQLite databases created before isolation is enabled are
+  handled via an explicit `legacy_policy` ("error" by default, or
+  "quarantine") - ambiguous rows are never silently reinterpreted or deleted.
+
 ## 3.5.4
 
 * Fix possible hang if worker holding the stop flag was killed while holding
