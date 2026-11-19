@@ -1,3 +1,4 @@
+from huey.tests import TEST_TMP_DIR
 import datetime
 import os
 import shutil
@@ -94,7 +95,7 @@ class TestNormalizeTime(unittest.TestCase):
 
 
 class TestFileLock(unittest.TestCase):
-    lock_file = '/tmp/huey-test-filelock/.lock'
+    lock_file = os.path.join(TEST_TMP_DIR, 'filelock', '.lock')
 
     def tearDown(self):
         dirname = os.path.dirname(self.lock_file)
