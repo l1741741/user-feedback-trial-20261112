@@ -1,3 +1,4 @@
+from huey.tests import TEST_TMP_DIR
 import os
 import sqlite3
 import threading
@@ -17,12 +18,12 @@ from huey.tests.base import BaseTestCase
 from huey.tests.test_storage import StorageTests
 
 
-SQLHUEY_URL = os.environ.get('SQLHUEY_URL') or 'sqlite:////tmp/huey-sqlite.db'
+SQLHUEY_URL = os.environ.get('SQLHUEY_URL') or ('sqlite:///%s' % os.path.join(TEST_TMP_DIR, 'huey-sqlite.db'))
 
 
 @unittest.skipIf(peewee is None, 'requires peewee')
 class TestSqlStorage(StorageTests, BaseTestCase):
-    db_file = '/tmp/huey-sqlite.db'
+    db_file = os.path.join(TEST_TMP_DIR, 'huey-sqlite.db')
     supports_ttl = False
 
     def setUp(self):
@@ -109,7 +110,7 @@ class TestSqlStorage(StorageTests, BaseTestCase):
         self.assertEqual(len(self.huey), 0)
 
     def test_create_tables(self):
-        filename = '/tmp/huey-sqlite-ct.db'
+        filename = os.path.join(TEST_TMP_DIR, 'huey-sqlite-ct.db')
         if os.path.exists(filename):
             os.unlink(filename)
         huey = SqlHuey('ct', database='sqlite:///%s' % filename,
