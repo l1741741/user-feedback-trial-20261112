@@ -1,0 +1,10 @@
+{"normal_ordered_result": [11, 22]}
+{"worker_alive_at_sweep": true, "grace_seconds": 0.1, "callback_queued_before_member_finished": 1, "premature_error": true, "sweep": {"delivered": [], "reconciled": ["f2dda970-2338-4645-ac4f-b3987b834e74"], "removed": 0}, "worker_exit_code": 0, "member_result": [42], "callback_after_real_completion": 0}
+Traceback (most recent call last):
+  File "/Users/lichao/Desktop/xpert/user-feedback/state/middleware-20261120/acceptance/probe_13863_inflight.py", line 56, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/Users/lichao/Desktop/xpert/user-feedback/state/middleware-20261120/acceptance/probe_13863_inflight.py", line 51, in main
+    assert callback_queued==0,'A live member must not be finalized as lost or trigger the callback'
+           ^^^^^^^^^^^^^^^^^^
+AssertionError: A live member must not be finalized as lost or trigger the callback
