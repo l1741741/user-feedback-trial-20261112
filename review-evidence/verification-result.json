@@ -1,0 +1,34 @@
+{
+  "task_id": "middleware-startfix-20261120-13862-persistent-cancel",
+  "final_sha": "82a6f20c90cc465cec5cf8fa65596939c3346db4",
+  "regression": {
+    "exit_code": 0,
+    "log": "/Users/lichao/Desktop/xpert/user-feedback/runs/middleware-20261120/middleware-startfix-20261120-13862-persistent-cancel/regression-preparation.log",
+    "tests": 334,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 105
+  },
+  "targets": [
+    "huey/tests/test_api.py",
+    "huey/tests/test_storage.py",
+    "huey/tests/test_consumer.py",
+    "huey/tests/test_serializer.py",
+    "huey/tests/test_priority.py",
+    "huey/tests/test_signals.py",
+    "huey/tests/test_durable_revoke.py"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "NATIVE-RUNTIME.md",
+    "docs/api.rst",
+    "docs/guide.rst",
+    "huey/api.py",
+    "huey/storage.py",
+    "huey/tests/__init__.py",
+    "huey/tests/durable_revoke_driver.py",
+    "huey/tests/test_durable_revoke.py"
+  ],
+  "review_status": "AWAITING_INDEPENDENT_MAIN_AGENT_REVIEW",
+  "independent_acceptance_required": true
+}

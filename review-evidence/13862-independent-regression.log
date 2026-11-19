@@ -1,0 +1,20 @@
+........................................................................ [ 21%]
+..............................................s..........sssssssssssssss [ 43%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssss......s....... [ 64%]
+..sssssssssssssss.........s.....ssssssssss...s........ss........s....... [ 86%]
+..............................................                           [100%]
+=============================== warnings summary ===============================
+huey/tests/test_api.py:32
+  /Users/lichao/Desktop/xpert/user-feedback/runs/middleware-20261120/middleware-startfix-20261120-13862-persistent-cancel/local-frozen-source/huey/tests/test_api.py:32: PytestCollectionWarning: cannot collect test class 'TestError' because it has a __init__ constructor (from: huey/tests/test_api.py)
+    class TestError(Exception):
+
+huey/tests/test_consumer.py:30
+  /Users/lichao/Desktop/xpert/user-feedback/runs/middleware-20261120/middleware-startfix-20261120-13862-persistent-cancel/local-frozen-source/huey/tests/test_consumer.py:30: PytestCollectionWarning: cannot collect test class 'TestConsumer' because it has a __init__ constructor (from: huey/tests/test_consumer.py)
+    class TestConsumer(Consumer):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+229 passed, 105 skipped, 2 warnings in 2.90s
+/Users/lichao/.local/share/user-feedback/trials/20261112/uid-319-source/.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
