@@ -1,0 +1,6 @@
+{"processes": 3, "before": {"lock": true}, "restore": {"restore_returned": true}, "after": {"lock": false, "business": "retained"}}
+Traceback (most recent call last):
+  File "/Users/lichao/Desktop/xpert/user-feedback/state/middleware-20261120/acceptance/multiprocess_boundaries.py", line 64, in <module>
+    assert last['lock'] is True, 'task restore removed independently acquired lock across real process restarts'
+           ^^^^^^^^^^^^^^^^^^^^
+AssertionError: task restore removed independently acquired lock across real process restarts

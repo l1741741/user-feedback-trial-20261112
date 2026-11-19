@@ -1,0 +1,36 @@
+{
+  "task_id": "middleware-startfix-20261120-13864-control-keyspaces",
+  "final_sha": "938591fb866a73ac37c4331eb58e13caeef7f87f",
+  "regression": {
+    "exit_code": 0,
+    "log": "/Users/lichao/Desktop/xpert/user-feedback/runs/middleware-20261120/middleware-startfix-20261120-13864-control-keyspaces/regression-preparation.log",
+    "tests": 344,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 105
+  },
+  "targets": [
+    "huey/tests/test_api.py",
+    "huey/tests/test_storage.py",
+    "huey/tests/test_consumer.py",
+    "huey/tests/test_serializer.py",
+    "huey/tests/test_priority.py",
+    "huey/tests/test_signals.py",
+    "huey/tests/test_keyspace_isolation.py"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/index.rst",
+    "docs/keyspace_isolation.rst",
+    "huey/api.py",
+    "huey/storage.py",
+    "huey/tests/__init__.py",
+    "huey/tests/test_keyspace_isolation.py",
+    "validation/README.md",
+    "validation/scripts/mp_worker.py",
+    "validation/scripts/run_e2e.py",
+    "validation/scripts/run_multiprocess.py"
+  ],
+  "review_status": "AWAITING_INDEPENDENT_MAIN_AGENT_REVIEW",
+  "independent_acceptance_required": true
+}

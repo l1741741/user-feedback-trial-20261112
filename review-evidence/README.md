@@ -1,0 +1,5 @@
+被评源码父提交：938591fb866a73ac37c4331eb58e13caeef7f87f
+
+本目录包含独立正常路径及跨进程边界复现。退出1是所记录断言失败的真实结果，未修补父提交源码。命令：PYTHONPATH=源码目录 python3 review-evidence/multiprocess_boundaries.py keyspace 源码目录
+
+regression-preparation属于另一次回归，不与独立检查混计。

@@ -1,0 +1,7 @@
+{"backend": "MemoryHuey", "queue": "r:tenant", "task_id": "tenant.lock.invoice", "lock_survives_unrelated_restore": false}
+{"backend": "SqliteHuey", "queue": "r:tenant", "task_id": "tenant.lock.invoice", "lock_survives_unrelated_restore": false}
+Traceback (most recent call last):
+  File "/Users/lichao/Desktop/xpert/user-feedback/state/middleware-20261120/acceptance/probe_13864_control_collision.py", line 21, in <module>
+    assert memory and sqlite, 'restoring a task deleted an unrelated active task lock'
+           ^^^^^^^^^^^^^^^^^
+AssertionError: restoring a task deleted an unrelated active task lock
