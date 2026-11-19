@@ -1,3 +1,4 @@
+from huey.tests import TEST_TMP_DIR
 import datetime
 import hashlib
 import itertools
@@ -666,9 +667,9 @@ class TestCySqliteStorage(StorageTests, BaseTestCase):
 
 
 class TestFileStorageMethods(StorageTests, BaseTestCase):
-    path = '/tmp/test-huey-storage'
-    result_path = '/tmp/test-huey-storage/results'
-    queue_path = '/tmp/test-huey-storage/queue'
+    path = os.path.join(TEST_TMP_DIR, 'storage')
+    result_path = os.path.join(TEST_TMP_DIR, 'storage', 'results')
+    queue_path = os.path.join(TEST_TMP_DIR, 'storage', 'queue')
     supports_ttl = False
 
     def tearDown(self):
