@@ -4,6 +4,34 @@ class TaskLockedException(HueyException): pass
 class ResultTimeout(HueyException): pass
 class TaskTimeout(HueyException): pass
 
+
+class MessageRejected(HueyException, ValueError):
+    """
+    Raised when a serialized message cannot be authenticated or decoded.
+
+    It subclasses ``ValueError`` for compatibility with the original
+    ``SignedSerializer``, which documented a ``ValueError`` on tampering, and
+    ``HueyException`` so it can be handled alongside other Huey errors.
+
+    ``reason`` is a stable, non-sensitive classification suitable for logs.
+    The exception string never contains key material, the raw message, or
+    task arguments.
+    """
+    def __init__(self, reason):
+        self.reason = reason
+        super(MessageRejected, self).__init__(reason)
+
+    def __str__(self):
+        return self.reason
+
+
+class MessageAuthenticationError(MessageRejected):
+    """A message failed key lookup or signature verification."""
+
+
+class MessageFormatError(MessageRejected):
+    """A message was structurally invalid or could not be decoded."""
+
 class RateLimitExceeded(HueyException):
     def __init__(self, key, delay, retry=True):
         self.key, self.delay, self.retry = key, delay, retry

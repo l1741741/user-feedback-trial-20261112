@@ -2236,22 +2236,34 @@ Serializer
         :returns: the deserialized object.
 
 
-.. py:class:: SignedSerializer(secret, salt='huey', **kwargs)
+.. py:class:: SignedSerializer(secret=None, salt='huey', keys=None, signing_key=None, key_id='default', allow_legacy=False, legacy_key_id=None, **kwargs)
 
-    :param str secret: secret key used to generate HMAC signatures.
-    :param str salt: salt combined with the secret (default ``'huey'``).
+    :param str secret: secret key for the single-key form.
+    :param str salt: salt combined with key material (default ``'huey'``).
+    :param dict keys: mapping of key id to secret for multi-key rotation mode.
+    :param str signing_key: key id used to sign new messages. Required with
+        ``keys``.
+    :param str key_id: key id stamped into new messages in single-secret mode
+        (default ``'default'``).
+    :param bool allow_legacy: explicitly accept unversioned messages written by
+        the original ``SignedSerializer``. Defaults to ``False``.
+    :param str legacy_key_id: with ``keys`` and ``allow_legacy``, the key id
+        whose secret verifies old-format messages. Required in that combination.
     :param kwargs: additional keyword arguments passed to the base
         :py:class:`Serializer` (e.g. ``compression``, ``use_zlib``).
 
-    A subclass of :py:class:`Serializer` that adds an HMAC-SHA1 signature to
-    every serialized message. When deserializing, the signature is verified and
-    a ``ValueError`` is raised if the message has been tampered with.
+    A subclass of :py:class:`Serializer` that signs every serialized message
+    with HMAC-SHA256. When deserializing, the signature is verified before the
+    payload is decompressed or unpickled, and a
+    :py:class:`~huey.exceptions.MessageRejected` (a ``ValueError`` and
+    ``HueyException``) is raised if the message cannot be authenticated.
 
     This is useful when the storage backend (e.g. Redis) is shared or
     network-exposed and you want to prevent malicious injection of crafted
     pickle payloads.
 
-    .. code-block:: python
+    **Single secret (default).** Both the application and the consumer use the
+    same ``secret`` and ``salt``::
 
         from huey import RedisHuey
         from huey.serializer import SignedSerializer
@@ -2260,17 +2272,86 @@ Serializer
             'my-app',
             serializer=SignedSerializer(secret='my-secret-key'))
 
+    **Multi-key rotation.** New messages are signed with ``signing_key``; any
+    key in ``keys`` can be used to verify. Removing a key immediately rejects
+    messages signed with it::
+
+        serializer = SignedSerializer(
+            keys={'2026-11': 'new-secret', '2026-10': 'old-secret'},
+            signing_key='2026-11')
+
+    **Wire format.** New messages carry an authenticated envelope::
+
+        magic | version | flags | key-id-length | key-id | HMAC-SHA256 | payload
+
+    The HMAC covers the version, flags, key id and payload. The flags state
+    whether the payload is gzip- or zlib-compressed, so decoding never guesses
+    the compression algorithm from the bytes. Changing the key id, the
+    compression flags, the version or the payload invalidates the signature.
+    Unknown key ids and retired keys are rejected without touching the payload.
+
+    **Legacy format.** Messages written by the original implementation have no
+    version or key id. They are rejected unless ``allow_legacy=True`` is passed
+    explicitly, in which case only ``legacy_key_id`` (or the single secret) is
+    used to verify them. There is no automatic downgrade: once a message is
+    identified as the new format, an authentication failure raises and the
+    reader never retries the legacy path. Old-format messages are only
+    supported on the read side; new messages are always written in the
+    envelope format.
+
     .. note::
         The signed serializer detects tampering but does **not** encrypt the
         data. Task arguments remain visible in the storage backend.
 
-    Both the application and the consumer must use the same ``secret`` and
-    ``salt``.
+.. py:class:: RotatingSignedSerializer(keys, signing_key, salt='huey', **kwargs)
+
+    Explicit multi-key mode. Equivalent to
+    ``SignedSerializer(keys=..., signing_key=..., **kwargs)``:
+
+    .. code-block:: python
+
+        from huey.serializer import RotatingSignedSerializer
+
+        serializer = RotatingSignedSerializer(
+            keys={'2026-11': 'new-secret', '2026-10': 'old-secret'},
+            signing_key='2026-11')
+
+    :param dict keys: non-empty mapping of key id to secret. Key ids are
+        non-empty strings or bytes, at most 255 bytes.
+    :param str signing_key: key id used to sign new messages; must be present
+        in ``keys``.
+    :param kwargs: see :py:class:`SignedSerializer`.
+
+    Configuration errors (empty keys, duplicate key ids after normalization,
+    a missing ``signing_key``, mixing ``secret`` with ``keys``) raise
+    :py:class:`~huey.exceptions.ConfigurationError` during construction, before
+    any instance state is set, so a serializer can never be half-enabled.
+
+    See :ref:`recipe-signed-rotation` for the end-to-end rotation procedure.
 
 .. _exceptions:
 
 Exceptions
 ----------
+
+.. py:class:: MessageRejected(reason)
+
+    Base class for messages that cannot be authenticated or decoded. It
+    subclasses both ``ValueError`` (the original ``SignedSerializer`` contract)
+    and :py:class:`HueyException`. ``reason`` is a short classification such as
+    ``signature_mismatch``, ``unknown_key_id``, ``unsupported_version``,
+    ``legacy_format_disabled`` or ``malformed_message``. The message never
+    includes key material, the raw message, or task arguments.
+
+.. py:class:: MessageAuthenticationError
+
+    Subclass of :py:class:`MessageRejected` for key lookup and signature
+    failures.
+
+.. py:class:: MessageFormatError
+
+    Subclass of :py:class:`MessageRejected` for structurally invalid messages,
+    unsupported versions, or payloads that fail to decompress or deserialize.
 
 .. py:class:: HueyException
 

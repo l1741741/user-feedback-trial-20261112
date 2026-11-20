@@ -18,6 +18,7 @@ from huey.constants import EmptyData
 from huey.consumer import Consumer
 from huey.exceptions import CancelExecution
 from huey.exceptions import ConfigurationError
+from huey.exceptions import MessageRejected
 from huey.exceptions import RateLimitExceeded
 from huey.exceptions import RETRYING_EXCEPTIONS
 from huey.exceptions import ResultTimeout
@@ -712,6 +713,8 @@ class Huey(object):
         for msg in messages:
             try:
                 accum.append(self.deserialize_task(msg))
+            except MessageRejected as exc:
+                logger.warning('Unable to deserialize task: %s', exc.reason)
             except Exception:
                 logger.exception('Unable to deserialize task.')
         return accum

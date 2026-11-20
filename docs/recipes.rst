@@ -347,6 +347,129 @@ consumer. If a message has been tampered with, deserialization will raise a
     ``cryptography``.
 
 
+.. _recipe-signed-rotation:
+
+Rotating Signed-Serializer Keys Without Losing the Backlog
+----------------------------------------------------------
+
+If messages are signed, the signing key will eventually need to change. A
+naive switch makes every message already in the queue unreadable. The
+:py:class:`SignedSerializer` multi-key mode solves this with one **write key**
+and a bounded set of **read keys**.
+
+.. code-block:: python
+
+    from huey import SqliteHuey
+    from huey.serializer import SignedSerializer
+
+    # New messages are signed with 2026-11. Messages signed with 2026-10 are
+    # still accepted until that key is removed from ``keys``.
+    serializer = SignedSerializer(
+        keys={
+            '2026-11': 'new-secret',
+            '2026-10': 'old-secret',
+        },
+        signing_key='2026-11')
+
+    huey = SqliteHuey('my-app', serializer=serializer)
+
+Every new message carries an authenticated envelope with a version, the key
+id, compression flags and an HMAC-SHA256 over all of them plus the payload. The
+reader uses the key id to select a key. Unknown ids, removed keys and tampered
+headers or payloads are rejected **before** any decompression or unpickling.
+
+**Rolling out the new format.** Old messages (written by the original
+``SignedSerializer``) have no key id. They are rejected unless the consumer is
+explicitly configured to accept them:
+
+.. code-block:: python
+
+    # Consumer only, while old messages are still in the queue.
+    serializer = SignedSerializer(
+        keys={'2026-11': 'new-secret', '2026-10': 'old-secret'},
+        signing_key='2026-11',          # keep writing the same format it reads
+        allow_legacy=True,
+        legacy_key_id='2026-10')        # secret that signed the old messages
+
+``allow_legacy`` applies only to messages that do not start with the envelope
+magic. If a message is recognised as the new format and fails authentication,
+the reader raises; it never falls back to the legacy path. Make sure the
+producer is upgraded before removing ``allow_legacy``.
+
+**Executable rotation steps.** The procedure below is exercised end-to-end in
+``huey/tests/test_signing_rotation.py``
+(``TestExecutableRotationSteps``) using an independent old publisher, a new
+consumer, and a rotating publisher against a local SQLite database.
+
+1. **Establish a baseline.** Decide the key ids (use an unambiguous,
+   non-secret label such as a date: ``'2026-10'``) and confirm the backlog
+   drains in normal operation.
+
+2. **Teach every consumer to read the new key before it is used.** Deploy
+   consumers with both keys, still writing the old key:
+
+   .. code-block:: python
+
+       SignedSerializer(
+           keys={'2026-11': 'new-secret', '2026-10': 'old-secret'},
+           signing_key='2026-10')
+
+   While old-format messages are still in the queue, add
+   ``allow_legacy=True, legacy_key_id='2026-10'`` to those consumers.
+
+3. **Switch producers to the new write key.** Publishers use the same two-key
+   configuration with ``signing_key='2026-11'``. Consumers still accept both
+   keys; the backlog signed with ``2026-10`` keeps draining.
+
+4. **Drain the backlog.** Wait until no message signed with the old key
+   remains. With SQLite you can check the queue and schedule sizes:
+
+   .. code-block:: python
+
+       assert huey.pending_count() == 0
+       assert huey.scheduled_count() == 0
+
+   Also allow for in-flight tasks, retries, scheduled tasks and retained
+   results. Result entries are signed with the same contract, so a stale
+   result signed with a retired key will be rejected too.
+
+5. **Retire the old key.** Remove ``2026-10`` from every configuration and set
+   ``allow_legacy=False``. A message signed with a retired key now fails with
+   ``unknown_key_id``. This is the point of no return for messages signed with
+   that key.
+
+6. **Rotate again later.** Add the next key to ``keys`` on consumers first,
+   then move ``signing_key`` on producers, drain, and remove the previous key.
+
+**Rollback boundary.** A consumer can be rolled back to a configuration that
+still lists the old key as long as it was not removed. Because read keys are
+explicit, rolling back to a configuration that only knows the *newer* key will
+reject messages produced under the older key, and rolling back a producer
+without updating consumers will produce messages the consumers reject. Keep
+the previous configuration available until step 4 completes, then discard it.
+
+**Rejected messages are consumed, not retried.** ``Huey.dequeue()`` removes a
+message from the queue before it is deserialized (this is how the storage
+backends work). A message rejected for an unknown key is therefore dropped
+from the queue, and the consumer logs the classification and moves on. If you
+need to preserve rejected messages for later recovery, inspect them with an
+operator that peeks rather than dequeues, or drain the queue into a holding
+area *before* retiring a key. With SQLite you can copy the raw ``task`` /
+``schedule`` / ``kv`` rows aside first.
+
+**Configuration errors are atomic.** Empty keys, empty secrets, duplicate key
+ids after normalization, a ``signing_key`` missing from ``keys``, or mixing
+``secret`` with ``keys`` raise
+:py:class:`~huey.exceptions.ConfigurationError` during construction. No
+attribute is set before validation completes, so an invalid change cannot leave
+a serializer half-configured or accidentally accepting unsigned data.
+
+**Logs.** A rejected message logs only its classification (for example
+``Message rejected: signature_mismatch``). Key ids, key material, the raw
+message and task arguments are never logged.
+
+
+
 .. _recipe-exponential-backoff:
 
 Exponential Backoff Retries

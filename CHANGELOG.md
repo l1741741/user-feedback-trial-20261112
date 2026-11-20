@@ -3,6 +3,15 @@ Changelog
 
 ## Master
 
+* Add explicit multi-key rotation to `SignedSerializer` via `keys` and
+  `signing_key` (`RotatingSignedSerializer`). New messages carry an
+  authenticated envelope with a version, key id and compression flags, signed
+  with HMAC-SHA256; unknown or retired keys are rejected before decompression
+  or unpickling. The single-secret form is unchanged. Old unversioned messages
+  are rejected unless `allow_legacy=True` is passed explicitly, with
+  `legacy_key_id` selecting the key that verifies them. See
+  `docs/recipes.rst` for the rotation procedure.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4
