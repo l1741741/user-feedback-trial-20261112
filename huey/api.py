@@ -37,6 +37,7 @@ from huey.storage import PriorityRedisStorage
 from huey.storage import RedisExpireStorage
 from huey.storage import RedisStorage
 from huey.storage import SqliteStorage
+from huey.storage import validate_result_retention
 from huey.utils import ChordConfig
 from huey.utils import Error
 from huey.utils import SKIPPED
@@ -63,6 +64,14 @@ class Huey(object):
         any ``on_error`` handler. When ``False``, the error is withheld until
         the task's retries are exhausted. Defaults to ``True`` for backwards
         compatibility.
+    :param result_retention: number of seconds a task result is kept after it
+        is written. Results expire on their own and are removed by
+        :py:meth:`purge_expired_results`. ``None`` (the default) disables
+        retention. Zero means results expire as soon as they are written. Only
+        task results expire: revocation markers, locks, rate-limit counters and
+        chord bookkeeping are never touched. Supported by ``MemoryHuey``,
+        ``SqliteHuey`` and ``CySqliteHuey``; other backends raise
+        ``ConfigurationError``.
     :param bool utc: use UTC internally by converting from local time.
     :param bool immediate: useful for debugging; causes tasks to be executed
         synchronously in the application.
@@ -95,7 +104,8 @@ class Huey(object):
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
                  use_zlib=False, immediate_use_memory=True, storage_class=None,
-                 store_intermediate_errors=True, **storage_kwargs):
+                 store_intermediate_errors=True, result_retention=None,
+                 **storage_kwargs):
 
         self.name = name
         self.results = results
@@ -104,12 +114,18 @@ class Huey(object):
         self.utc = utc
         self._immediate = immediate
         self.immediate_use_memory = immediate_use_memory
+        # Validated now, so a typo fails even before the storage is built.
+        self._result_retention = validate_result_retention(result_retention)
         if serializer is None:
             serializer = Serializer(compression, use_zlib=use_zlib)
         self.serializer = serializer
 
-        # Initialize storage.
+        # Initialize storage. The retention setting is only forwarded when
+        # enabled, so backends that do not implement it are unaffected by the
+        # default (disabled) value.
         self.storage_kwargs = storage_kwargs
+        if self._result_retention is not None:
+            self.storage_kwargs['result_retention'] = self._result_retention
         if storage_class is not None:
             self.storage_class = storage_class
         self.storage = self.create_storage()
@@ -141,7 +157,8 @@ class Huey(object):
         return self.get_storage(**self.storage_kwargs)
 
     def get_immediate_storage(self):
-        return MemoryStorage(self.name)
+        return MemoryStorage(self.name,
+                             result_retention=self._result_retention)
 
     def get_storage(self, **kwargs):
         if self.storage_class is None:
@@ -553,7 +570,9 @@ class Huey(object):
     def _check_chord(self, cc, value):
         chord_key = 'chord:%s' % cc.cid
         result_key = 'chord:%s:%s' % (cc.cid, cc.idx)
-        self.put_result(result_key, value)
+        # Chord bookkeeping is control data, not a task result: it must not be
+        # subject to result retention (it is removed when the callback fires).
+        self.put(result_key, value)
 
         if self.storage.incr(chord_key) == cc.size:
             self.storage.delete_counter(chord_key)
@@ -744,6 +763,25 @@ class Huey(object):
 
     def result_count(self):
         return self.storage.result_store_size()
+
+    @property
+    def result_retention(self):
+        """
+        Number of seconds task results are kept, or ``None`` when result
+        retention is disabled.
+        """
+        return getattr(self.storage, 'result_retention', None)
+
+    def purge_expired_results(self, limit=None, now=None):
+        """
+        Delete up to ``limit`` expired task results and return the number
+        removed. Safe to call repeatedly and from several processes; a partial
+        purge resumes where the previous one stopped.
+
+        Only task results are affected, and a result that was rewritten with a
+        newer expiration is never removed by a purge based on an older one.
+        """
+        return self.storage.purge_expired_results(limit=limit, now=now)
 
     def __bool__(self):
         return True

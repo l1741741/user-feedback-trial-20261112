@@ -36,6 +36,7 @@ from huey.api import chord
 from huey.constants import EmptyData
 from huey.exceptions import ConfigurationError
 from huey.storage import FileStorage
+from huey.storage import SqliteStorage
 from huey.tests.base import BaseTestCase
 from huey.tests.base import CI
 from huey.tests.base import slow_test
@@ -59,11 +60,142 @@ requires_redis = unittest.skipIf(REDIS_VERSION == 0, 'requires redis server')
 class StorageTests(object):
     destructive_reads = True
     supports_ttl = True
+    supports_result_retention = False
 
     def setUp(self):
         super(StorageTests, self).setUp()
         self.s = self.huey.storage
         self.s.flush_all()
+
+    def get_retention_huey(self, retention):
+        raise NotImplementedError
+
+    def test_result_retention_default_off(self):
+        self.assertIsNone(self.s.result_retention)
+        self.s.put_data('k1', b'v1', is_result=True)
+        # Without a retention policy, results never expire.
+        self.assertEqual(self.s.purge_expired_results(now=time.time() + 1e9), 0)
+        self.assertEqual(self.s.peek_data('k1'), b'v1')
+
+    def test_result_retention_invalid(self):
+        if not self.supports_result_retention:
+            self.skipTest('retention not supported')
+        for bad in (-1, True, float('inf'), float('nan'), '5', []):
+            self.assertRaises(ConfigurationError, self.get_retention_huey,
+                              bad)
+
+    def test_result_retention_rejected_by_backend(self):
+        if self.supports_result_retention:
+            self.skipTest('retention is supported')
+        self.assertRaises(ConfigurationError, self.get_retention_huey, 10)
+
+    def test_result_retention_expires_result_only(self):
+        if not self.supports_result_retention:
+            self.skipTest('retention not supported')
+        h = self.get_retention_huey(0.1)
+        s = h.storage
+        try:
+            s.put_data('ctl', b'keep')  # Control data, no is_result flag.
+            s.put_data('res', b'value', is_result=True)
+            self.assertEqual(s.peek_data('res'), b'value')
+            time.sleep(0.15)
+
+            # The purge removes the expired result and only the result.
+            self.assertEqual(s.purge_expired_results(), 1)
+
+            # Every read path agrees the result no longer exists.
+            self.assertTrue(s.peek_data('res') is EmptyData)
+            self.assertFalse(s.has_data_for_key('res'))
+            self.assertTrue(s.pop_data('res') is EmptyData)
+            self.assertEqual(s.peek_many(['res', 'ctl']), {'ctl': b'keep'})
+            self.assertEqual(s.result_store_size(), 1)
+            self.assertEqual(s.result_items(), {'ctl': b'keep'})
+
+            # The control value is untouched.
+            self.assertEqual(s.peek_data('ctl'), b'keep')
+        finally:
+            s.close()
+
+    def test_result_retention_invisible_before_purge(self):
+        if not self.supports_result_retention:
+            self.skipTest('retention not supported')
+        h = self.get_retention_huey(0.1)
+        s = h.storage
+        try:
+            s.put_data('res', b'value', is_result=True)
+            time.sleep(0.15)
+            # Expiration is enforced on read even if no purge has run yet.
+            self.assertTrue(s.peek_data('res') is EmptyData)
+            self.assertFalse(s.has_data_for_key('res'))
+            self.assertEqual(s.result_store_size(), 0)
+            self.assertEqual(s.result_items(), {})
+        finally:
+            s.close()
+
+    def test_result_retention_zero(self):
+        if not self.supports_result_retention:
+            self.skipTest('retention not supported')
+        h = self.get_retention_huey(0)
+        s = h.storage
+        try:
+            s.put_data('res', b'value', is_result=True)
+            # A zero retention means the result is expired as soon as written.
+            self.assertTrue(s.peek_data('res') is EmptyData)
+            self.assertEqual(s.result_store_size(), 0)
+        finally:
+            s.close()
+
+    def test_result_retention_rewrite_extends(self):
+        if not self.supports_result_retention:
+            self.skipTest('retention not supported')
+        h = self.get_retention_huey(0.2)
+        s = h.storage
+        try:
+            s.put_data('res', b'v1', is_result=True)
+            time.sleep(0.12)
+            s.put_data('res', b'v2', is_result=True)  # Refresh expiration.
+            time.sleep(0.12)
+            # Expiration started when the value was last written.
+            self.assertEqual(s.peek_data('res'), b'v2')
+            self.assertEqual(s.result_store_size(), 1)
+        finally:
+            s.close()
+
+    def test_result_retention_batched_purge(self):
+        if not self.supports_result_retention:
+            self.skipTest('retention not supported')
+        h = self.get_retention_huey(0)
+        s = h.storage
+        try:
+            for i in range(10):
+                s.put_data('r%d' % i, b'v%d' % i, is_result=True)
+            # Each purge call is bounded and reports how many it removed.
+            self.assertEqual(s.purge_expired_results(limit=4), 4)
+            self.assertEqual(s.purge_expired_results(limit=4), 4)
+            self.assertEqual(s.purge_expired_results(limit=4), 2)
+            self.assertEqual(s.purge_expired_results(limit=4), 0)
+        finally:
+            s.close()
+
+    def test_result_retention_purge_scoped_to_queue(self):
+        if not self.supports_result_retention:
+            self.skipTest('retention not supported')
+        if not isinstance(self.s, SqliteStorage):
+            self.skipTest('requires sqlite-backed queues sharing a database')
+        # Two queues in the same database each purge only their own results.
+        # Use the same storage class so both connections agree on the driver.
+        a = self.get_retention_huey(0)
+        b = type(self.huey)(name='other', filename=a.storage.filename,
+                            timeout=3, result_retention=0)
+        try:
+            a.storage.put_data('mine', b'm', is_result=True)
+            b.storage.put_data('theirs', b't', is_result=True)
+            self.assertEqual(a.storage.purge_expired_results(), 1)
+            self.assertTrue(b.storage.peek_data('theirs') is EmptyData)
+            self.assertEqual(b.storage.result_store_size(), 0)
+        finally:
+            a.storage.close()
+            b.storage.close()
 
     def test_peek_many(self):
         self.s.put_data('k1', b'v1')
@@ -265,8 +397,13 @@ class StorageTests(object):
 
 
 class TestMemoryStorage(StorageTests, BaseTestCase):
+    supports_result_retention = True
+
     def get_huey(self):
         return MemoryHuey(utc=False)
+
+    def get_retention_huey(self, retention):
+        return MemoryHuey(utc=False, result_retention=retention)
 
     def test_put_if_empty_ttl(self):
         self.assertTrue(self.s.put_if_empty(b'k1', b'v1', ttl=1))
@@ -296,6 +433,9 @@ class TestMemoryStorage(StorageTests, BaseTestCase):
 class TestRedisStorage(StorageTests, BaseTestCase):
     def get_huey(self):
         return RedisHuey(utc=False)
+
+    def get_retention_huey(self, retention):
+        return RedisHuey(utc=False, result_retention=retention)
 
     @property
     def supports_ttl(self):
@@ -376,6 +516,11 @@ class TestRedisExpireStorage(StorageTests, BaseTestCase):
 
     def get_huey(self):
         return RedisExpireHuey(expire_time=3600, utc=False, blocking=False)
+
+    def get_retention_huey(self, retention):
+        # Retention is implemented by "expire_time" instead.
+        return RedisExpireHuey(expire_time=3600, utc=False, blocking=False,
+                               result_retention=retention)
 
     def test_expire_results(self):
         self.s.put_data(b'k1', b'v1')
@@ -503,14 +648,25 @@ class TestRedisStorageOffline(BaseTestCase):
 
 class TestSqliteStorage(StorageTests, BaseTestCase):
     supports_ttl = False
+    supports_result_retention = True
 
     def tearDown(self):
         super(TestSqliteStorage, self).tearDown()
-        if os.path.exists('huey_storage.db'):
-            os.unlink('huey_storage.db')
+        self._unlink_db()
+
+    def _unlink_db(self):
+        for suffix in ('', '-wal', '-shm'):
+            if os.path.exists('huey_storage.db' + suffix):
+                os.unlink('huey_storage.db' + suffix)
 
     def get_huey(self):
         return SqliteHuey(filename='huey_storage.db', timeout=3)
+
+    def get_retention_huey(self, retention):
+        # Reuse the setUp database: the base storage holds an open connection.
+        self.s.flush_all()
+        return SqliteHuey(filename='huey_storage.db', timeout=3,
+                          result_retention=retention)
 
     def test_create_tables(self):
         huey = SqliteHuey(filename='huey_ct.db', create_tables=False)
@@ -612,21 +768,78 @@ class TestSqliteStorage(StorageTests, BaseTestCase):
         self.assertEqual([r[0] for r in curs.fetchall()],
                          ['task_queue_priority_id'])
 
+    def test_legacy_database_control_values_not_expired(self):
+        # A database created before retention existed has no "expires" column.
+        # Enabling retention upgrades it in place without assigning an
+        # expiration to the historical control values or results.
+        filename = os.path.join(TEST_TMP_DIR, 'huey-legacy.db')
+        if os.path.exists(filename):
+            os.unlink(filename)
+        conn = sqlite3.connect(filename)
+        conn.execute('create table kv (queue text not null, key text not null, '
+                     'value blob not null, primary key(queue, key))')
+        conn.execute("insert into kv (queue, key, value) values "
+                     "('huey', 'r:legacy', ?), ('huey', 'chord:c:0', ?)",
+                     (b'\x80revoke', b'\x80chord'))
+        conn.commit()
+        conn.close()
+        huey = SqliteHuey(filename=filename, result_retention=0.01)
+        try:
+            self.assertEqual(huey.storage.peek_data('r:legacy'), b'\x80revoke')
+            self.assertEqual(huey.storage.peek_data('chord:c:0'), b'\x80chord')
+            self.assertEqual(huey.purge_expired_results(), 0)
+            self.assertEqual(huey.result_count(), 2)
+        finally:
+            huey.storage.close()
+            for suffix in ('', '-wal', '-shm'):
+                if os.path.exists(filename + suffix):
+                    os.unlink(filename + suffix)
+
+    def test_migrated_database_accepts_new_expiring_results(self):
+        # After the in-place upgrade, newly written results expire normally.
+        filename = os.path.join(TEST_TMP_DIR, 'huey-migrated.db')
+        if os.path.exists(filename):
+            os.unlink(filename)
+        conn = sqlite3.connect(filename)
+        conn.execute('create table kv (queue text not null, key text not null, '
+                     'value blob not null, primary key(queue, key))')
+        conn.commit()
+        conn.close()
+        huey = SqliteHuey(filename=filename, result_retention=0)
+        try:
+            huey.storage.put_data('new', b'v', is_result=True)
+            self.assertTrue(huey.storage.peek_data('new') is EmptyData)
+            self.assertEqual(huey.purge_expired_results(), 1)
+        finally:
+            huey.storage.close()
+            for suffix in ('', '-wal', '-shm'):
+                if os.path.exists(filename + suffix):
+                    os.unlink(filename + suffix)
+
 
 @unittest.skipIf(cysqlite is None, 'requires cysqlite')
 class TestCySqliteStorage(StorageTests, BaseTestCase):
     supports_ttl = False
+    supports_result_retention = True
 
     def tearDown(self):
         super(TestCySqliteStorage, self).tearDown()
-        if os.path.exists('huey_storage.db'):
-            os.unlink('huey_storage.db')
+        for suffix in ('', '-wal', '-shm'):
+            if os.path.exists('huey_storage.db' + suffix):
+                os.unlink('huey_storage.db' + suffix)
 
     def get_huey(self):
         return CySqliteHuey(filename='huey_storage.db', timeout=3, pragmas={
             'mmap_size': 1024 * 1024 * 32,
             'synchronous': 1,
         })
+
+    def get_retention_huey(self, retention):
+        return CySqliteHuey(filename='huey_storage.db', timeout=3,
+                            result_retention=retention, pragmas={
+                                'mmap_size': 1024 * 1024 * 32,
+                                'synchronous': 1,
+                            })
 
     def test_pragmas_preserved(self):
         conn = self.s.conn
@@ -688,6 +901,11 @@ class TestFileStorageMethods(StorageTests, BaseTestCase):
     def get_huey(self):
         return Huey('test-file-storage', storage_class=FileStorage,
                     path=self.path, levels=2, use_thread_lock=True)
+
+    def get_retention_huey(self, retention):
+        return Huey('test-file-storage', storage_class=FileStorage,
+                    path=self.path, levels=2, use_thread_lock=True,
+                    result_retention=retention)
 
     def test_filesystem_result_store(self):
         s = self.huey.storage
@@ -825,3 +1043,6 @@ class TestValkeyGlideStorage(StorageTests, BaseTestCase):
 
     def get_huey(self):
         return ValkeyGlideHuey(utc=False)
+
+    def get_retention_huey(self, retention):
+        return ValkeyGlideHuey(utc=False, result_retention=retention)

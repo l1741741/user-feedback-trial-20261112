@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import heapq
 import itertools
+import math
 import os
 import re
 import shutil
@@ -37,15 +38,100 @@ from huey.exceptions import ConfigurationError
 from huey.utils import FileLock
 
 
+def validate_result_retention(retention):
+    """
+    Validate and normalize the ``result_retention`` setting.
+
+    The value must be ``None`` (retention disabled, the default) or a finite,
+    non-negative number of seconds. Boolean values are rejected explicitly, as
+    ``True`` would otherwise be interpreted as a one-second retention period.
+    """
+    if retention is None:
+        return None
+    if isinstance(retention, bool) or not isinstance(retention, (int, float)):
+        raise ConfigurationError(
+            'result_retention must be a number of seconds or None, got %r'
+            % (retention,))
+    try:
+        value = float(retention)
+    except OverflowError:
+        raise ConfigurationError(
+            'result_retention is too large to represent: %r' % (retention,))
+    if not math.isfinite(value) or value < 0:
+        raise ConfigurationError(
+            'result_retention must be a finite, non-negative number of '
+            'seconds, got %r' % (retention,))
+    return value
+
+
+def validate_purge_limit(limit, default):
+    if limit is None:
+        return default
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+        raise ValueError('limit must be a non-negative integer')
+    return limit
+
+
+def ensure_result_retention_supported(instance, retention):
+    """
+    Validate ``retention`` and raise if the storage backend cannot honor it.
+
+    Checking at initialization means a misconfigured backend fails loudly
+    instead of silently keeping results forever.
+    """
+    value = validate_result_retention(retention)
+    if value is not None and not instance.supports_result_retention:
+        raise ConfigurationError(
+            '%s does not support result_retention. Use MemoryHuey, '
+            'SqliteHuey, CySqliteHuey or the peewee-backed SqlHuey, or '
+            'remove the result_retention setting. RedisExpireHuey offers '
+            'server-side expiry via expire_time.' % type(instance).__name__)
+    return value
+
+
 class BaseStorage(object):
     """
     Base storage-layer interface. Subclasses should implement all methods.
     """
     blocking = False  # Does dequeue() block until ready, or should we poll?
     priority = True
+    # Whether the backend can apply a retention policy to result values. The
+    # default is to reject a non-None retention setting at initialization
+    # rather than silently ignoring it.
+    supports_result_retention = False
+    # Upper bound on the number of rows removed per purge batch.
+    purge_batch_size = 500
 
     def __init__(self, name='huey', **storage_kwargs):
         self.name = name
+        self.result_retention = ensure_result_retention_supported(
+            self, storage_kwargs.get('result_retention'))
+
+    def result_expires_at(self, now=None):
+        """
+        Return the expiration timestamp for a result written right now, or
+        ``None`` when result retention is disabled. A result written with
+        retention N is readable while ``written_at + N > now``; a retention of
+        zero therefore means the result is expired as soon as it is written.
+        """
+        retention = getattr(self, 'result_retention', None)
+        if retention is None:
+            return None
+        if now is None:
+            now = time.time()
+        return now + retention
+
+    def purge_expired_results(self, limit=None, now=None):
+        """
+        Delete at most ``limit`` expired result values and return the number
+        removed. Control values (revocation markers, locks, rate-limit state,
+        chord counters) are never considered. Calling this method repeatedly
+        resumes where the previous call stopped, so a purge may be safely
+        interrupted and restarted.
+
+        Backends without result retention do nothing.
+        """
+        return 0
 
     def close(self):
         """
@@ -158,7 +244,8 @@ class BaseStorage(object):
         :param bytes key: lookup key
         :param bytes value: value
         :param bool is_result: indicate if we are storing a (volatile) task
-            result versus metadata like a task revocation key or lock.
+            result versus metadata like a task revocation key or lock. Only
+            results are subject to the ``result_retention`` policy.
         :return: No return value.
         """
         raise NotImplementedError
@@ -333,11 +420,14 @@ class BlackHoleStorage(BaseStorage):
 
 
 class MemoryStorage(BaseStorage):
+    supports_result_retention = True
+
     def __init__(self, *args, **kwargs):
         super(MemoryStorage, self).__init__(*args, **kwargs)
         self._c = 0  # Counter to ensure FIFO behavior for queue.
         self._queue = []
         self._results = {}
+        self._result_expiry = {}  # key -> wall-clock expiration timestamp.
         self._schedule = []
         self._counters = {}
         self._lock = threading.RLock()
@@ -398,23 +488,74 @@ class MemoryStorage(BaseStorage):
     def flush_schedule(self):
         self._schedule = []
 
-    def put_data(self, key, value, is_result=False):
-        self._results[key] = value
+    def _expire_results(self):
+        # Caller holds the lock. Drop expired results (and only results, never
+        # other key/value data) so that every read path agrees about what
+        # exists.
+        expiry = self._result_expiry
+        if not expiry:
+            return
+        now = time.time()
+        for key in [k for k, ts in expiry.items() if ts <= now]:
+            del expiry[key]
+            self._results.pop(key, None)
 
-    def peek_data(self, key):
+    def _get_data(self, key):
+        # Caller holds the lock.
+        ts = self._result_expiry.get(key)
+        if ts is not None and ts <= time.time():
+            del self._result_expiry[key]
+            self._results.pop(key, None)
+            return EmptyData
         return self._results.get(key, EmptyData)
 
+    def put_data(self, key, value, is_result=False):
+        with self._lock:
+            self._results[key] = value
+            if is_result:
+                expires_at = self.result_expires_at()
+                if expires_at is None:
+                    self._result_expiry.pop(key, None)
+                else:
+                    self._result_expiry[key] = expires_at
+            else:
+                # Control data never expires.
+                self._result_expiry.pop(key, None)
+
+    def peek_data(self, key):
+        with self._lock:
+            return self._get_data(key)
+
+    def peek_many(self, keys):
+        with self._lock:
+            self._expire_results()
+            accum = {}
+            for key in keys:
+                value = self._get_data(key)
+                if value is not EmptyData:
+                    accum[key] = value
+            return accum
+
     def pop_data(self, key):
-        return self._results.pop(key, EmptyData)
+        with self._lock:
+            value = self._get_data(key)
+            self._results.pop(key, None)
+            self._result_expiry.pop(key, None)
+            return value
 
     def has_data_for_key(self, key):
-        return key in self._results
+        with self._lock:
+            if self._get_data(key) is EmptyData:
+                return False
+            return True
 
     def put_if_empty(self, key, value, ttl=None):
         with self._lock:
+            self._expire_results()
             if key in self._results:
                 return False
             self._results[key] = value
+            self._result_expiry.pop(key, None)
             return True
 
     def incr(self, key, amount=1):
@@ -427,13 +568,39 @@ class MemoryStorage(BaseStorage):
             self._counters.pop(key, None)
 
     def result_store_size(self):
-        return len(self._results)
+        with self._lock:
+            self._expire_results()
+            return len(self._results)
 
     def result_items(self):
-        return dict(self._results)
+        with self._lock:
+            self._expire_results()
+            return dict(self._results)
+
+    def purge_expired_results(self, limit=None, now=None):
+        if self.result_retention is None:
+            return 0
+        limit = validate_purge_limit(limit, self.purge_batch_size)
+        if now is None:
+            now = time.time()
+        if not limit:
+            return 0
+        removed = 0
+        with self._lock:
+            expiry = self._result_expiry
+            for key in list(expiry):
+                if removed >= limit:
+                    break
+                if expiry[key] <= now:
+                    del expiry[key]
+                    self._results.pop(key, None)
+                    removed += 1
+        return removed
 
     def flush_results(self):
-        self._results = {}
+        with self._lock:
+            self._results = {}
+            self._result_expiry = {}
 
     def flush_counters(self):
         self._counters = {}
@@ -457,12 +624,15 @@ class RedisStorage(BaseStorage):
     def __init__(self, name='huey', blocking=True, read_timeout=1,
                  connection_pool=None, url=None, client_name=None,
                  notify_result=False, notify_result_ttl=60,
-                 clean_name=True, **connection_params):
+                 clean_name=True, result_retention=None, **connection_params):
 
         if Redis is None:
             raise ConfigurationError('"redis" python module not found, cannot '
                                      'use Redis storage backend. Run "pip '
                                      'install redis" to install.')
+
+        self.result_retention = ensure_result_retention_supported(
+            self, result_retention)
 
         # Drop common empty values from the connection_params.
         for p in ('host', 'port', 'db'):
@@ -852,9 +1022,16 @@ class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
     integrity_error = getattr(sqlite3, 'IntegrityError', None)
     operational_error = getattr(sqlite3, 'OperationalError', None)
+    supports_result_retention = True
     table_kv = ('create table if not exists kv ('
                 'queue text not null, key text not null, value blob not null, '
-                'primary key(queue, key))')
+                'expires real, primary key(queue, key))')
+    # Applied even to pre-existing databases: the "expires" column is added by
+    # initialize_schema() before the index is created. Values written before
+    # retention was enabled (and all control values) have "expires" NULL and
+    # are never purged.
+    index_kv_expires = ('create index if not exists kv_queue_expires '
+                        'on kv (queue, expires)')
     table_sched = ('create table if not exists schedule ('
                    'id integer not null primary key, queue text not null, '
                    'data blob not null, timestamp real not null)')
@@ -871,11 +1048,11 @@ class SqliteStorage(BaseSqlStorage):
                      'value integer not null default 0, '
                      'primary key(queue, key))')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           table_counter, drop_index_task, index_kv_expires]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
-                 create_tables=True, **kwargs):
+                 create_tables=True, result_retention=None, **kwargs):
         self.filename = filename
         self._cache_mb = cache_mb
         self._fsync = fsync
@@ -898,7 +1075,27 @@ class SqliteStorage(BaseSqlStorage):
 
         self.to_blob = memoryview
 
-        super(SqliteStorage, self).__init__(name, create_tables=create_tables)
+        super(SqliteStorage, self).__init__(
+            name,
+            create_tables=create_tables,
+            result_retention=result_retention)
+
+    def initialize_schema(self):
+        with self.db(commit=True, close=True) as curs:
+            for sql in self.ddl:
+                if sql == self.index_kv_expires:
+                    continue  # Created after the column migration.
+                curs.execute(sql)
+
+            # Upgrade databases created before result retention existed. Only
+            # the column is added: existing rows keep a NULL expiration and
+            # are therefore never treated as results to be purged.
+            columns = [row[0] for row in curs.execute(
+                "select name from pragma_table_info('kv')").fetchall()]
+            if 'expires' not in columns:
+                curs.execute('alter table kv add column expires real')
+
+            curs.execute(self.index_kv_expires)
 
     def _create_connection(self):
         conn = sqlite3.connect(self.filename, timeout=self._timeout,
@@ -1003,25 +1200,34 @@ class SqliteStorage(BaseSqlStorage):
         self.sql('delete from schedule where queue = ?', (self.name,), True)
 
     def put_data(self, key, value, is_result=False):
-        self.sql('insert or replace into kv (queue, key, value) '
-                 'values (?, ?, ?)',
-                 (self.name, key, self.to_blob(value)), True)
+        # A result is written with an absolute expiration timestamp computed
+        # from the current time, which replaces any older timestamp for that
+        # key. Control data (is_result=False) is stored with a NULL expiration
+        # so it is never purged, and overwriting a key with control data also
+        # clears any expiration it may have had.
+        expires = self.result_expires_at() if is_result else None
+        self.sql('insert or replace into kv (queue, key, value, expires) '
+                 'values (?, ?, ?, ?)',
+                 (self.name, key, self.to_blob(value), expires), True)
 
     def peek_data(self, key):
-        res = self.sql('select value from kv where queue = ? and key = ?',
-                       (self.name, key), results=True)
+        res = self.sql('select value from kv where queue = ? and key = ? '
+                       'and (expires is null or expires > ?)',
+                       (self.name, key, time.time()), results=True)
         return res[0][0] if res else EmptyData
 
     def peek_many(self, keys):
         return dict(self.sql(
-            'select key, value from kv where queue = ? and key in (%s)' %
-            ','.join('?' * len(keys)), (self.name,) + tuple(keys),
-            results=True))
+            'select key, value from kv where queue = ? and key in (%s) '
+            'and (expires is null or expires > ?)' %
+            ','.join('?' * len(keys)),
+            (self.name,) + tuple(keys) + (time.time(),), results=True))
 
     def pop_data(self, key):
         with self.db(commit=True) as curs:
-            curs.execute('select value from kv where queue = ? and key = ?',
-                         (self.name, key))
+            curs.execute('select value from kv where queue = ? and key = ? '
+                         'and (expires is null or expires > ?)',
+                         (self.name, key, time.time()))
             result = curs.fetchone()
             if result is not None:
                 curs.execute('delete from kv where queue=? and key=?',
@@ -1031,8 +1237,9 @@ class SqliteStorage(BaseSqlStorage):
             return EmptyData
 
     def has_data_for_key(self, key):
-        return bool(self.sql('select 1 from kv where queue=? and key=?',
-                             (self.name, key), results=True))
+        return bool(self.sql('select 1 from kv where queue=? and key=? '
+                             'and (expires is null or expires > ?)',
+                             (self.name, key, time.time()), results=True))
 
     def put_if_empty(self, key, value, ttl=None):
         if ttl is not None:
@@ -1040,7 +1247,8 @@ class SqliteStorage(BaseSqlStorage):
         try:
             with self.db(commit=True) as curs:
                 curs.execute('insert or abort into kv '
-                             '(queue, key, value) values (?, ?, ?)',
+                             '(queue, key, value, expires) '
+                             'values (?, ?, ?, null)',
                              (self.name, key, self.to_blob(value)))
         except self.integrity_error:
             return False
@@ -1062,13 +1270,43 @@ class SqliteStorage(BaseSqlStorage):
                  (self.name, key), commit=True)
 
     def result_store_size(self):
-        return self.sql('select count(*) from kv where queue=?', (self.name,),
-                        results=True)[0][0]
+        return self.sql('select count(*) from kv where queue=? '
+                        'and (expires is null or expires > ?)',
+                        (self.name, time.time()), results=True)[0][0]
 
     def result_items(self):
-        res = self.sql('select key, value from kv where queue=?', (self.name,),
-                       results=True)
+        res = self.sql('select key, value from kv where queue=? '
+                       'and (expires is null or expires > ?)',
+                       (self.name, time.time()), results=True)
         return dict((k, v) for k, v in res)
+
+    def purge_expired_results(self, limit=None, now=None):
+        if self.result_retention is None:
+            return 0
+        limit = validate_purge_limit(limit, self.purge_batch_size)
+        if not limit:
+            return 0
+        if now is None:
+            now = time.time()
+        # Delete by primary key so only this queue's expired *result* rows are
+        # touched: control rows carry a NULL expiration and are never matched.
+        # The expiration is re-checked by the DELETE itself, so a result that
+        # was updated (and given a newer expiration) since the candidate rows
+        # were selected is not removed.
+        with self.db(commit=True) as curs:
+            curs.execute('select key from kv where queue=? and expires is not '
+                         'null and expires <= ? order by expires limit ?',
+                         (self.name, now, limit))
+            keys = [row[0] for row in curs.fetchall()]
+            removed = 0
+            for i in range(0, len(keys), 200):
+                chunk = keys[i:i + 200]
+                curs.execute('delete from kv where queue=? and key in (%s) '
+                             'and expires is not null and expires <= ?' %
+                             ','.join('?' * len(chunk)),
+                             (self.name,) + tuple(chunk) + (now,))
+                removed += curs.rowcount
+            return removed
 
     def flush_results(self):
         self.sql('delete from kv where queue=?', (self.name,), True)
@@ -1079,7 +1317,8 @@ class SqliteStorage(BaseSqlStorage):
 
 class CySqliteStorage(SqliteStorage):
     def __init__(self, name='huey', filename='huey.db', pragmas=None,
-                 timeout=5, strict_fifo=False, create_tables=True, **kwargs):
+                 timeout=5, strict_fifo=False, create_tables=True,
+                 result_retention=None, **kwargs):
         if cysqlite is None:
             raise ConfigurationError('"cysqlite" not found. Run "pip install '
                                      'cysqlite" to install.')
@@ -1099,6 +1338,7 @@ class CySqliteStorage(SqliteStorage):
             timeout=timeout,
             strict_fifo=strict_fifo,
             create_tables=create_tables,
+            result_retention=result_retention,
             pragmas=pragmas,
             **kwargs)
 
@@ -1114,12 +1354,16 @@ class CySqliteStorage(SqliteStorage):
 class PostgresStorage(BaseSqlStorage):
     def __init__(self, name='huey', dsn=None, connection=None, blocking=True,
                  read_timeout=1, table_prefix='huey', create_tables=True,
-                 **connection_params):
+                 result_retention=None, **connection_params):
         if psycopg is None:
             raise ConfigurationError('"psycopg" (version 3.2 or newer) not '
                                      'found, cannot use Postgres storage '
                                      'backend. Run "pip install psycopg" to '
                                      'install.')
+        # Postgres storage does not implement result retention; reject the
+        # setting rather than silently keeping results forever.
+        self.result_retention = ensure_result_retention_supported(
+            self, result_retention)
         self.dsn = dsn
         self.connection = connection  # Zero-arg callable returning conn.
         self.blocking = blocking
@@ -1168,7 +1412,9 @@ class PostgresStorage(BaseSqlStorage):
         # sends Terminate from the process that created the conn.
         self._listen_local = threading.local()
 
-        super(PostgresStorage, self).__init__(name, create_tables=create_tables)
+        super(PostgresStorage, self).__init__(
+            name, create_tables=create_tables,
+            result_retention=self.result_retention)
 
     def _connect(self):
         if self.connection is not None:

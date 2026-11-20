@@ -1,5 +1,6 @@
 from functools import partial
 import operator
+import time
 
 from peewee import *
 from playhouse.db_url import connect as db_url_connect
@@ -8,6 +9,7 @@ from huey.api import Huey
 from huey.constants import EmptyData
 from huey.exceptions import ConfigurationError
 from huey.storage import BaseStorage
+from huey.storage import validate_purge_limit
 
 
 class BytesBlobField(BlobField):
@@ -16,9 +18,11 @@ class BytesBlobField(BlobField):
 
 
 class SqlStorage(BaseStorage):
+    supports_result_retention = True
+
     def __init__(self, name='huey', database=None, create_tables=True,
                  **kwargs):
-        super(SqlStorage, self).__init__(name)
+        super(SqlStorage, self).__init__(name, **kwargs)
 
         if database is None:
             raise ConfigurationError('Use of SqlStorage requires a '
@@ -67,6 +71,9 @@ class SqlStorage(BaseStorage):
             queue = CharField()
             key = CharField()
             value = BytesBlobField()
+            # NULL for control data and for rows written before retention was
+            # enabled; only non-NULL, elapsed timestamps are purged.
+            expires = FloatField(null=True)
             class Meta:
                 primary_key = CompositeKey('queue', 'key')
 
@@ -97,6 +104,23 @@ class SqlStorage(BaseStorage):
         with self.database:
             self.database.create_tables([self.KV, self.Schedule, self.Task,
                                          self.Counter])
+            self._migrate_kv_expires()
+
+    def _migrate_kv_expires(self):
+        # Add the retention column to databases created by older versions.
+        # Existing rows get a NULL expiration and are therefore never purged.
+        columns = set(c.name for c in self.database.get_columns('kv'))
+        if 'expires' not in columns:
+            self.database.execute_sql(
+                'alter table kv add column expires real')
+
+        # An index on (queue, expires), used by the purge query. Use the
+        # portable form rather than "create index if not exists", which is not
+        # understood by every supported database (e.g. MySQL).
+        indexes = set(ix.name for ix in self.database.get_indexes('kv'))
+        if 'kv_queue_expires' not in indexes:
+            self.database.execute_sql(
+                'create index kv_queue_expires on kv (queue, expires)')
 
     def initialize_schema(self):
         # Shared entrypoint for the create_huey_tables management command.
@@ -210,19 +234,36 @@ class SqlStorage(BaseStorage):
 
     def put_data(self, key, value, is_result=False):
         self.check_conn()
+        # Results expire relative to the time they are written; control data
+        # (revocations, locks, rate-limits, chord bookkeeping) is stored with
+        # a NULL expiration and is therefore never purged. Re-writing a key
+        # replaces any previous expiration.
+        expires = self.result_expires_at() if is_result else None
         if isinstance(self.database, PostgresqlDatabase):
+            # On conflict, take the incoming value (as before) and refresh the
+            # expiration to match this write.
             (self.KV
-             .insert(queue=self.name, key=key, value=value)
+             .insert(queue=self.name, key=key, value=value, expires=expires)
              .on_conflict(conflict_target=[self.KV.queue, self.KV.key],
-                          preserve=[self.KV.value])
+                          preserve=[self.KV.value],
+                          update={self.KV.expires: expires})
              .execute())
         else:
-            self.KV.replace(queue=self.name, key=key, value=value).execute()
+            self.KV.replace(queue=self.name, key=key, value=value,
+                            expires=expires).execute()
+
+    def _live(self):
+        # Filter matched to results written under the retention policy that
+        # have not yet expired. Control rows have a NULL expiration.
+        return ((self.KV.expires.is_null()) |
+                (self.KV.expires > time.time()))
 
     def peek_data(self, key):
         self.check_conn()
         try:
-            kv = self.kv(self.KV.value).where(self.KV.key == key).get()
+            kv = (self.kv(self.KV.value)
+                  .where((self.KV.key == key) & self._live())
+                  .get())
         except self.KV.DoesNotExist:
             return EmptyData
         else:
@@ -231,11 +272,12 @@ class SqlStorage(BaseStorage):
     def peek_many(self, keys):
         self.check_conn()
         return dict(self.kv(self.KV.key, self.KV.value)
-                    .where(self.KV.key.in_(keys)).tuples())
+                    .where((self.KV.key.in_(keys)) & self._live())
+                    .tuples())
 
     def pop_data(self, key):
         self.check_conn()
-        query = self.kv().where(self.KV.key == key)
+        query = self.kv().where((self.KV.key == key) & self._live())
         if self.for_update:
             query = query.for_update(self.for_update)
 
@@ -252,7 +294,9 @@ class SqlStorage(BaseStorage):
 
     def has_data_for_key(self, key):
         self.check_conn()
-        return self.kv().where(self.KV.key == key).exists()
+        return (self.kv()
+                .where((self.KV.key == key) & self._live())
+                .exists())
 
     def put_if_empty(self, key, value, ttl=None):
         if ttl is not None:
@@ -300,11 +344,43 @@ class SqlStorage(BaseStorage):
                 (self.Counter.key == key)).execute()
 
     def result_store_size(self):
-        return self.kv().count()
+        return self.kv().where(self._live()).count()
 
     def result_items(self):
-        query = self.kv(self.KV.key, self.KV.value).tuples()
+        query = (self.kv(self.KV.key, self.KV.value)
+                 .where(self._live())
+                 .tuples())
         return dict((k, v) for k, v in query.iterator())
+
+    def purge_expired_results(self, limit=None, now=None):
+        if self.result_retention is None:
+            return 0
+        limit = validate_purge_limit(limit, self.purge_batch_size)
+        if not limit:
+            return 0
+        if now is None:
+            now = time.time()
+        self.check_conn()
+        # Select candidates first, then delete by primary key, re-checking the
+        # expiration. A concurrent update that pushes the expiration into the
+        # future therefore wins, and other queues/control data are untouched.
+        keys = list(self.kv(self.KV.key)
+                    .where((self.KV.expires.is_null(False)) &
+                           (self.KV.expires <= now))
+                    .order_by(self.KV.expires)
+                    .limit(limit)
+                    .tuples())
+        removed = 0
+        with self.atomic():
+            for chunk in chunked([k for k, in keys], 200):
+                removed += (self.KV
+                            .delete()
+                            .where((self.KV.queue == self.name) &
+                                   (self.KV.key.in_(chunk)) &
+                                   (self.KV.expires.is_null(False)) &
+                                   (self.KV.expires <= now))
+                            .execute())
+        return removed
 
     def flush_results(self):
         self.KV.delete().where(self.KV.queue == self.name).execute()

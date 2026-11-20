@@ -3,6 +3,20 @@ Changelog
 
 ## Master
 
+* Add opt-in ``result_retention`` to expire task results a configurable number
+  of seconds after they are written. Implemented by ``MemoryHuey``,
+  ``SqliteHuey``, ``CySqliteHuey`` and the peewee-backed ``SqlHuey``. Other
+  backends raise ``ConfigurationError`` when it is set. Only task results
+  expire; revocation markers, locks, rate-limit state and chord bookkeeping are
+  never purged, and results belonging to another queue are untouched. A result
+  is expired relative to its most recent write, and expiration is enforced
+  consistently across ``Result``, ``result_count`` and ``all_results``.
+* Add ``Huey.purge_expired_results(limit=None)`` and a per-loop bounded purge in
+  the consumer scheduler. Purging is resumable, and a delete re-checks the
+  expiration, so a result rewritten with a newer expiration is not removed by a
+  stale purge. Existing databases are upgraded in place, leaving historical
+  values without an expiration.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4

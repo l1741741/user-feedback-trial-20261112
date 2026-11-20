@@ -156,6 +156,9 @@ class Scheduler(BaseProcess):
 
     If periodic tasks are enabled, the scheduler will wake up every 60 seconds
     to enqueue any periodic tasks that should be run.
+
+    If result retention is enabled on the huey instance, the scheduler also
+    purges a bounded batch of expired results on each loop.
     """
     periodic_task_seconds = 60
     process_name = 'Scheduler'
@@ -194,7 +197,18 @@ class Scheduler(BaseProcess):
                 self._next_periodic += self.periodic_task_seconds
             self.enqueue_periodic_tasks(now)
 
+        self.purge_expired_results()
         self.sleep_for_interval(current, self.interval)
+
+    def purge_expired_results(self):
+        # A bounded batch per loop keeps the scheduler responsive; any
+        # remainder is picked up by the next loop or by another consumer.
+        if getattr(self.huey.storage, 'result_retention', None) is None:
+            return
+        try:
+            self.huey.purge_expired_results()
+        except Exception:
+            self._logger.exception('Error purging expired results.')
 
     def enqueue_periodic_tasks(self, now):
         self._logger.debug('Checking periodic tasks')

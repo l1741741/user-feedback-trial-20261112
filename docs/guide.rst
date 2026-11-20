@@ -353,7 +353,66 @@ For more information, see:
 * :py:class:`Result`
 * :py:class:`TaskException`
 
-.. _immediate:
+.. _result-retention:
+
+Expiring old results
+^^^^^^^^^^^^^^^^^^^^
+
+Task results accumulate in the result store. The
+:py:class:`~huey.storage.SqliteStorage` (and the older
+:py:class:`~huey.contrib.sql_huey.SqlStorage`) keep results in a key/value
+table, and :py:class:`MemoryHuey` keeps them in a dictionary, so a long-running
+worker that never has its results read will grow without bound.
+
+Set ``result_retention`` to the number of seconds a result should be kept after
+it is written. Retention is **disabled by default** (``None``), preserving the
+existing behavior:
+
+.. code-block:: python
+
+    # Keep each task result for one hour after it is written.
+    huey = SqliteHuey(filename='/var/lib/myapp/huey.db', result_retention=3600)
+
+A result is readable while ``written_at + result_retention > now``. A value of
+``0`` means the result expires as soon as it is written -- useful when results
+should never be visible to a separate process. Every read path agrees about
+expiration: :py:meth:`Result.get`, :py:meth:`Result.is_ready`,
+:py:meth:`Huey.result_count` and :py:meth:`Huey.all_results` all treat an
+expired result as absent, so a result never becomes visible and then
+disappears.
+
+Expiration is recomputed from the time of the latest write. An intermediate
+error result written on a retrying attempt expires on its own retention
+schedule and is overwritten by the success value when the retry finishes.
+Only task results expire. Revocation markers, task locks, rate-limit counters
+and chord bookkeeping are stored as control data with no expiration and are
+never purged, even though they share the same table. Results belonging to
+another queue in the same database are unaffected.
+
+Expired results are deleted in bounded batches by
+:py:meth:`Huey.purge_expired_results`, which the consumer's scheduler calls on
+each loop. The batch size is capped by the storage's ``purge_batch_size`` (500
+by default), so a purge does not hold the write lock for long; a call that hits
+the limit reports the number removed and the next call resumes where it
+stopped. Because the delete re-checks the expiration, a result that is rewritten
+with a newer expiration while a purge is in flight is never removed based on its
+older expiration.
+
+.. note::
+    Enabling retention on an existing database adds an ``expires`` column to
+    the ``kv`` table. Existing rows are left with a NULL expiration, so
+    historical results and control values are not assigned an expiration after
+    the fact.
+
+Other backends reject a non-``None`` ``result_retention`` with a
+:py:class:`ConfigurationError`, rather than silently ignoring it. For
+Redis-backed queues, use :py:class:`RedisExpireHuey` (``expire_time``) for
+server-side result expiry.
+
+For more information, see:
+
+* :py:meth:`Huey.purge_expired_results`
+
 
 Immediate mode
 --------------

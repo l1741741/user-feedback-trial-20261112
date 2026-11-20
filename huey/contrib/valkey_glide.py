@@ -12,15 +12,22 @@ from huey.constants import EmptyData
 from huey.exceptions import ConfigurationError
 from huey.storage import RedisStorage
 from huey.storage import SCHEDULE_POP_LUA
+from huey.storage import ensure_result_retention_supported
 
 
 class ValkeyGlideStorage(RedisStorage):
     def __init__(self, name='huey', blocking=False, read_timeout=1,
                  client=None, client_config=None, host=None, port=None,
-                 client_name=None, **client_config_params):
+                 client_name=None, result_retention=None,
+                 **client_config_params):
         if sum(1 for p in (client, client_config, host) if p) > 1:
             raise ConfigurationError('Specify only one of the following: '
                                      '"client", "client_config" or "host"')
+
+        # This storage does not implement result retention; reject the
+        # setting rather than silently ignoring it.
+        self.result_retention = ensure_result_retention_supported(
+            self, result_retention)
 
         if client is not None:
             self.conn = client

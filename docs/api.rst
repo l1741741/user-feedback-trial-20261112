@@ -231,7 +231,7 @@ Huey types
 Huey object
 -----------
 
-.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, storage_class=None, store_intermediate_errors=True, **storage_kwargs)
+.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, storage_class=None, store_intermediate_errors=True, result_retention=None, **storage_kwargs)
 
     :param str name: the name of the task queue, e.g. your application's name.
     :param bool results: whether to store task results.
@@ -243,6 +243,17 @@ Huey object
         lock rejection with a retry pending is not a failure and is never
         stored. Defaults to ``True`` for backwards
         compatibility. See :ref:`store-intermediate-errors`.
+    :param result_retention: number of seconds a task result is kept after it is
+        written. ``None`` (the default) disables retention. A result is readable
+        while ``written_at + retention > now``; a retention of ``0`` means the
+        result expires as soon as it is written. Expiration applies to individual
+        task results only -- revocation markers, locks, rate-limit counters and
+        chord bookkeeping are never purged -- and is enforced consistently by
+        :py:meth:`Huey.result`, :py:meth:`Huey.result_count` and
+        :py:meth:`Huey.all_results`. Supported by :py:class:`MemoryHuey`,
+        :py:class:`SqliteHuey` and :py:class:`CySqliteHuey`; other backends
+        raise :py:class:`ConfigurationError` if it is set. See
+        :py:meth:`Huey.purge_expired_results`.
     :param bool utc: use UTC internally, convert naive datetimes from local
         time to UTC (if local time is other than UTC).
     :param bool immediate: useful for debugging, causes tasks to be executed
@@ -1150,6 +1161,26 @@ Huey object
     .. py:method:: result_count()
 
         :returns: the number of key/value pairs in the result store.
+
+    .. py:method:: purge_expired_results(limit=None, now=None)
+
+        Delete up to ``limit`` expired task results and return the number
+        removed. Only results written under a
+        :py:attr:`result_retention` policy are candidates; revocation markers,
+        locks, rate-limit state and chord bookkeeping are never touched, and
+        results belonging to other queues are unaffected.
+
+        The limit defaults to the storage's ``purge_batch_size`` (500), so a
+        purge never holds the database lock for long. Calling the method again
+        resumes where the previous call stopped. If a result is rewritten with
+        a newer expiration between candidate selection and deletion, the delete
+        is skipped -- a purge never removes a newer result based on an older
+        expiration. The consumer's scheduler calls this automatically on each
+        loop when retention is enabled.
+
+    .. py:method:: result_retention
+
+        The configured result retention in seconds, or ``None`` when disabled.
 
     .. py:method:: flush()
 
@@ -2429,7 +2460,7 @@ Huey comes with several built-in storage implementations:
     automatically cleaned-up.
 
 
-.. py:class:: SqliteStorage(name='huey', filename='huey.db', cache_mb=8, fsync=None, journal_mode='wal', timeout=5, strict_fifo=False, create_tables=True, **kwargs)
+.. py:class:: SqliteStorage(name='huey', filename='huey.db', cache_mb=8, fsync=None, journal_mode='wal', timeout=5, strict_fifo=False, create_tables=True, result_retention=None, **kwargs)
 
     :param str name: namespace for storage.
     :param str filename: sqlite database filename.
@@ -2448,11 +2479,18 @@ Huey comes with several built-in storage implementations:
         cause tasks to be run in a different order than the order in which they
         were enqueued.
     :param bool create_tables: create tables if they do not exist.
+    :param result_retention: number of seconds to keep task results, or
+        ``None`` to disable. Results are stored with an absolute expiration in
+        the ``kv`` table's ``expires`` column; control data (revocations,
+        locks, rate-limit state, chord bookkeeping) has a NULL expiration and
+        is never purged. Databases created by older versions are upgraded in
+        place: the column is added and existing rows keep a NULL expiration, so
+        they do not suddenly expire.
     :param kwargs: Additional keyword arguments passed to the ``sqlite3``
         connection constructor.
 
 
-.. py:class:: CySqliteStorage(name='huey', filename='huey.db', pragmas=None, timeout=5, strict_fifo=False, create_tables=True, **kwargs)
+.. py:class:: CySqliteStorage(name='huey', filename='huey.db', pragmas=None, timeout=5, strict_fifo=False, create_tables=True, result_retention=None, **kwargs)
 
     Extends :py:class:`SqliteStorage`, using `cysqlite <https://cysqlite.readthedocs.io/>`_
     as the driver instead of the standard library ``sqlite3`` module.
@@ -2469,6 +2507,8 @@ Huey comes with several built-in storage implementations:
         cause tasks to be run in a different order than the order in which they
         were enqueued.
     :param bool create_tables: create tables if they do not exist.
+    :param result_retention: number of seconds to keep task results, as with
+        :py:class:`SqliteStorage`.
     :param kwargs: Additional keyword arguments passed to
         ``cysqlite.connect()``.
 
@@ -2532,7 +2572,8 @@ Huey comes with several built-in storage implementations:
 .. py:class:: MemoryStorage()
 
     In-memory storage engine for use when testing or developing. Designed for
-    use with :ref:`immediate mode <immediate>`.
+    use with :ref:`immediate mode <immediate>`. Supports the same
+    ``result_retention`` semantics as :py:class:`SqliteStorage`.
 
 
 .. py:class:: BlackHoleStorage()

@@ -40,6 +40,10 @@ class TestPostgresStorage(StorageTests, BaseTestCase):
         kwargs.setdefault('read_timeout', 0.1)
         return PostgresHuey('test-pg', dsn=PG_DSN, utc=False, **kwargs)
 
+    def get_retention_huey(self, retention):
+        return PostgresHuey('test-pg', dsn=PG_DSN, utc=False,
+                            result_retention=retention)
+
     def tearDown(self):
         super(TestPostgresStorage, self).tearDown()
         self.huey.storage.close()
