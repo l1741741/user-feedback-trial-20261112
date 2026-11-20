@@ -124,6 +124,7 @@ Table of contents
    consumer
    deployment
    monitoring
+   diagnostics
    imports
    shared_resources
    signals

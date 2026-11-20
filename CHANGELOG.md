@@ -3,6 +3,17 @@ Changelog
 
 ## Master
 
+* Add read-only diagnostics for `SqliteHuey` databases: the new
+  `huey.diagnostics` module and `huey_diag` command produce a
+  consistent-snapshot report (single read transaction) of the backlog,
+  schedule, results and control state (revocations, locks, counters). The
+  database is opened read-only and is never created or modified; task
+  messages are scanned without unpickling; task arguments and result
+  values are never displayed. Missing databases, missing/legacy schemas,
+  locked databases and mid-inspection replacement are reported as
+  understandable statuses, and `--json` provides stable machine-readable
+  fields.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4
