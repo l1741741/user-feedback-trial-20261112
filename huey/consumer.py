@@ -17,6 +17,7 @@ try:
 except ImportError:
     Greenlet = GreenEvent = None
 
+from huey.capabilities import normalize_capabilities
 from huey.constants import WORKER_GREENLET
 from huey.constants import WORKER_PROCESS
 from huey.constants import WORKER_THREAD
@@ -93,12 +94,18 @@ class Worker(BaseProcess):
     process_name = 'Worker'
 
     def __init__(self, huey, stop_flag, default_delay, max_delay, backoff,
-                 max_tasks=None):
+                 max_tasks=None, capabilities=None):
         self.delay = self.default_delay = default_delay
         self.max_delay = max_delay
         self.backoff = backoff
         self.max_tasks = max_tasks
         self.task_count = 0
+        # Capabilities advertised by this consumer. Only tasks whose
+        # requirements are satisfied by this set (plus unlabeled tasks) are
+        # dequeued. Defaults to the capabilities configured on the Huey
+        # instance.
+        self.capabilities = (huey.capabilities if capabilities is None
+                             else capabilities)
         super(Worker, self).__init__(huey, stop_flag)
 
     def initialize(self):
@@ -120,7 +127,7 @@ class Worker(BaseProcess):
     def loop(self, now=None):
         task = None
         try:
-            task = self.huey.dequeue()
+            task = self.huey.dequeue(self.capabilities)
         except Exception:
             self._logger.exception('Error reading from queue')
             self.sleep()
@@ -394,7 +401,7 @@ class Consumer(object):
                  worker_type=WORKER_THREAD, check_worker_health=True,
                  health_check_interval=10, flush_locks=False,
                  extra_locks=None, max_tasks=None, shutdown_timeout=None,
-                 graceful_signal='INT'):
+                 graceful_signal='INT', capabilities=None):
 
         self._logger = logging.getLogger('huey.consumer')
         if huey.immediate:
@@ -423,6 +430,13 @@ class Consumer(object):
                                      'of 60, e.g. 1, 2, 3, 4, 5, 6, 10, 12...')
 
         self.worker_type = worker_type  # What process model are we using?
+
+        # Capability set advertised to workers. Normalize via the Huey
+        # instance so strings, tuples and None all map to a frozenset.
+        if capabilities is None:
+            self.capabilities = huey.capabilities
+        else:
+            self.capabilities = normalize_capabilities(capabilities)
 
         # Configure health-check and consumer main-loop attributes.
         self._stop_flag_timeout = 0.1
@@ -490,7 +504,8 @@ class Consumer(object):
             default_delay=self.default_delay,
             max_delay=self.max_delay,
             backoff=self.backoff,
-            max_tasks=self.max_tasks)
+            max_tasks=self.max_tasks,
+            capabilities=self.capabilities)
 
     def _create_scheduler(self):
         return self.scheduler_class(

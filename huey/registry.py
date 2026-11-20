@@ -1,13 +1,21 @@
 from collections import namedtuple
 
+from huey.capabilities import UNSPECIFIED
 from huey.exceptions import HueyException
 from huey.utils import ChordConfig
+
+
+# Serializable stand-in for the UNSPECIFIED sentinel. Namespaced so it can
+# never collide with a real capability name (which would be a plain string
+# inside a tuple, never the bare marker).
+_UNSPECIFIED_MARKER = '__huey_unspecified_requirements__'
 
 
 Message = namedtuple('Message', ('id', 'name', 'eta', 'retries', 'retry_delay',
                                  'priority', 'args', 'kwargs', 'on_complete',
                                  'on_error', 'expires', 'expires_resolved',
-                                 'timeout', 'chord_config', 'retry_backoff'))
+                                 'timeout', 'chord_config', 'retry_backoff',
+                                 'requirements'))
 
 # Automatically set missing parameters to None. This is kind-of a hack, but it
 # allows us to add new parameters while continuing to be able to handle
@@ -76,6 +84,14 @@ class Registry(object):
                 task.chord_config.idx,
                 self.create_message(task.chord_config.callback))
 
+        requirements = task.requirements
+        if requirements is UNSPECIFIED:
+            # Preserve the "no explicit value" state across serialization so
+            # chain resolution on the consumer side can still apply the class
+            # default or predecessor inheritance. A private marker is used
+            # rather than None, which means "explicitly unlabeled".
+            requirements = _UNSPECIFIED_MARKER
+
         return Message(
             task.id,
             task_str,
@@ -91,7 +107,8 @@ class Registry(object):
             task.expires_resolved,
             task.timeout,
             chord_config,
-            task.retry_backoff)
+            task.retry_backoff,
+            requirements)
 
     def create_task(self, message):
         TaskClass = self.string_to_task(message.name)
@@ -110,6 +127,13 @@ class Registry(object):
             callback = self.create_task(cb_ser)
             chord_config = ChordConfig(cid, size, idx, callback)
 
+        if message.requirements == _UNSPECIFIED_MARKER:
+            requirements = UNSPECIFIED
+        else:
+            # None covers both an explicitly unlabeled new task and an old
+            # release's message, whose namedtuple simply lacks the field.
+            requirements = message.requirements
+
         return TaskClass(
             message.args,
             message.kwargs,
@@ -124,7 +148,8 @@ class Registry(object):
             message.expires_resolved,
             message.timeout,
             chord_config,
-            message.retry_backoff)
+            message.retry_backoff,
+            requirements=requirements)
 
     @property
     def periodic_tasks(self):

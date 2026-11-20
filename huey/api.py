@@ -14,6 +14,10 @@ from functools import partial
 from functools import wraps
 
 from huey import signals as S
+from huey.capabilities import UNSPECIFIED
+from huey.capabilities import normalize_capabilities
+from huey.capabilities import normalize_requirements
+from huey.capabilities import resolve_chain_requirements
 from huey.constants import EmptyData
 from huey.consumer import Consumer
 from huey.exceptions import CancelExecution
@@ -95,7 +99,8 @@ class Huey(object):
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
                  use_zlib=False, immediate_use_memory=True, storage_class=None,
-                 store_intermediate_errors=True, **storage_kwargs):
+                 store_intermediate_errors=True, capabilities=None,
+                 **storage_kwargs):
 
         self.name = name
         self.results = results
@@ -104,6 +109,11 @@ class Huey(object):
         self.utc = utc
         self._immediate = immediate
         self.immediate_use_memory = immediate_use_memory
+        # Capabilities this deployment's consumers provide. Consumers created
+        # via Huey.create_consumer() inherit this set; an explicit value passed
+        # to create_consumer() overrides it. None/empty means only unlabeled
+        # tasks are eligible.
+        self.capabilities = normalize_capabilities(capabilities)
         if serializer is None:
             serializer = Serializer(compression, use_zlib=use_zlib)
         self.serializer = serializer
@@ -165,11 +175,18 @@ class Huey(object):
             if self.immediate_use_memory:
                 self.storage = self.create_storage()
 
-    def create_consumer(self, **options):
-        return Consumer(self, **options)
+    def create_consumer(self, capabilities=UNSPECIFIED, **options):
+        # Consumers default to the capabilities configured on the Huey
+        # instance; an explicit capabilities= argument overrides them.
+        if capabilities is UNSPECIFIED:
+            capabilities = self.capabilities
+        else:
+            capabilities = normalize_capabilities(capabilities)
+        return Consumer(self, capabilities=capabilities, **options)
 
     def task(self, retries=0, retry_delay=0, retry_backoff=0, priority=None,
-             context=False, name=None, expires=None, timeout=None, **kwargs):
+             context=False, name=None, expires=None, timeout=None,
+             requirements=None, **kwargs):
         TaskWrapper = self.task_wrapper_class
         def decorator(func):
             return TaskWrapper(
@@ -183,12 +200,13 @@ class Huey(object):
                 default_priority=priority,
                 default_expires=expires,
                 default_timeout=timeout,
+                default_requirements=normalize_requirements(requirements),
                 **kwargs)
         return decorator
 
     def periodic_task(self, validate_datetime, retries=0, retry_delay=0,
                       retry_backoff=0, priority=None, context=False, name=None,
-                      expires=None, timeout=None, **kwargs):
+                      expires=None, timeout=None, requirements=None, **kwargs):
         TaskWrapper = self.task_wrapper_class
         def decorator(func):
             def method_validate(self, timestamp):
@@ -205,6 +223,7 @@ class Huey(object):
                 default_priority=priority,
                 default_expires=expires,
                 default_timeout=timeout,
+                default_requirements=normalize_requirements(requirements),
                 validate_datetime=method_validate,
                 task_base=PeriodicTask,
                 **kwargs)
@@ -294,6 +313,10 @@ class Huey(object):
         self._signal.send(signal, task, *args, **kwargs)
 
     def serialize_task(self, task):
+        # Every enqueue path (plain calls, chords, error handlers, scheduler
+        # re-enqueue) funnels through here, so resolving at this point
+        # guarantees no message is serialized with unresolved requirements.
+        resolve_chain_requirements(task)
         message = self._registry.create_message(task)
         return self.serializer.serialize(message)
 
@@ -307,6 +330,11 @@ class Huey(object):
         elif isinstance(task, chord):
             return self._enqueue_chord(task)
 
+        # Resolve the effective requirements of the whole on_complete chain
+        # before serializing, so the resolved values travel with each message
+        # (including through the schedule table and retry re-enqueue).
+        resolve_chain_requirements(task)
+
         # Resolve the expiration time when the task is enqueued.
         if task.expires:
             task.resolve_expires(self.utc)
@@ -316,7 +344,12 @@ class Huey(object):
         if self._immediate:
             self.execute(task)
         else:
-            self.storage.enqueue(self.serialize_task(task), task.priority)
+            requirements = task.requirements
+            if requirements is UNSPECIFIED:
+                # Defensive: serialize_task() normally resolves this already.
+                requirements = None
+            self.storage.enqueue(self.serialize_task(task), task.priority,
+                                 requirements)
 
         if not self.results:
             return
@@ -370,8 +403,12 @@ class Huey(object):
             task = task.on_complete
         return results
 
-    def dequeue(self):
-        data = self.storage.dequeue()
+    def dequeue(self, capabilities=UNSPECIFIED):
+        if capabilities is UNSPECIFIED:
+            capabilities = self.capabilities
+        else:
+            capabilities = normalize_capabilities(capabilities)
+        data = self.storage.dequeue(capabilities)
         if data is not None:
             return self.deserialize_task(data)
 
@@ -799,11 +836,13 @@ class Task(object):
     default_retry_delay = 0
     default_retry_backoff = 0
     default_timeout = None
+    default_requirements = None
 
     def __init__(self, args=None, kwargs=None, id=None, eta=None, retries=None,
                  retry_delay=None, priority=None, expires=None,
                  on_complete=None, on_error=None, expires_resolved=None,
-                 timeout=None, chord_config=None, retry_backoff=None):
+                 timeout=None, chord_config=None, retry_backoff=None,
+                 requirements=UNSPECIFIED):
         self.name = type(self).__name__
         self.args = () if args is None else args
         self.kwargs = {} if kwargs is None else kwargs
@@ -822,6 +861,15 @@ class Task(object):
         self.timeout = timeout if timeout is not None else self.default_timeout
         self.chord_config = chord_config
         self._deadline = None
+
+        # Per-instance requirements. The UNSPECIFIED sentinel means "no
+        # explicit value at enqueue time"; Huey.enqueue() then resolves the
+        # effective value from the class default or chain inheritance and
+        # writes the resolved tuple (or None) back onto the instance.
+        if requirements is UNSPECIFIED:
+            self.requirements = UNSPECIFIED
+        else:
+            self.requirements = normalize_requirements(requirements)
 
         self.on_complete = on_complete
         self.on_error = on_error
@@ -851,6 +899,8 @@ class Task(object):
             rep += ', on error %s' % self.on_error
         if self.chord_config:
             rep += ', chord %s' % self.chord_config.cid
+        if self.requirements is not None and self.requirements is not UNSPECIFIED:
+            rep += ' req=%s' % (self.requirements,)
         return rep
 
     def __hash__(self):
@@ -998,7 +1048,8 @@ class TaskWrapper(object):
 
     def schedule(self, args=None, kwargs=None, eta=None, delay=None,
                  priority=None, retries=None, retry_delay=None,
-                 retry_backoff=None, expires=None, timeout=None, id=None):
+                 retry_backoff=None, expires=None, timeout=None, id=None,
+                 requirements=UNSPECIFIED):
         if eta is None and delay is None:
             if isinstance(args, (int, float)):
                 delay = args
@@ -1024,7 +1075,8 @@ class TaskWrapper(object):
             retry_backoff=retry_backoff,
             priority=priority,
             expires=expires,
-            timeout=timeout)
+            timeout=timeout,
+            requirements=requirements)
         return self.huey.enqueue(task)
 
     def _apply(self, it):
@@ -1049,6 +1101,7 @@ class TaskWrapper(object):
         if eta is not None or delay is not None:
             eta = normalize_time(eta, delay, self.huey.utc)
 
+        requirements = kwargs.pop('requirements', UNSPECIFIED)
         return self.task_class(args, kwargs,
                                id=kwargs.pop('id', None),
                                eta=eta,
@@ -1057,7 +1110,8 @@ class TaskWrapper(object):
                                retry_backoff=kwargs.pop('retry_backoff', None),
                                priority=kwargs.pop('priority', None),
                                expires=kwargs.pop('expires', None),
-                               timeout=kwargs.pop('timeout', None))
+                               timeout=kwargs.pop('timeout', None),
+                               requirements=requirements)
 
 
 class TaskLock(object):
@@ -1298,7 +1352,8 @@ class Result(object):
             timeout=self.task.timeout,
             chord_config=self.task.chord_config,
             on_complete=on_complete,
-            on_error=on_error)
+            on_error=on_error,
+            requirements=self.task.requirements)
         return self.huey.enqueue(task)
 
     def reset(self):

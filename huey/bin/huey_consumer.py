@@ -38,6 +38,10 @@ def consumer_main():
 
     options = {k: v for k, v in options.__dict__.items()
                if v is not None}
+    if options.get('capabilities'):
+        options['capabilities'] = tuple(
+            item.strip() for item in options['capabilities'].split(',')
+            if item.strip())
     config = ConsumerConfig(**options)
     config.validate()
 

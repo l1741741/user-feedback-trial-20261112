@@ -33,6 +33,10 @@ except ImportError:
     psycopg = None
 
 from huey.constants import EmptyData
+from huey.capabilities import can_handle
+from huey.capabilities import decode_requirements
+from huey.capabilities import encode_requirements
+from huey.capabilities import normalize_capabilities
 from huey.exceptions import ConfigurationError
 from huey.utils import FileLock
 
@@ -55,13 +59,17 @@ class BaseStorage(object):
         """
         pass
 
-    def enqueue(self, data, priority=None):
+    def enqueue(self, data, priority=None, requirements=None):
         """
         Given an opaque chunk of data, add it to the queue.
 
         :param bytes data: Task data.
         :param float priority: Priority, higher priorities processed first.
                                Defaults to 0.
+        :param tuple requirements: Optional normalized tuple of capability
+                               requirements that a consumer must provide to
+                               take this task. ``None`` means unlabeled, in
+                               which case any consumer may take the task.
         :return: No return value.
 
         Some storage may not implement support for priority. In that case, the
@@ -69,12 +77,17 @@ class BaseStorage(object):
         """
         raise NotImplementedError
 
-    def dequeue(self):
+    def dequeue(self, capabilities=None):
         """
         Atomically remove data from the queue. If no data is available, no data
         is returned.
 
-        :return: Opaque binary task data or None if queue is empty.
+        :param iterable capabilities: Optional set of capabilities the consumer
+                               provides. Only tasks whose requirements are a
+                               subset of these capabilities (and unlabeled
+                               tasks) are eligible. Tasks requiring other
+                               capabilities remain in the queue.
+        :return: Opaque binary task data or None if no eligible task exists.
         """
         raise NotImplementedError
 
@@ -309,8 +322,8 @@ class BaseStorage(object):
 
 
 class BlackHoleStorage(BaseStorage):
-    def enqueue(self, data, priority=None): pass
-    def dequeue(self): pass
+    def enqueue(self, data, priority=None, requirements=None): pass
+    def dequeue(self, capabilities=None): pass
     def queue_size(self): return 0
     def enqueued_items(self, limit=None): return []
     def flush_queue(self): pass
@@ -342,26 +355,32 @@ class MemoryStorage(BaseStorage):
         self._counters = {}
         self._lock = threading.RLock()
 
-    def enqueue(self, data, priority=None):
+    def enqueue(self, data, priority=None, requirements=None):
         with self._lock:
             self._c += 1
             priority = 0 if priority is None else -priority
-            heapq.heappush(self._queue, (priority, self._c, data))
+            heapq.heappush(self._queue,
+                           (priority, self._c, requirements, data))
 
-    def dequeue(self):
+    def dequeue(self, capabilities=None):
+        caps = normalize_capabilities(capabilities)
         with self._lock:
-            try:
-                _, _, data = heapq.heappop(self._queue)
-            except IndexError:
-                pass
-            else:
-                return data
+            # The heap is ordered by (priority, sequence), so scanning it in
+            # sorted order and taking the first eligible entry preserves the
+            # priority/FIFO semantics within the consumer's eligible subset.
+            ordered = sorted(self._queue)
+            for index, entry in enumerate(ordered):
+                _, _, requirements, data = entry
+                if can_handle(caps, requirements):
+                    self._queue.remove(entry)
+                    heapq.heapify(self._queue)
+                    return data
 
     def queue_size(self):
         return len(self._queue)
 
     def enqueued_items(self, limit=None):
-        items = [data for _, _, data in sorted(self._queue)]
+        items = [data for _, _, _, data in sorted(self._queue)]
         if limit:
             items = items[:limit]
         return items
@@ -522,13 +541,19 @@ class RedisStorage(BaseStorage):
     def convert_ts(self, ts):
         return time.mktime(ts.timetuple()) + (ts.microsecond * 1e-6)
 
-    def enqueue(self, data, priority=None):
+    def enqueue(self, data, priority=None, requirements=None):
         if priority:
             raise NotImplementedError('Task priorities are not supported by '
                                       'this storage.')
+        if requirements is not None:
+            raise NotImplementedError('Capability requirements are not '
+                                      'supported by this storage.')
         self.conn.lpush(self.queue_key, data)
 
-    def dequeue(self):
+    def dequeue(self, capabilities=None):
+        if capabilities is not None:
+            raise NotImplementedError('Capability-based routing is not '
+                                      'supported by this storage.')
         if self.blocking:
             try:
                 return self.conn.brpop(
@@ -746,7 +771,10 @@ class RedisExpireStorage(RedisStorage):
 class RedisPriorityQueue(object):
     priority = True
 
-    def enqueue(self, data, priority=None):
+    def enqueue(self, data, priority=None, requirements=None):
+        if requirements is not None:
+            raise NotImplementedError('Capability requirements are not '
+                                      'supported by this storage.')
         priority = 0 if priority is None else -priority
         # Prefix the message with an encoded timestamp to ensure that messages
         # created with the same priority are stored in the correct order. Since
@@ -756,7 +784,10 @@ class RedisPriorityQueue(object):
         prefix = struct.pack('>Q', int(time.time() * 1e6))
         self.conn.zadd(self.queue_key, {prefix + data: priority})
 
-    def dequeue(self):
+    def dequeue(self, capabilities=None):
+        if capabilities is not None:
+            raise NotImplementedError('Capability-based routing is not '
+                                      'supported by this storage.')
         if self.blocking:
             try:
                 # BZPOPMIN returns (key, data, score).
@@ -862,10 +893,14 @@ class SqliteStorage(BaseSqlStorage):
                    'on schedule (queue, timestamp)')
     table_task = ('create table if not exists task ('
                   'id integer not null primary key, queue text not null, '
-                  'data blob not null, priority real not null default 0.0)')
+                  'data blob not null, priority real not null default 0.0, '
+                  'requirements text)')
     index_task = ('create index if not exists task_queue_priority_id on task '
                   '(queue, priority desc, id)')
     drop_index_task = 'drop index if exists task_priority_id'  # Old index.
+    # Migration for databases created before capability routing existed: the
+    # column is added nullable and existing rows stay NULL, i.e. unlabeled.
+    migrate_task_requirements = ('alter table task add column requirements text')
     table_counter = ('create table if not exists counter ('
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
@@ -900,6 +935,14 @@ class SqliteStorage(BaseSqlStorage):
 
         super(SqliteStorage, self).__init__(name, create_tables=create_tables)
 
+    def initialize_schema(self):
+        super(SqliteStorage, self).initialize_schema()
+        # Upgrade databases created by older Huey releases that lack the
+        # capability requirements column. New tables already include it.
+        columns = self.sql('pragma table_info(task)', results=True)
+        if columns and not any(col[1] == 'requirements' for col in columns):
+            self.sql(self.migrate_task_requirements, commit=True)
+
     def _create_connection(self):
         conn = sqlite3.connect(self.filename, timeout=self._timeout,
                                check_same_thread=False,
@@ -929,25 +972,35 @@ class SqliteStorage(BaseSqlStorage):
                     raise
                 time.sleep(0.01)
 
-    def enqueue(self, data, priority=None):
-        self.sql('insert into task (queue, data, priority) values (?, ?, ?)',
-                 (self.name, self.to_blob(data), priority or 0), commit=True)
+    def enqueue(self, data, priority=None, requirements=None):
+        self.sql('insert into task (queue, data, priority, requirements) '
+                 'values (?, ?, ?, ?)',
+                 (self.name, self.to_blob(data), priority or 0,
+                  encode_requirements(requirements)), commit=True)
 
-    def dequeue(self):
+    def dequeue(self, capabilities=None):
         # Quick check without the full exclusive lock.
         if not self.sql('select 1 from task where queue = ? limit 1',
                         (self.name,), results=True):
             return
 
+        caps = normalize_capabilities(capabilities)
         with self.db(commit=True) as curs:
-            curs.execute('select id, data from task where queue = ? '
-                         'order by priority desc, id limit 1', (self.name,))
-            result = curs.fetchone()
-            if result is not None:
-                tid, data = result
-                curs.execute('delete from task where id = ?', (tid,))
-                if curs.rowcount == 1:
-                    return data
+            # The whole select-and-delete runs inside one exclusive
+            # transaction, so a task can only be removed by a single consumer
+            # even when several consumers dequeue concurrently. Rows are
+            # scanned in the same priority/FIFO order as the unfiltered queue
+            # and the first eligible row wins; blocked rows stay untouched.
+            curs.execute('select id, data, requirements from task where '
+                         'queue = ? order by priority desc, id',
+                         (self.name,))
+            for tid, data, raw_requirements in curs.fetchall():
+                requirements = decode_requirements(raw_requirements)
+                if can_handle(caps, requirements):
+                    curs.execute('delete from task where id = ?', (tid,))
+                    if curs.rowcount == 1:
+                        return data
+            return
 
     def queue_size(self):
         return self.sql('select count(id) from task where queue=?',
@@ -1212,7 +1265,10 @@ class PostgresStorage(BaseSqlStorage):
             local.conn = conn
         return conn
 
-    def enqueue(self, data, priority=None):
+    def enqueue(self, data, priority=None, requirements=None):
+        if requirements is not None:
+            raise NotImplementedError('Capability requirements are not '
+                                      'supported by this storage.')
         with self.db(commit=True) as curs:
             curs.execute('insert into {} (queue, data, priority) '
                          'values (%s, %s, %s)'.format(self.table_task),
@@ -1231,7 +1287,10 @@ class PostgresStorage(BaseSqlStorage):
         if row is not None:
             return bytes(row[0])
 
-    def dequeue(self):
+    def dequeue(self, capabilities=None):
+        if capabilities is not None:
+            raise NotImplementedError('Capability-based routing is not '
+                                      'supported by this storage.')
         data = self._dequeue()
         if data is not None or not self.blocking:
             return data
@@ -1414,7 +1473,10 @@ class FileStorage(BaseStorage):
             shutil.rmtree(path)
             os.makedirs(path)
 
-    def enqueue(self, data, priority=None):
+    def enqueue(self, data, priority=None, requirements=None):
+        if requirements is not None:
+            raise NotImplementedError('Capability requirements are not '
+                                      'supported by this storage.')
         priority = int(priority or 0)
         if priority < 0: raise ValueError('priority must be a positive number')
         if priority > self.MAX_PRIORITY:
@@ -1444,7 +1506,10 @@ class FileStorage(BaseStorage):
             return ()
         return [f for f in sorted(os.listdir(path)) if not f.endswith('.tmp')]
 
-    def dequeue(self):
+    def dequeue(self, capabilities=None):
+        if capabilities is not None:
+            raise NotImplementedError('Capability-based routing is not '
+                                      'supported by this storage.')
         with self.lock:
             filenames = self._get_sorted_filenames(self.queue_path)
             if not filenames:

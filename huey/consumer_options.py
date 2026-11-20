@@ -24,6 +24,7 @@ config_defaults = (
     ('max_tasks', None),
     ('shutdown_timeout', None),
     ('graceful_signal', 'INT'),
+    ('capabilities', None),
 )
 config_keys = [param for param, _ in config_defaults]
 
@@ -85,6 +86,12 @@ class OptionParserHandler(object):
                    help=('signal that triggers graceful shutdown, INT or '
                          'TERM (default=INT). The other signal interrupts '
                          'running tasks.')),
+            option(('a', 'capabilities'),
+                   help=('comma-separated capabilities this consumer '
+                         'provides, e.g. "pdf,fonts". Only tasks whose '
+                         'requirements are satisfied (and unlabeled tasks) '
+                         'are dequeued. (default=none, unlabeled tasks '
+                         'only).')),
         )
 
     def get_scheduler_options(self):
