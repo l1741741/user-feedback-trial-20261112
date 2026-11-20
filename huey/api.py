@@ -375,6 +375,48 @@ class Huey(object):
         if data is not None:
             return self.deserialize_task(data)
 
+    def pause(self):
+        """
+        Pause this queue: consumers stop dequeueing new tasks, while producers
+        can keep enqueueing, scheduled tasks still become due, and tasks
+        already dequeued run to completion (including retries, which are
+        written back to the queue and run after the queue is resumed).
+
+        The paused state belongs to the queue and is stored durably, so it can
+        be toggled from a separate process, applies to every consumer sharing
+        this queue, does not affect other queues in the same database, and is
+        not cleared by a consumer restart.
+
+        :return: True once the paused state has been committed. After this
+            returns, no consumer will dequeue new tasks from this queue.
+        """
+        return self.storage.pause()
+
+    def resume(self):
+        """
+        Resume a paused queue. Pending tasks keep their original order, so
+        dequeueing continues by priority and, within a priority, in enqueue
+        order.
+
+        :return: True once the resumed state has been committed.
+        """
+        return self.storage.resume()
+
+    def is_paused(self):
+        """
+        :return: Boolean indicating whether this queue is currently paused.
+        """
+        return self.storage.is_paused()
+
+    def queue_status(self):
+        """
+        :return: Dictionary describing the queue's administrative state:
+            ``queue``, ``paused``, ``pending`` (tasks ready to run) and
+            ``scheduled`` (tasks waiting on their eta). The pending count is
+            reported even while the queue is paused.
+        """
+        return self.storage.queue_status()
+
     def put(self, key, data):
         return self.storage.put_data(key, self.serializer.serialize(data))
 

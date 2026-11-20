@@ -5,6 +5,14 @@ Changelog
 
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
+* Add explicit queue pause/resume with `Huey.pause()`, `Huey.resume()`,
+  `Huey.is_paused()` and `Huey.queue_status()`. Pausing stops new dequeues
+  while producers keep enqueueing and in-flight tasks finish; the paused state
+  is stored in the database, survives consumer restarts, is scoped to one queue
+  and can be toggled from a separate process. Implemented by `SqliteStorage`,
+  `CySqliteStorage` and the peewee-based `SqlStorage`; other backends raise
+  `NotImplementedError`.
+
 ## 3.5.4
 
 * Fix possible hang if worker holding the stop flag was killed while holding

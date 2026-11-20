@@ -78,6 +78,48 @@ class BaseStorage(object):
         """
         raise NotImplementedError
 
+    def pause(self):
+        """
+        Pause dequeueing new items from the queue.
+
+        The paused state belongs to the queue, not to a consumer: it must be
+        stored durably, apply to every consumer using the queue (including
+        consumers started after the pause), and leave other queues alone.
+        Enqueueing, scheduling and work that was already dequeued are
+        unaffected; only new dequeues are blocked until :py:meth:`resume`.
+
+        :return: True once the paused state has been committed.
+        """
+        raise NotImplementedError('pause is not supported by this storage')
+
+    def resume(self):
+        """
+        Resume dequeueing items from a previously paused queue.
+
+        :return: True once the resumed state has been committed.
+        """
+        raise NotImplementedError('resume is not supported by this storage')
+
+    def is_paused(self):
+        """
+        :return: Boolean indicating whether the queue is currently paused.
+        """
+        raise NotImplementedError('pause is not supported by this storage')
+
+    def queue_status(self):
+        """
+        Return a snapshot of the queue's administrative state.
+
+        :return: Dictionary containing ``queue``, ``paused``, ``pending`` and
+            ``scheduled``. Backends that track when a pause began may include
+            additional keys. ``pending`` is the real backlog, even while the
+            queue is paused.
+        """
+        return {'queue': self.name,
+                'paused': self.is_paused(),
+                'pending': self.queue_size(),
+                'scheduled': self.schedule_size()}
+
     def queue_size(self):
         """
         Return the length of the queue.
@@ -870,8 +912,11 @@ class SqliteStorage(BaseSqlStorage):
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
+    table_pause = ('create table if not exists pause ('
+                   'queue text not null primary key, '
+                   'paused integer not null default 1)')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           table_counter, drop_index_task, table_pause]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
@@ -934,12 +979,24 @@ class SqliteStorage(BaseSqlStorage):
                  (self.name, self.to_blob(data), priority or 0), commit=True)
 
     def dequeue(self):
+        # Read-only check before taking the exclusive write lock, so a paused
+        # queue never blocks on another writer and idle consumers do not
+        # contend with producers. The authoritative check is repeated inside
+        # the transaction below.
+        if self.is_paused():
+            return
         # Quick check without the full exclusive lock.
         if not self.sql('select 1 from task where queue = ? limit 1',
                         (self.name,), results=True):
             return
 
         with self.db(commit=True) as curs:
+            # Re-check the paused flag inside the exclusive transaction. If
+            # the pause committed before this transaction acquired the write
+            # lock, no message is removed. If this transaction commits first,
+            # the task has already been dequeued and is allowed to run.
+            if self._paused(curs):
+                return
             curs.execute('select id, data from task where queue = ? '
                          'order by priority desc, id limit 1', (self.name,))
             result = curs.fetchone()
@@ -948,6 +1005,73 @@ class SqliteStorage(BaseSqlStorage):
                 curs.execute('delete from task where id = ?', (tid,))
                 if curs.rowcount == 1:
                     return data
+
+    def _paused(self, curs):
+        # The pause table may not exist in a database whose schema predates
+        # this feature or that was created with ``create_tables=False``.
+        # Treat a missing table as "not paused", so callers that never pause
+        # are unaffected.
+        try:
+            curs.execute('select paused from pause where queue = ?',
+                         (self.name,))
+        except self.operational_error as exc:
+            if 'no such table' in str(exc).lower():
+                return False
+            raise
+        row = curs.fetchone()
+        return bool(row is not None and row[0])
+
+    def pause(self):
+        # Idempotent. The table DDL and the flag share one write transaction,
+        # so once this returns every dequeue transaction that starts
+        # afterwards observes the paused flag and removes nothing.
+        self._set_paused(1)
+        return True
+
+    def resume(self):
+        # Idempotent. Pending tasks are left untouched, so dequeueing resumes
+        # in the original priority / same-priority order.
+        self._set_paused(0)
+        return True
+
+    def _set_paused(self, paused):
+        with self.db(commit=True) as curs:
+            # Databases created with create_tables=False may predate the pause
+            # table; create it here so pause/resume keep working.
+            curs.execute(self.table_pause)
+            curs.execute('insert or replace into pause (queue, paused) '
+                         'values (?, ?)', (self.name, paused))
+
+    def is_paused(self):
+        with self.db() as curs:
+            return self._paused(curs)
+
+    def queue_status(self):
+        # The three values are fetched by a single statement, so the snapshot
+        # is self-consistent. Counts come straight from the task and schedule
+        # tables, so a paused queue reports its real backlog (plus work that
+        # is due) rather than looking drained merely because dequeueing is
+        # blocked.
+        try:
+            row = self.sql(
+                'select (select paused from pause where queue = ?), '
+                '(select count(id) from task where queue = ?), '
+                '(select count(id) from schedule where queue = ?)',
+                (self.name, self.name, self.name), results=True)[0]
+            paused, pending, scheduled = row
+        except self.operational_error as exc:
+            if 'no such table' not in str(exc).lower():
+                raise
+            # Database predates the pause table: not paused.
+            pending, scheduled = self.sql(
+                'select (select count(id) from task where queue = ?), '
+                '(select count(id) from schedule where queue = ?)',
+                (self.name, self.name), results=True)[0]
+            paused = 0
+        return {'queue': self.name,
+                'paused': bool(paused),
+                'pending': pending,
+                'scheduled': scheduled}
 
     def queue_size(self):
         return self.sql('select count(id) from task where queue=?',

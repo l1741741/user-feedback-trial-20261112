@@ -293,6 +293,37 @@ To cleanly restart the consumer, including all workers, send the ``SIGHUP``
 signal. Any tasks being executed will be allowed to finish before the restart
 occurs.
 
+.. _consumer-pause:
+
+Pausing a queue
+---------------
+
+When the system downstream of a queue needs short maintenance, pause the queue
+instead of stopping its consumers. :py:meth:`Huey.pause` stops new tasks from
+being dequeued while leaving the consumers running: tasks already dequeued
+finish normally, producers keep enqueueing, scheduled tasks keep becoming due,
+and retries of in-flight tasks are written back to the queue. The backlog is
+preserved, not drained.
+
+The paused state belongs to the queue and is stored in the database, so it can
+be set from a separate maintenance process::
+
+    # maintenance process, same database and queue name
+    from myapp import huey
+    huey.pause()          # returns True once committed
+    huey.queue_status()   # {'queue': ..., 'paused': True, 'pending': N, ...}
+    huey.resume()         # later, after maintenance
+
+It applies to every consumer sharing the queue, survives consumer restarts,
+and does not affect other queues in the same database. Pausing or resuming an
+already-paused or already-running queue is safe. Only the SQLite storages
+implement it; other backends raise ``NotImplementedError``.
+
+``queue_status()`` reads its counts from storage, so a paused queue keeps
+reporting its real backlog rather than appearing drained. An idle worker on a
+paused queue gets the same "nothing to do" result as on an empty queue, and
+backs off normally instead of busy-polling.
+
 .. _process-supervisors:
 
 supervisord and systemd

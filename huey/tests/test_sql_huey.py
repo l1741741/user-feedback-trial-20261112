@@ -127,3 +127,45 @@ class TestSqlStorage(StorageTests, BaseTestCase):
     def test_consumer_integration(self):
         # Intentional skip.
         pass
+
+    def test_pause_and_resume(self):
+        self.assertFalse(self.huey.is_paused())
+        self.s.enqueue(b'a')
+        self.s.enqueue(b'b', priority=5)
+
+        self.assertTrue(self.huey.pause())
+        self.assertTrue(self.huey.is_paused())
+        self.assertTrue(self.s.dequeue() is None)
+        self.assertEqual(self.huey.queue_status(),
+                         {'queue': 'huey', 'paused': True, 'pending': 2,
+                          'scheduled': 0})
+
+        # Idempotent; backlog preserved and drained in priority order.
+        self.assertTrue(self.huey.pause())
+        self.assertTrue(self.huey.resume())
+        self.assertTrue(self.huey.resume())
+        self.assertFalse(self.huey.is_paused())
+        self.assertEqual(self.s.dequeue(), b'b')
+        self.assertEqual(self.s.dequeue(), b'a')
+
+    def test_pause_is_per_queue_and_survives_restart(self):
+        other = SqlHuey('other', database=SQLHUEY_URL, utc=False)
+        try:
+            self.s.enqueue(b'a')
+            other.storage.enqueue(b'b')
+            self.assertTrue(self.huey.pause())
+
+            self.assertTrue(self.huey.is_paused())
+            self.assertFalse(other.is_paused())
+            self.assertTrue(self.s.dequeue() is None)
+            self.assertEqual(other.storage.dequeue(), b'b')
+
+            # A fresh instance (consumer restart) sees the committed state.
+            fresh = SqlHuey('huey', database=SQLHUEY_URL, utc=False)
+            try:
+                self.assertTrue(fresh.is_paused())
+                self.assertTrue(fresh.storage.dequeue() is None)
+            finally:
+                fresh.storage.close()
+        finally:
+            other.storage.close()

@@ -37,7 +37,8 @@ class SqlStorage(BaseStorage):
         else:
             self.atomic = self.database.atomic
 
-        self.KV, self.Schedule, self.Task, self.Counter = self.create_models()
+        self.KV, self.Schedule, self.Task, self.Counter, self.Pause = \
+            self.create_models()
         if create_tables:
             self.create_tables()
 
@@ -91,12 +92,16 @@ class SqlStorage(BaseStorage):
             class Meta:
                 primary_key = CompositeKey('queue', 'key')
 
-        return (KV, Schedule, Task, Counter)
+        class Pause(Base):
+            queue = CharField(primary_key=True)
+            paused = IntegerField(default=1)
+
+        return (KV, Schedule, Task, Counter, Pause)
 
     def create_tables(self):
         with self.database:
             self.database.create_tables([self.KV, self.Schedule, self.Task,
-                                         self.Counter])
+                                         self.Counter, self.Pause])
 
     def initialize_schema(self):
         # Shared entrypoint for the create_huey_tables management command.
@@ -105,7 +110,21 @@ class SqlStorage(BaseStorage):
     def drop_tables(self):
         with self.database:
             self.database.drop_tables([self.KV, self.Schedule, self.Task,
-                                       self.Counter])
+                                       self.Counter, self.Pause])
+
+    def _pause_table_exists(self):
+        try:
+            self.Pause.select().limit(1).exists()
+        except OperationalError:
+            return False
+        return True
+
+    def _ensure_pause_table(self):
+        # Databases created with create_tables=False may predate the pause
+        # table. Create just that table so pause/resume keep working.
+        if not self._pause_table_exists():
+            with self.database:
+                self.database.create_tables([self.Pause])
 
     def close(self):
         closed = self.database.close()
@@ -135,6 +154,11 @@ class SqlStorage(BaseStorage):
 
     def dequeue(self):
         self.check_conn()
+        # Read-only check first, so a paused queue does not take the write
+        # lock (idle consumers back off instead of contending with writers).
+        if self.is_paused():
+            return
+
         query = (self.tasks(self.Task.id, self.Task.data)
                  .order_by(self.Task.priority.desc(), self.Task.id)
                  .limit(1))
@@ -142,6 +166,11 @@ class SqlStorage(BaseStorage):
             query = query.for_update(self.for_update)
 
         with self.atomic():
+            # Re-check inside the transaction: if the pause was committed
+            # before this transaction started, no message is removed. If this
+            # transaction commits first, the task was already dequeued.
+            if self._paused():
+                return
             try:
                 task = query.get()
             except self.Task.DoesNotExist:
@@ -150,6 +179,58 @@ class SqlStorage(BaseStorage):
             nrows = self.Task.delete().where(self.Task.id == task.id).execute()
             if nrows == 1:
                 return task.data
+
+    def _paused(self):
+        if not self._pause_table_exists():
+            return False
+        try:
+            row = self.Pause.get_or_none(self.Pause.queue == self.name)
+        except OperationalError:
+            return False
+        return bool(row is not None and row.paused)
+
+    def _set_paused(self, paused):
+        self._ensure_pause_table()
+        try:
+            with self.atomic():
+                # Portable update-then-insert: older peewee / non-SQLite
+                # databases reached through this storage may not translate
+                # "on conflict".
+                if not (self.Pause
+                        .update(paused=paused)
+                        .where(self.Pause.queue == self.name)
+                        .execute()):
+                    self.Pause.create(queue=self.name, paused=paused)
+        except IntegrityError:
+            # Another process inserted the row between our update and insert;
+            # both operations set a value, so a plain update finishes the job.
+            with self.atomic():
+                (self.Pause
+                 .update(paused=paused)
+                 .where(self.Pause.queue == self.name)
+                 .execute())
+
+    def pause(self):
+        # Idempotent; committed before returning so the caller's receipt
+        # means no later dequeue transaction can remove a message.
+        self._set_paused(1)
+        return True
+
+    def resume(self):
+        # Idempotent. Backlog is untouched, preserving dequeue order.
+        self._set_paused(0)
+        return True
+
+    def is_paused(self):
+        self.check_conn()
+        return self._paused()
+
+    def queue_status(self):
+        self.check_conn()
+        return {'queue': self.name,
+                'paused': self._paused(),
+                'pending': self.queue_size(),
+                'scheduled': self.schedule_size()}
 
     def queue_size(self):
         return self.tasks().count()

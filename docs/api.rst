@@ -1112,6 +1112,56 @@ Huey object
         exclusive locking. It can also be used to build custom coordination
         patterns like task deduplication.
 
+    .. py:method:: pause()
+
+        :returns: ``True`` once the paused state is committed.
+
+        Stop consumers from dequeueing new tasks from this queue, without
+        stopping the consumers themselves. Work that was already dequeued
+        runs to completion, producers can keep enqueueing, scheduled tasks
+        continue to become due, and retries of in-flight tasks are written
+        back to the queue (where they wait). The backlog is preserved, and
+        :py:meth:`~Huey.pending_count` keeps reporting it.
+
+        The paused state is stored by the queue, in the database, not by a
+        consumer. It can therefore be set from a separate maintenance process,
+        applies to every consumer sharing the queue (including consumers
+        started afterwards), and is not cleared by a consumer restart. Other
+        queues in the same database are unaffected.
+
+        Pausing and dequeueing are both single SQLite write transactions, so
+        whichever commits first wins: a pause that commits before a dequeue
+        transaction removes nothing, while a task whose dequeue already
+        committed is allowed to run. Calling ``pause()`` when already paused
+        is a no-op.
+
+        .. note::
+            Only the SQLite storages (:py:class:`SqliteStorage` and
+            :py:class:`CySqliteStorage`) and the peewee-based
+            ``huey.contrib.sql_huey.SqlStorage`` implement this; other
+            backends raise ``NotImplementedError``.
+
+    .. py:method:: resume()
+
+        :returns: ``True`` once the resumed state is committed.
+
+        Resume a paused queue. Waiting tasks are dequeued in their original
+        order: priority descending, then enqueue order within a priority.
+        Calling ``resume()`` when the queue is not paused is a no-op.
+
+    .. py:method:: is_paused()
+
+        :returns: Boolean indicating whether the queue is currently paused.
+
+    .. py:method:: queue_status()
+
+        :returns: a dict describing the queue's administrative state:
+            ``queue`` (name), ``paused`` (bool), ``pending`` (tasks ready to
+            run) and ``scheduled`` (tasks waiting on their eta).
+
+        The counts are read from storage, not inferred from dequeue activity,
+        so a paused queue reports its real backlog instead of looking drained.
+
     .. py:method:: pending(limit=None)
 
         :param int limit: optionally limit the number of tasks returned.
@@ -1123,9 +1173,6 @@ Huey object
             you only need the count.
 
     .. py:method:: pending_count()
-
-        :returns: the number of tasks currently in the queue, without
-            deserializing them.
 
     .. py:method:: scheduled(limit=None)
 
@@ -2450,6 +2497,12 @@ Huey comes with several built-in storage implementations:
     :param bool create_tables: create tables if they do not exist.
     :param kwargs: Additional keyword arguments passed to the ``sqlite3``
         connection constructor.
+
+    Supports explicit queue pause/resume via :py:meth:`Huey.pause`,
+    :py:meth:`Huey.resume`, :py:meth:`Huey.is_paused` and
+    :py:meth:`Huey.queue_status`. The paused flag is stored in a ``pause``
+    table keyed by queue name. A database whose schema predates that table is
+    treated as un-paused; ``pause()`` creates the table on demand.
 
 
 .. py:class:: CySqliteStorage(name='huey', filename='huey.db', pragmas=None, timeout=5, strict_fifo=False, create_tables=True, **kwargs)
