@@ -3,6 +3,12 @@ Changelog
 
 ## Master
 
+* Add opt-in native execution of coroutine tasks on the thread-based
+  consumer (`Consumer(enable_async=True)` / `huey_consumer -e`). Each worker
+  runs its own asyncio event-loop, so async resources created by startup
+  hooks are reused across that worker's tasks and cleaned up on shutdown.
+  See the `examples/async_inventory` demo.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4

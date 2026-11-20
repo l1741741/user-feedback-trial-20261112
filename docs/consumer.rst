@@ -150,6 +150,13 @@ Options for the consumer
     use ``TERM`` for graceful and ``INT`` to shutdown immediately. See
     :ref:`deployment-signals`.
 
+``-e``, ``--enable-async``
+    Execute async (coroutine) tasks natively. Each worker thread runs its own
+    asyncio event-loop, which is reused across the tasks it executes, so
+    async resources (clients, connections) created by startup hooks can be
+    shared by consecutive tasks on the same worker. Only valid with the
+    default ``thread`` worker-type. See :ref:`async-tasks`.
+
 ``-s``, ``--scheduler-interval``
     The frequency with which the scheduler should run. By default this will run
     every second, but you can increase the interval to as much as 60 seconds.

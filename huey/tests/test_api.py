@@ -1340,14 +1340,36 @@ class TestQueue(BaseTestCase):
 
 
 class TestAsyncTasks(BaseTestCase):
-    def test_async_task_rejected(self):
+    def test_async_task_registered(self):
+        @self.huey.task()
         async def task_a(n):
             return n
 
-        self.assertRaises(ConfigurationError, self.huey.task(), task_a)
-        self.assertRaises(ConfigurationError,
-                          self.huey.periodic_task(crontab(minute='1')),
-                          task_a)
+        @self.huey.periodic_task(crontab(minute='1'))
+        async def task_p():
+            pass
+
+        @self.huey.task()
+        def task_s():
+            pass
+
+        self.assertTrue(task_a.task_class.is_async)
+        self.assertTrue(task_p.task_class.is_async)
+        self.assertFalse(task_s.task_class.is_async)
+
+    def test_async_task_requires_async_consumer(self):
+        # Without an async-enabled consumer, the coroutine must not be
+        # executed or stored as the task result. The task fails with a
+        # clear configuration error instead.
+        @self.huey.task()
+        async def task_a(n):
+            return n
+
+        res = task_a(1)
+        self.execute_next()
+        exc = self.trap_exception(res)
+        self.assertIn('async task', str(exc))
+        self.assertIn('enable_async', str(exc))
 
     def test_async_wrapper_pattern(self):
         async def _work(n):

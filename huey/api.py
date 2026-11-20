@@ -4,6 +4,7 @@ import inspect
 import itertools
 import logging
 import re
+import threading
 import time
 import traceback
 import uuid
@@ -126,6 +127,9 @@ class Huey(object):
         self._signal = S.Signal()
         self._tasks_in_flight = set()
         self._timeout_handler = None  # This is consumer-specific.
+        # Per-thread state set by async-capable workers, used to run coroutine
+        # tasks on the worker's own event loop. See consumer.AsyncWorker.
+        self._thread_state = threading.local()
 
     def get_task_wrapper_class(self):
         return TaskWrapper
@@ -406,6 +410,22 @@ class Huey(object):
 
         return self._timeout_handler(task.timeout)
 
+    def _execute_task(self, task):
+        if not task.is_async:
+            return task.execute()
+
+        # Coroutine tasks are awaited on the executing worker's own event
+        # loop, which is registered as thread-local state by the consumer's
+        # async worker. Without it we must not execute the task at all, as
+        # the coroutine would never be awaited.
+        run_coroutine = getattr(self._thread_state, 'run_coroutine', None)
+        if run_coroutine is None:
+            raise ConfigurationError(
+                'Cannot execute async task "%s": this consumer does not '
+                'support async tasks. Async tasks require the "thread" '
+                'worker-type with enable_async=True.' % task.name)
+        return run_coroutine(task.execute())
+
     def _get_timestamp(self):
         return (utcnow() if self.utc else
                 datetime.datetime.now())
@@ -450,7 +470,7 @@ class Huey(object):
             self._tasks_in_flight.add(task)
             try:
                 with self._timeout_context(task):
-                    task_value = task.execute()
+                    task_value = self._execute_task(task)
             finally:
                 # notify_interrupted_tasks() may have already popped it.
                 self._tasks_in_flight.discard(task)
@@ -799,6 +819,7 @@ class Task(object):
     default_retry_delay = 0
     default_retry_backoff = 0
     default_timeout = None
+    is_async = False
 
     def __init__(self, args=None, kwargs=None, id=None, eta=None, retries=None,
                  retry_delay=None, priority=None, expires=None,
@@ -963,11 +984,6 @@ class TaskWrapper(object):
         return self.huey._registry.unregister(self.task_class)
 
     def create_task(self, func, context=False, name=None, **settings):
-        if inspect.iscoroutinefunction(func):
-            raise ConfigurationError(
-                'huey does not support async functions. Wrap the coroutine '
-                'with asyncio.run() in a regular function.')
-
         def execute(self):
             args, kwargs = self.data
             if self.context:
@@ -978,6 +994,10 @@ class TaskWrapper(object):
         attrs = {
             'context': context,
             'execute': execute,
+            # Coroutine functions are executed on the consumer's per-worker
+            # event loop (see consumer.AsyncWorker). For regular functions
+            # this flag is False and nothing changes.
+            'is_async': inspect.iscoroutinefunction(func),
             '__module__': func.__module__,
             '__doc__': func.__doc__}
         attrs.update(settings)

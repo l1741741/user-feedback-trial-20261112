@@ -24,6 +24,7 @@ config_defaults = (
     ('max_tasks', None),
     ('shutdown_timeout', None),
     ('graceful_signal', 'INT'),
+    ('enable_async', False),
 )
 config_keys = [param for param, _ in config_defaults]
 
@@ -41,7 +42,7 @@ def option(name, **options):
 class OptionParserHandler(object):
     def get_worker_options(self):
         return (
-            # -w, -k, -d, -m, -b, -c, -C, -f, -L, -M, -t, -g
+            # -w, -k, -d, -m, -b, -c, -C, -f, -L, -M, -t, -g, -e
             option('workers', type='int',
                    help='number of worker threads/processes (default=1)'),
             option(('k', 'worker-type'), choices=WORKER_TYPES,
@@ -85,6 +86,12 @@ class OptionParserHandler(object):
                    help=('signal that triggers graceful shutdown, INT or '
                          'TERM (default=INT). The other signal interrupts '
                          'running tasks.')),
+            option(('e', 'enable-async'), action='store_true',
+                   dest='enable_async',
+                   help=('execute async (coroutine) tasks natively on a '
+                         'per-worker event loop, allowing async resources '
+                         'to be reused across tasks. Only valid with the '
+                         'thread worker-type.')),
         )
 
     def get_scheduler_options(self):

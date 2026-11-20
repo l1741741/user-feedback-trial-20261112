@@ -7,6 +7,7 @@ TEST_TMP_DIR = _tempfile.mkdtemp(prefix='huey-native-%s-' % _os.getpid())
 _atexit.register(_shutil.rmtree, TEST_TMP_DIR, ignore_errors=True)
 
 from huey.tests.test_api import *
+from huey.tests.test_async_consumer import *
 from huey.tests.test_asyncio import *
 from huey.tests.test_consumer import *
 from huey.tests.test_crontab import *

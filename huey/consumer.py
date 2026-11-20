@@ -1,4 +1,6 @@
+import asyncio
 import contextlib
+import inspect
 import logging
 import os
 import select
@@ -146,6 +148,71 @@ class Worker(BaseProcess):
 
         self.stop_flag.wait(self.delay)
         self.delay *= self.backoff
+
+
+class AsyncWorker(Worker):
+    """
+    Worker that executes coroutine tasks on a private asyncio event-loop.
+
+    The loop is created when the worker starts and is reused for every
+    async task the worker runs, so async resources created by startup hooks
+    (e.g. clients or connections) are shared by consecutive tasks handled
+    by this worker, but never with other workers. Startup and shutdown
+    hooks may themselves be coroutine functions, and are awaited on the
+    worker's loop. If any startup hook fails, the partially-initialized
+    resources are cleaned up and the worker exits rather than running in a
+    half-initialized state.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self._loop = None
+        super(AsyncWorker, self).__init__(*args, **kwargs)
+
+    def initialize(self):
+        loop = asyncio.new_event_loop()
+        try:
+            for name, startup_hook in self.huey._startup.items():
+                self._logger.debug('calling startup hook "%s"', name)
+                self._run_hook(loop, startup_hook)
+        except Exception:
+            self._logger.exception('Async worker failed to initialize, '
+                                   'cleaning up and exiting.')
+            self._cleanup_loop(loop)
+            raise
+
+        self._loop = loop
+        # Register the loop so Huey._execute_task() can await coroutine
+        # tasks on it. This state is thread-local, so each worker gets its
+        # own loop and its own set of async resources.
+        self.huey._thread_state.run_coroutine = loop.run_until_complete
+
+    def _run_hook(self, loop, hook):
+        value = hook()
+        if inspect.isawaitable(value):
+            return loop.run_until_complete(value)
+        return value
+
+    def _cleanup_loop(self, loop):
+        for name, shutdown_hook in self.huey._shutdown.items():
+            self._logger.debug('calling shutdown hook "%s"', name)
+            try:
+                self._run_hook(loop, shutdown_hook)
+            except Exception:
+                self._logger.exception('shutdown hook "%s" failed', name)
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            if hasattr(loop, 'shutdown_default_executor'):
+                loop.run_until_complete(loop.shutdown_default_executor())
+        except Exception:
+            self._logger.exception('Error cleaning up async resources.')
+        finally:
+            loop.close()
+
+    def shutdown(self):
+        self.huey._thread_state.run_coroutine = None
+        if self._loop is not None:
+            loop, self._loop = self._loop, None
+            self._cleanup_loop(loop)
 
 
 class Scheduler(BaseProcess):
@@ -394,7 +461,7 @@ class Consumer(object):
                  worker_type=WORKER_THREAD, check_worker_health=True,
                  health_check_interval=10, flush_locks=False,
                  extra_locks=None, max_tasks=None, shutdown_timeout=None,
-                 graceful_signal='INT'):
+                 graceful_signal='INT', enable_async=False):
 
         self._logger = logging.getLogger('huey.consumer')
         if huey.immediate:
@@ -423,6 +490,14 @@ class Consumer(object):
                                      'of 60, e.g. 1, 2, 3, 4, 5, 6, 10, 12...')
 
         self.worker_type = worker_type  # What process model are we using?
+        self.enable_async = enable_async  # Execute coroutine tasks natively?
+
+        if enable_async:
+            if worker_type != WORKER_THREAD:
+                raise ConfigurationError(
+                    'enable_async requires the "%s" worker-type, got: "%s".'
+                    % (WORKER_THREAD, worker_type))
+            self.worker_class = AsyncWorker
 
         # Configure health-check and consumer main-loop attributes.
         self._stop_flag_timeout = 0.1
