@@ -7,6 +7,8 @@ import sys
 import threading
 import time
 
+from collections import namedtuple
+
 import multiprocessing
 
 try:
@@ -32,6 +34,35 @@ logger = logging.getLogger('huey.consumer')
 class ConsumerStopped(Exception): pass
 
 class WorkerRecycle(Exception): pass
+
+
+class WorkerExit(object):
+    """
+    The reason a worker (or scheduler) process/thread exited. RECYCLED is a
+    planned recycle after reaching ``max_tasks``, CRASHED an unexpected
+    failure, and STOPPED / INTERRUPTED a deliberate consumer shutdown.
+    """
+    STOPPED = 'stopped'
+    RECYCLED = 'recycled'
+    CRASHED = 'crashed'
+    INTERRUPTED = 'interrupted'
+
+
+# Process exit-codes used to communicate the exit reason back to the parent
+# when workers run in their own processes (where the parent's Worker objects
+# do not reflect what happened in the child).
+EXIT_CODE_RECYCLED = 3
+EXIT_CODE_CRASHED = 4
+
+
+# A point in a worker's lifecycle ("start" / "exit"). ``reason`` is one of
+# the WorkerExit constants for "exit" events. The task counters are only
+# available when the worker shares memory with the consumer (thread and
+# greenlet workers); for forked workers the child reports them in its own
+# log output and they are recorded as None here.
+WorkerEvent = namedtuple('WorkerEvent', (
+    'event', 'name', 'generation', 'reason', 'task_count',
+    'tasks_completed', 'tasks_requeued', 'timestamp'))
 
 
 class BaseProcess(object):
@@ -99,6 +130,17 @@ class Worker(BaseProcess):
         self.backoff = backoff
         self.max_tasks = max_tasks
         self.task_count = 0
+        # Lifecycle state for this worker generation. `task_count` drives
+        # max_tasks and counts every dequeued task; `tasks_completed` only
+        # counts tasks whose chain finished (success or final failure),
+        # while `tasks_requeued` counts executions that were requeued (e.g.
+        # a retry) and will be finished by whichever generation picks the
+        # task back up.
+        self.generation = 0
+        self.tasks_completed = 0
+        self.tasks_requeued = 0
+        self.exit_reason = None
+        self._shutdown_hooks_run = set()
         super(Worker, self).__init__(huey, stop_flag)
 
     def initialize(self):
@@ -111,11 +153,15 @@ class Worker(BaseProcess):
 
     def shutdown(self):
         for name, shutdown_hook in self.huey._shutdown.items():
+            if name in self._shutdown_hooks_run:
+                continue  # Never re-run a hook that already completed.
             self._logger.debug('calling shutdown hook "%s"', name)
             try:
                 shutdown_hook()
             except Exception:
+                # Log and continue so the remaining hooks still run.
                 self._logger.exception('shutdown hook "%s" failed', name)
+            self._shutdown_hooks_run.add(name)
 
     def loop(self, now=None):
         task = None
@@ -133,6 +179,14 @@ class Worker(BaseProcess):
                 except Exception:
                     self._logger.exception('Unhandled error during execution '
                                            'of task %s.', task.id)
+                else:
+                    # A task that was requeued (e.g. for a retry) has not
+                    # finished its chain and must not be counted as
+                    # completed, even if an intermediate error was stored.
+                    if getattr(task, '_chain_finished', True):
+                        self.tasks_completed += 1
+                    else:
+                        self.tasks_requeued += 1
                 if self.max_tasks and self.task_count >= self.max_tasks:
                     self._logger.info('Worker reached max tasks (%d), '
                                       'exiting.', self.max_tasks)
@@ -255,6 +309,14 @@ class Environment(object):
     def interrupt_workers(self, procs):
         pass
 
+    def exit_process(self, reason):
+        """
+        Called at the very end of a process/thread runnable with the
+        WorkerExit reason. Only the process environment needs to act here
+        (communicating the reason to the parent via the exit-code); shared
+        memory environments record the reason on the worker itself.
+        """
+
 
 class ThreadEnvironment(Environment):
     def get_stop_flag(self):
@@ -370,6 +432,14 @@ class ProcessEnvironment(Environment):
         for proc in procs:
             proc.join(max(deadline - time.monotonic(), 0))
 
+    def exit_process(self, reason):
+        # Communicate the exit reason to the parent via the exit-code so it
+        # can distinguish a planned recycle from a crash or a shutdown.
+        if reason == WorkerExit.RECYCLED:
+            sys.exit(EXIT_CODE_RECYCLED)
+        elif reason == WorkerExit.CRASHED:
+            sys.exit(EXIT_CODE_CRASHED)
+
 
 WORKER_TO_ENVIRONMENT = {
     WORKER_THREAD: ThreadEnvironment,
@@ -448,6 +518,18 @@ class Consumer(object):
         self.huey._timeout_handler = self.environment.timeout
         self.stop_flag = self.environment.get_stop_flag()
 
+        # Lifecycle tracking for worker generations. A worker that reaches
+        # max_tasks (or crashes) is replaced by a new generation once it has
+        # fully exited; every start/exit is recorded in `_lifecycle_events`.
+        # `_stopping` ensures no new generation is spawned once shutdown has
+        # begun, and the lock serializes health-check replacements against
+        # stop() so a late stop cannot signal a brand-new generation.
+        self._stopping = False
+        self._worker_generation = 0
+        self._lifecycle_events = []
+        self._lifecycle_lock = threading.RLock()
+        self._exits_recorded = set()
+
         # In the event the consumer was killed while running a task that held
         # a lock, this ensures that all locks are flushed before starting.
         if flush_locks or extra_locks:
@@ -484,13 +566,16 @@ class Consumer(object):
                                                   self._interrupt_sig)
 
     def _create_worker(self):
-        return self.worker_class(
+        self._worker_generation += 1
+        worker = self.worker_class(
             huey=self.huey,
             stop_flag=self.stop_flag,
             default_delay=self.default_delay,
             max_delay=self.max_delay,
             backoff=self.backoff,
             max_tasks=self.max_tasks)
+        worker.generation = self._worker_generation
+        return worker
 
     def _create_scheduler(self):
         return self.scheduler_class(
@@ -506,21 +591,36 @@ class Consumer(object):
         """
         def _run():
             self.environment.init_child(process)
+            reason = WorkerExit.STOPPED
             try:
                 process.initialize()
                 while not self.stop_flag.is_set():
                     process.loop()
             except KeyboardInterrupt:
-                pass
+                reason = WorkerExit.INTERRUPTED
             except WorkerRecycle:
-                self._logger.info('Process %s restarting (max tasks).', name)
+                reason = WorkerExit.RECYCLED
+                self._logger.info('Process %s recycling (max tasks).', name)
             except:
+                reason = WorkerExit.CRASHED
                 self._logger.exception('Process %s died!', name)
-            finally:
+            try:
+                process.shutdown()
+            except KeyboardInterrupt:
+                # Retry once so the remaining hooks still run; hooks that
+                # already completed are not executed again.
                 try:
                     process.shutdown()
                 except KeyboardInterrupt:
                     pass
+            process.exit_reason = reason
+            if isinstance(process, Worker):
+                self._logger.info(
+                    'Worker %s (generation %s) exited: reason=%s tasks=%d '
+                    'completed=%d requeued=%d', name, process.generation,
+                    reason, process.task_count, process.tasks_completed,
+                    process.tasks_requeued)
+            self.environment.exit_process(reason)
         return self.environment.create_process(_run, name)
 
     def start(self):
@@ -554,8 +654,9 @@ class Consumer(object):
 
         # Start the scheduler and workers.
         self.scheduler.start()
-        for _, worker_process in self.worker_threads:
+        for i, (worker, worker_process) in enumerate(self.worker_threads):
             worker_process.start()
+            self._record_worker_event('start', worker, 'Worker-%d' % (i + 1))
 
         # Finally set the signal handlers for main process.
         self._set_signal_handlers()
@@ -568,6 +669,8 @@ class Consumer(object):
         executing any tasks they might be currently working on, or until
         `shutdown_timeout` elapses.
         """
+        # From this point on no new worker generation may be spawned.
+        self._stopping = True
         self.stop_flag.set()
         if graceful:
             self._logger.info('Shutting down gracefully...')
@@ -577,18 +680,27 @@ class Consumer(object):
                 self._logger.info('Received request to shut down now.')
                 self._restart = False
                 self._interrupt_workers()
+                self._record_worker_exits()
                 return
             if success:
                 self._logger.info('All workers have stopped.')
+                self._record_worker_exits()
                 return
             self._logger.warning('Shutdown timeout of %ss elapsed, '
                                  'interrupting workers.',
                                  self.shutdown_timeout)
         self._interrupt_workers()
+        self._record_worker_exits()
         self._logger.info('Shutting down')
 
     def _interrupt_workers(self):
-        self.environment.interrupt_workers([p for _, p in self.worker_threads])
+        # Snapshot the current generation under the lifecycle lock: a worker
+        # that is being recycled concurrently is either fully replaced before
+        # this snapshot (and the new generation is correctly interrupted) or
+        # the health check observes `_stopping` and spawns nothing.
+        with self._lifecycle_lock:
+            procs = [p for _, p in self.worker_threads]
+        self.environment.interrupt_workers(procs)
 
     def _join_workers(self):
         deadline = None
@@ -654,35 +766,122 @@ class Consumer(object):
 
         return health_check_ts
 
+    @property
+    def lifecycle_events(self):
+        """
+        A snapshot of the recorded worker lifecycle events (WorkerEvent
+        namedtuples), in the order they occurred.
+        """
+        with self._lifecycle_lock:
+            return list(self._lifecycle_events)
+
+    def _record_worker_event(self, event, worker, name, reason=None):
+        if self.environment.forks:
+            # Task counters are maintained in the child and reported in its
+            # own log output; they are not visible to the parent.
+            task_count = tasks_completed = tasks_requeued = None
+        else:
+            task_count = worker.task_count
+            tasks_completed = worker.tasks_completed
+            tasks_requeued = worker.tasks_requeued
+        record = WorkerEvent(
+            event=event, name=name, generation=worker.generation,
+            reason=reason, task_count=task_count,
+            tasks_completed=tasks_completed, tasks_requeued=tasks_requeued,
+            timestamp=time.time())
+        with self._lifecycle_lock:
+            self._lifecycle_events.append(record)
+
+    def _worker_exit_reason(self, worker, worker_t):
+        # Shared-memory environments record the reason on the worker itself;
+        # for forked workers it is communicated via the process exit-code.
+        reason = getattr(worker, 'exit_reason', None)
+        if reason is not None:
+            return reason
+        exitcode = getattr(worker_t, 'exitcode', None)
+        if exitcode is None:
+            return None  # Never started.
+        if exitcode == 0:
+            return WorkerExit.STOPPED
+        elif exitcode == EXIT_CODE_RECYCLED:
+            return WorkerExit.RECYCLED
+        return WorkerExit.CRASHED
+
+    def _record_worker_exit(self, worker, worker_t, name):
+        # Keep a reference to the process object (rather than its id()) so
+        # that a recycled object's reused id cannot mask a new generation.
+        if worker_t in self._exits_recorded:
+            return
+        reason = self._worker_exit_reason(worker, worker_t)
+        if reason is None:
+            return
+        self._exits_recorded.add(worker_t)
+        self._record_worker_event('exit', worker, name, reason)
+
+    @staticmethod
+    def _reap(proc):
+        # Join a defunct process/thread to reap it. Processes and threads
+        # expose `ident` once started; greenlets need no reaping.
+        if getattr(proc, 'ident', None) is not None:
+            proc.join()
+
+    def _record_worker_exits(self):
+        for i, (worker, worker_t) in enumerate(self.worker_threads):
+            if not self.environment.is_alive(worker_t):
+                self._record_worker_exit(worker, worker_t,
+                                         'Worker-%d' % (i + 1))
+
     def check_worker_health(self):
         """
-        Check the health of the worker processes. Workers that have died will
-        be replaced with new workers.
+        Check the health of the worker processes. Workers that have exited
+        (whether by planned recycle or by crashing) are replaced with a new
+        generation -- but never after the consumer has begun shutting down.
         """
+        if self._stopping or self.stop_flag.is_set():
+            self._logger.debug('Consumer is stopping, not restarting '
+                               'workers.')
+            return True
+
         self._logger.debug('Checking worker health.')
         workers = []
         restart_occurred = False
-        for i, (worker, worker_t) in enumerate(self.worker_threads):
-            if not self.environment.is_alive(worker_t):
-                self._logger.warning('Worker %d died, restarting.', i + 1)
-                worker = self._create_worker()
-                worker_t = self._create_process(worker, 'Worker-%d' % (i + 1))
-                worker_t.start()
-                restart_occurred = True
-            workers.append((worker, worker_t))
+        with self._lifecycle_lock:
+            if self._stopping or self.stop_flag.is_set():
+                return True
+            for i, (worker, worker_t) in enumerate(self.worker_threads):
+                if not self.environment.is_alive(worker_t):
+                    # The old generation has fully exited; only now do we
+                    # bring up its replacement.
+                    self._reap(worker_t)
+                    name = 'Worker-%d' % (i + 1)
+                    self._record_worker_exit(worker, worker_t, name)
+                    reason = self._worker_exit_reason(worker, worker_t)
+                    if reason == WorkerExit.CRASHED:
+                        self._logger.warning('Worker %d died, restarting.',
+                                             i + 1)
+                    else:
+                        self._logger.info('Worker %d exited (%s), '
+                                          'restarting.', i + 1, reason)
+                    worker = self._create_worker()
+                    worker_t = self._create_process(worker, name)
+                    worker_t.start()
+                    self._record_worker_event('start', worker, name)
+                    restart_occurred = True
+                workers.append((worker, worker_t))
 
-        if restart_occurred:
-            self.worker_threads = workers
-        else:
-            self._logger.debug('Workers are up and running.')
+            if restart_occurred:
+                self.worker_threads = workers
+            else:
+                self._logger.debug('Workers are up and running.')
 
-        if not self.environment.is_alive(self.scheduler):
-            self._logger.warning('Scheduler died, restarting.')
-            scheduler = self._create_scheduler()
-            self.scheduler = self._create_process(scheduler, 'Scheduler')
-            self.scheduler.start()
-        else:
-            self._logger.debug('Scheduler is up and running.')
+            if not self.environment.is_alive(self.scheduler):
+                self._logger.warning('Scheduler died, restarting.')
+                self._reap(self.scheduler)
+                scheduler = self._create_scheduler()
+                self.scheduler = self._create_process(scheduler, 'Scheduler')
+                self.scheduler.start()
+            else:
+                self._logger.debug('Scheduler is up and running.')
 
         return not restart_occurred
 

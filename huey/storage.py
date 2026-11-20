@@ -797,6 +797,7 @@ class BaseSqlStorage(BaseStorage):
         super(BaseSqlStorage, self).__init__(*args, **kwargs)
         self.lock = threading.Lock()
         self._conn = None
+        self._conn_pid = None
         if create_tables:
             self.initialize_schema()
 
@@ -804,14 +805,27 @@ class BaseSqlStorage(BaseStorage):
         if self._conn is None:
             return False
         with self.lock:
-            self._conn.close()
+            if self._conn_pid == os.getpid():
+                # Only close a handle owned by this process; a handle
+                # inherited across fork() belongs to the parent.
+                self._conn.close()
             self._conn = None
+            self._conn_pid = None
         return True
 
     @property
     def conn(self):
+        pid = os.getpid()
+        if self._conn is not None and self._conn_pid != pid:
+            # The connection was inherited across a fork(). Database
+            # handles must not be shared between processes, so drop our
+            # reference (leaving the parent's handle untouched) and open
+            # a new connection for this process.
+            self._conn = None
+            self._conn_pid = None
         if self._conn is None:
             self._conn = self._create_connection()
+            self._conn_pid = pid
         return self._conn
 
     def _create_connection(self):
@@ -835,6 +849,7 @@ class BaseSqlStorage(BaseStorage):
                 if close:
                     conn.close()
                     self._conn = None
+                    self._conn_pid = None
 
     def initialize_schema(self):
         with self.db(commit=True, close=True) as curs:

@@ -415,12 +415,16 @@ class Huey(object):
             timestamp = self._get_timestamp()
 
         if not self.ready_to_run(task, timestamp):
+            # Rescheduled for later -- the task's chain is still open.
+            task._chain_finished = False
             self.add_schedule(task)
         elif self.is_revoked(task, timestamp, False):
+            task._chain_finished = True
             logger.warning('Task %s was revoked, not executing', task)
             self._emit(S.SIGNAL_REVOKED, task)
             self._abort_chord_member(task, SKIPPED)
         elif task.expires_resolved and task.expires_resolved < timestamp:
+            task._chain_finished = True
             logger.info('Task %s expired, not executing.', task)
             self._emit(S.SIGNAL_EXPIRED, task)
             self._abort_chord_member(task, SKIPPED)
@@ -434,6 +438,7 @@ class Huey(object):
             try:
                 self._run_pre_execute(task)
             except CancelExecution:
+                task._chain_finished = True
                 self._emit(S.SIGNAL_CANCELED, task)
                 self._abort_chord_member(task, SKIPPED)
                 return
@@ -494,6 +499,7 @@ class Huey(object):
             exception = exc
         except KeyboardInterrupt:
             logger.warning('Received exit signal, %s did not finish.', task.id)
+            task._chain_finished = False
             self._emit(S.SIGNAL_INTERRUPTED, task)
             return
         except Exception as exc:
@@ -510,6 +516,7 @@ class Huey(object):
 
         store = self.results and not isinstance(task, PeriodicTask)
         if exception is None:
+            task._chain_finished = True
             if store and (task_value is not None or self.store_none):
                 self.put_result(task.id, task_value)
             self._run_post_execute(task, task_value, exception)
@@ -521,6 +528,9 @@ class Huey(object):
                 self._check_chord(task.chord_config, task_value)
         else:
             final = not task.retries
+            # A task that will be retried has not finished its chain, even
+            # if the intermediate error was surfaced to the result store.
+            task._chain_finished = final
             surface = final or (self.store_intermediate_errors and
                                 not isinstance(exception, RETRYING_EXCEPTIONS))
             if surface:
@@ -822,6 +832,11 @@ class Task(object):
         self.timeout = timeout if timeout is not None else self.default_timeout
         self.chord_config = chord_config
         self._deadline = None
+        # Set by Huey.execute(): whether this execution finished the task's
+        # chain (success, final failure, revocation, ...) as opposed to the
+        # task being requeued (retry) or rescheduled. Used by the consumer
+        # for recycle statistics.
+        self._chain_finished = True
 
         self.on_complete = on_complete
         self.on_error = on_error

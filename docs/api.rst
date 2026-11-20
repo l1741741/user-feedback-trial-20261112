@@ -2208,6 +2208,25 @@ Consumer
         ``graceful=True`` it blocks until every worker has finished the task it
         is currently executing, or until ``shutdown_timeout`` elapses.
 
+        Once shutdown has begun, no new worker generation is spawned: the
+        health check stops replacing recycled or crashed workers.
+
+    .. py:attribute:: lifecycle_events
+
+        A list of ``WorkerEvent`` namedtuples, one per worker generation
+        ``start`` and ``exit``, in the order they occurred. Each record
+        carries the worker ``name``, its ``generation`` number and, for
+        exits, the ``reason`` -- ``recycled`` (reached ``max_tasks``),
+        ``crashed`` (unhandled error), or ``stopped`` / ``interrupted``
+        (consumer shutdown). For thread and greenlet workers the records
+        also include the generation's task counters: ``task_count`` (every
+        dequeued task, which is what ``max_tasks`` limits),
+        ``tasks_completed`` (tasks whose chain finished) and
+        ``tasks_requeued`` (executions that were requeued, e.g. for a
+        retry, and will be finished by whichever generation picks the task
+        back up). For process workers the counters are reported in the
+        child process's own log output instead.
+
 Serializer
 ----------
 

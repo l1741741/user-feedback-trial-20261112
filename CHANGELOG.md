@@ -3,6 +3,25 @@ Changelog
 
 ## Master
 
+* Worker recycling (`max_tasks`) is now an observable lifecycle. Every worker
+  generation's start and exit is recorded (see `Consumer.lifecycle_events`)
+  with its exit reason, distinguishing a planned recycle from a crash and
+  from a consumer shutdown. Forked workers communicate the reason through
+  their exit-code.
+* Workers track separate `tasks_completed` / `tasks_requeued` counters so a
+  task that errored but will be retried is not counted as a finished chain.
+* The health check no longer spawns replacement workers (or a replacement
+  scheduler) once the consumer has begun shutting down, and a worker's
+  replacement is only started after the old generation has fully exited and
+  been reaped.
+* Worker shutdown hooks are idempotent per generation: a hook that already
+  completed is never run twice, and a failing hook no longer prevents the
+  remaining hooks from running.
+* SQL storage connections are now fork-safe: a connection inherited across
+  `fork()` (e.g. when a recycled process worker is replaced while the parent
+  holds an open connection) is discarded and re-opened in the child instead
+  of being shared between processes.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4
