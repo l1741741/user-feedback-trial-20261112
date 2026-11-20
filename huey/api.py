@@ -3,7 +3,9 @@ import datetime
 import inspect
 import itertools
 import logging
+import queue
 import re
+import threading
 import time
 import traceback
 import uuid
@@ -16,6 +18,7 @@ from functools import wraps
 from huey import signals as S
 from huey.constants import EmptyData
 from huey.consumer import Consumer
+from huey.exceptions import BulkEnqueueError
 from huey.exceptions import CancelExecution
 from huey.exceptions import ConfigurationError
 from huey.exceptions import RateLimitExceeded
@@ -48,6 +51,11 @@ from huey.utils import utcnow
 
 logger = logging.getLogger('huey')
 _sentinel = object()
+
+# Bulk-enqueue receipt statuses.
+BULK_SUCCESS = 'success'   # The task was durably accepted by the storage.
+BULK_FAILED = 'failed'     # Definite rejection: nothing was stored.
+BULK_UNKNOWN = 'unknown'   # The storage write may or may not have landed.
 
 
 class Huey(object):
@@ -369,6 +377,65 @@ class Huey(object):
             results.append(Result(self, task))
             task = task.on_complete
         return results
+
+    def bulk_enqueue(self, tasks, max_in_flight=None, queue_limit=None,
+                     timeout=None, poll_interval=0.05, cancel_event=None):
+        """
+        Publish a lazily-consumed stream of tasks with bounded in-flight
+        memory. The iterable of tasks is consumed incrementally by a producer
+        thread: at most ``max_in_flight`` pulled-but-unacknowledged tasks may
+        exist at any moment, and (when given) the storage queue cannot exceed
+        ``queue_limit``. This is *not* an atomic batch -- one receipt is
+        yielded per input task, each marked as ``BULK_SUCCESS``,
+        ``BULK_FAILED`` or ``BULK_UNKNOWN``. Every receipt carries the stable
+        task id, so after a partial failure the caller can resume without
+        re-sending members that already succeeded.
+
+        The generator is never drained ahead of consumption. When the queue is
+        full the producer blocks (bounded by ``timeout``, measured against one
+        fixed monotonic deadline that is not reset on each wake-up) until a
+        consumer makes room. Cancellation, generator errors, unserializable
+        members and consumer shutdown each terminate cleanly without dropping
+        receipts already produced.
+
+        Backends without atomic capacity enforcement are rejected before the
+        generator is consumed.
+
+        :param tasks: one-shot iterable/generator of ``Task`` instances.
+        :param int max_in_flight: producer-side window of unacknowledged
+            tasks. Defaults to ``queue_limit`` when given, else 16.
+        :param int queue_limit: hard storage queue size. ``None`` means only
+            the in-flight window bounds production.
+        :param float timeout: total wall-clock budget for waiting on queue
+            capacity. ``None`` waits indefinitely.
+        :param float poll_interval: delay between capacity re-checks.
+        :param threading.Event cancel_event: when set, production stops once
+            queued receipts have been delivered.
+        :returns: :py:class:`BulkEnqueueSession`, iterable of
+            :py:class:`BulkReceipt`.
+        """
+        if self._immediate:
+            raise ConfigurationError(
+                'bulk_enqueue() is not supported in immediate mode.')
+        if not getattr(self.storage, 'supports_bounded_enqueue', False):
+            raise ConfigurationError(
+                'storage backend %r does not support bounded bulk enqueue' %
+                type(self.storage).__name__)
+        if max_in_flight is None:
+            max_in_flight = queue_limit if queue_limit is not None else 16
+        if not isinstance(max_in_flight, int) or max_in_flight < 1:
+            raise ValueError('max_in_flight must be a positive integer.')
+        if queue_limit is not None and (not isinstance(queue_limit, int) or
+                                        queue_limit < 1):
+            raise ValueError('queue_limit must be a positive integer or None.')
+        if poll_interval <= 0:
+            raise ValueError('poll_interval must be positive.')
+        if timeout is not None and timeout <= 0:
+            raise ValueError('timeout must be positive or None.')
+
+        return BulkEnqueueSession(
+            self, tasks, max_in_flight, queue_limit, timeout,
+            poll_interval, cancel_event)
 
     def dequeue(self):
         data = self.storage.dequeue()
@@ -790,6 +857,351 @@ class Huey(object):
             max_delay=max_delay,
             revoke_on_timeout=revoke_on_timeout,
             preserve=preserve)
+
+
+class BulkReceipt(object):
+    """
+    Per-member outcome of a bounded bulk-enqueue session.
+
+    ``status`` is one of :py:data:`BULK_SUCCESS`, :py:data:`BULK_FAILED` or
+    :py:data:`BULK_UNKNOWN`. The stable ``task_id`` allows a caller resuming
+    after a partial failure to skip members already confirmed as stored.
+    """
+    __slots__ = ('task_id', 'status', 'reason', 'error', 'index')
+
+    def __init__(self, task_id, status, reason=None, error=None, index=None):
+        self.task_id = task_id
+        self.status = status
+        self.reason = reason
+        self.error = error
+        self.index = index
+
+    @property
+    def ok(self):
+        return self.status == BULK_SUCCESS
+
+    def __repr__(self):
+        return '<BulkReceipt %s %s%s>' % (
+            self.status, self.task_id,
+            '' if self.reason is None else ' (%s)' % self.reason)
+
+
+class BulkEnqueueSession(object):
+    """
+    Bounded, back-pressured bulk publishing session.
+
+    A single producer thread pulls tasks from the one-shot input generator at
+    most as fast as the in-flight window and the storage capacity allow, and
+    hands one :py:class:`BulkReceipt` per task through a bounded delivery
+    channel.
+
+    Two independent control records keep memory bounded without a circular
+    wait:
+
+    * **In-flight slots** (``max_in_flight``): one permit is held from the
+      moment a task is pulled from the generator until its storage outcome is
+      decided. A task blocked waiting for queue capacity still counts as
+      in-flight, which is exactly the production-side window the caller asks
+      to bound.
+    * **Receipt channel** (also bounded by ``max_in_flight``): once a receipt
+      is produced it is parked here for the caller. A stopped consumer fills
+      this channel and the producer parks on delivery *without holding a
+      slot*, so delivery back-pressure can never deadlock against capacity
+      waiting.
+
+    Iterate the session to collect receipts; it must be closed (using it as a
+    context manager, or calling :py:meth:`close`) to stop the producer and
+    release every control record.
+    """
+    _END = object()
+
+    def __init__(self, huey, tasks, max_in_flight, queue_limit, timeout,
+                 poll_interval, cancel_event):
+        self.huey = huey
+        self._tasks = tasks
+        self.max_in_flight = max_in_flight
+        self.queue_limit = queue_limit
+        self.timeout = timeout
+        self.poll_interval = poll_interval
+        self._external_cancel = cancel_event
+
+        # Production-side in-flight control record.
+        self._slots = threading.BoundedSemaphore(max_in_flight)
+        # Bounded delivery channel: back-pressure for a stopped consumer.
+        self._receipts = queue.Queue(maxsize=max_in_flight)
+        self._cancel = threading.Event()
+        self._closed = threading.Event()
+
+        self._in_flight = 0
+        self._peak_in_flight = 0
+        self._counter_lock = threading.Lock()
+        self._producer_error = None
+        self._generator_exhausted = False
+
+        self._thread = threading.Thread(
+            target=self._run, name='huey-bulk-enqueue', daemon=True)
+        self._thread.start()
+
+    # -- introspection -----------------------------------------------------
+
+    @property
+    def in_flight(self):
+        """Tasks pulled from the generator without a decided storage outcome."""
+        with self._counter_lock:
+            return self._in_flight
+
+    @property
+    def peak_in_flight(self):
+        """High-water mark of in-flight tasks observed by the producer."""
+        with self._counter_lock:
+            return self._peak_in_flight
+
+    @property
+    def cancelled(self):
+        return self._cancel.is_set()
+
+    @property
+    def producer_error(self):
+        """The exception raised by the input generator, if any."""
+        return self._producer_error
+
+    # -- iteration protocol ------------------------------------------------
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        # Active sessions block without latency; once closed or cancelled the
+        # waits are bounded so a stopped consumer stays responsive.
+        while True:
+            try:
+                if self._closed.is_set() or self._cancelled():
+                    item = self._receipts.get_nowait()
+                else:
+                    item = self._receipts.get(timeout=self.poll_interval)
+            except queue.Empty:
+                # Producer terminated with nothing left: synthesize the
+                # terminal marker so iteration ends cleanly.
+                if not self._thread.is_alive() and self._receipts.empty():
+                    item = self._END
+                else:
+                    continue
+            if item is self._END:
+                # Keep the marker reachable for repeated iteration.
+                self._receipts.put(self._END)
+                if self._producer_error is not None:
+                    raise BulkEnqueueError(self._producer_error)
+                raise StopIteration
+            return item
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def cancel(self):
+        """Stop pulling further tasks; queued receipts remain readable."""
+        self._cancel.set()
+        if self._external_cancel is not None:
+            self._external_cancel.set()
+
+    def close(self):
+        """Cancel production, drain undelivered receipts and join the thread.
+
+        Always terminates: in-flight slots are released as soon as each
+        storage outcome is decided (a producer parked on delivery holds no
+        slot), and the delivery channel is drained here, so a stopped
+        consumer can neither deadlock the producer nor leak a control record.
+        """
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        self.cancel()
+        if self._thread.is_alive() and threading.current_thread() is not \
+                self._thread:
+            self._thread.join(timeout=max(5.0, (self.timeout or 0) + 5.0))
+        # Drain whatever remains so produced receipts are not held past the
+        # session's explicit end boundary.
+        while True:
+            try:
+                item = self._receipts.get_nowait()
+            except queue.Empty:
+                break
+            if item is self._END:
+                break
+
+    # -- producer internals ------------------------------------------------
+
+    def _cancelled(self):
+        return self._cancel.is_set() or (
+            self._external_cancel is not None and
+            self._external_cancel.is_set())
+
+    def _deadline(self):
+        return None if self.timeout is None else \
+            time.monotonic() + self.timeout
+
+    def _remaining(self, deadline):
+        return None if deadline is None else max(0.0, deadline -
+                                                  time.monotonic())
+
+    def _acquire_slot(self, deadline):
+        # One fixed deadline is shared by every wait: the timeout budget is
+        # never reset on wake-up.
+        while True:
+            if self._cancelled() or self._closed.is_set():
+                return False
+            remaining = self._remaining(deadline)
+            if remaining is not None and remaining <= 0:
+                return False
+            timeout = self.poll_interval if remaining is None else \
+                min(self.poll_interval, remaining)
+            if self._slots.acquire(timeout=timeout):
+                return True
+
+    def _release_slot(self):
+        with self._counter_lock:
+            self._in_flight -= 1
+        try:
+            self._slots.release()
+        except ValueError:
+            # Defensive: each permit has exactly one release path.
+            pass
+
+    def _enter_in_flight(self):
+        with self._counter_lock:
+            self._in_flight += 1
+            if self._in_flight > self._peak_in_flight:
+                self._peak_in_flight = self._in_flight
+
+    def _deliver(self, receipt):
+        # Park the receipt in the bounded channel. The producer holds no slot
+        # while blocked here, and close() drains the channel, so the wait is
+        # always finite.
+        while True:
+            if self._closed.is_set():
+                try:
+                    self._receipts.put_nowait(receipt)
+                except queue.Full:
+                    # close() is draining concurrently; the receipt is no
+                    # longer deliverable and must not block shutdown.
+                    pass
+                return
+            try:
+                self._receipts.put(receipt, timeout=self.poll_interval)
+                return
+            except queue.Full:
+                continue
+
+    def _finish(self):
+        # Terminal marker; retried until close() makes room, so a stopped
+        # consumer cannot prevent the producer from exiting.
+        while True:
+            try:
+                self._receipts.put_nowait(self._END)
+                return
+            except queue.Full:
+                if self._closed.is_set():
+                    return
+                self._cancel.wait(self.poll_interval)
+
+    def _run(self):
+        deadline = self._deadline()
+        try:
+            iterator = iter(self._tasks)
+            index = -1
+            while True:
+                if self._cancelled() or self._closed.is_set():
+                    break
+                if not self._acquire_slot(deadline):
+                    # Window never freed (consumer stopped) or the fixed
+                    # budget expired. Stop without touching the generator.
+                    break
+                try:
+                    task = next(iterator)
+                except StopIteration:
+                    # Generator exhausted: return the permit reserved for a
+                    # task that never materialized.
+                    self._slots.release()
+                    self._generator_exhausted = True
+                    break
+                except BaseException as exc:
+                    self._slots.release()
+                    self._producer_error = exc
+                    logger.exception('Bulk enqueue input generator failed.')
+                    break
+
+                index += 1
+                self._enter_in_flight()
+                receipt = self._process(task, index, deadline)
+                # Storage outcome decided: the in-flight control record is
+                # released at this explicit boundary. The receipt then flows
+                # through the separately bounded delivery channel.
+                self._release_slot()
+                self._deliver(receipt)
+        finally:
+            self._finish()
+
+    def _process(self, task, index, deadline):
+        task_id = getattr(task, 'id', None)
+        if not isinstance(task, Task):
+            return BulkReceipt(task_id, BULK_FAILED,
+                               reason='invalid-member',
+                               error=ValueError('expected a Task instance, '
+                                                'got %r' % type(task)),
+                               index=index)
+        try:
+            if task.expires:
+                task.resolve_expires(self.huey.utc)
+            data = self.huey.serialize_task(task)
+        except Exception as exc:
+            # Definite, local rejection: nothing reached the storage.
+            return BulkReceipt(task.id, BULK_FAILED,
+                               reason='unserializable', error=exc,
+                               index=index)
+
+        self.huey._emit(S.SIGNAL_ENQUEUED, task)
+
+        if self.queue_limit is None:
+            try:
+                self.huey.storage.enqueue(data, task.priority)
+            except Exception as exc:
+                return BulkReceipt(task.id, BULK_UNKNOWN,
+                                   reason='storage-error', error=exc,
+                                   index=index)
+            return BulkReceipt(task.id, BULK_SUCCESS, index=index)
+
+        while True:
+            if self._cancelled() or self._closed.is_set():
+                return BulkReceipt(task.id, BULK_FAILED,
+                                   reason='cancelled', index=index)
+            try:
+                accepted = self.huey.storage.enqueue_if_space(
+                    data, task.priority, self.queue_limit)
+            except Exception as exc:
+                # The write may have landed before the connection broke, so
+                # the outcome must not be reported as a definite failure.
+                return BulkReceipt(task.id, BULK_UNKNOWN,
+                                   reason='storage-error', error=exc,
+                                   index=index)
+            if accepted:
+                return BulkReceipt(task.id, BULK_SUCCESS, index=index)
+
+            remaining = self._remaining(deadline)
+            if remaining is not None and remaining <= 0:
+                # Nothing was written: this is a definite failure.
+                return BulkReceipt(task.id, BULK_FAILED,
+                                   reason='queue-full-timeout', index=index)
+            wait = self.poll_interval if remaining is None else \
+                min(self.poll_interval, remaining)
+            if self._cancel.wait(wait) or (self._external_cancel is not None
+                                           and self._external_cancel.wait(0)):
+                return BulkReceipt(task.id, BULK_FAILED,
+                                   reason='cancelled', index=index)
 
 
 class Task(object):

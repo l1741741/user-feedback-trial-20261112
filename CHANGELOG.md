@@ -5,6 +5,14 @@ Changelog
 
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
+* Add `Huey.bulk_enqueue()` for bounded, back-pressured publishing of a
+  one-shot task generator. It bounds producer-side in-flight tasks via
+  `max_in_flight`, optionally enforces a hard storage `queue_limit`, and
+  yields one `BulkReceipt` per member classified as success, definite failure
+  or unknown outcome (keyed by the stable task id for resumption). The in-memory
+  and SQLite storages enforce the limit atomically; unsupported backends and
+  immediate mode reject the call before the generator is consumed.
+
 ## 3.5.4
 
 * Fix possible hang if worker holding the stop flag was killed while holding

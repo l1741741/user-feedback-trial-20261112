@@ -2,7 +2,13 @@ __author__ = 'Charles Leifer'
 __license__ = 'MIT'
 __version__ = '3.5.4'
 
+from huey.api import BULK_FAILED
+from huey.api import BULK_SUCCESS
+from huey.api import BULK_UNKNOWN
 from huey.api import BlackHoleHuey
+from huey.api import BulkEnqueueError
+from huey.api import BulkEnqueueSession
+from huey.api import BulkReceipt
 from huey.api import CySqliteHuey
 from huey.api import Huey
 from huey.api import FileHuey

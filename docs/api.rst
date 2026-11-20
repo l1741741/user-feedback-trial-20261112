@@ -797,6 +797,94 @@ Huey object
             :py:meth:`~Huey.enqueue` directly when working with pipelines,
             groups, or chords.
 
+    .. py:method:: bulk_enqueue(tasks, max_in_flight=None, queue_limit=None, timeout=None, poll_interval=0.05, cancel_event=None)
+
+        :param tasks: a **one-shot** iterable or generator of
+            :py:class:`Task` instances. It is consumed incrementally and is
+            never expanded into a list, so it can describe an arbitrarily
+            large import.
+        :param int max_in_flight: producer-side window bounding how many tasks
+            may be pulled from the generator without a decided storage
+            outcome. Defaults to ``queue_limit`` when given, otherwise 16.
+        :param int queue_limit: optional hard upper bound on the number of
+            tasks held in the storage queue. When the queue is full the
+            producer waits for the consumer to make room instead of raising.
+        :param float timeout: total wall-clock budget, measured against one
+            fixed monotonic deadline that is **not** reset on each wake-up.
+            ``None`` (the default) waits indefinitely.
+        :param float poll_interval: delay between capacity and cancellation
+            re-checks.
+        :param threading.Event cancel_event: when set, production stops once
+            the receipts already produced have been delivered.
+        :returns: a :py:class:`BulkEnqueueSession`, which is iterable and
+            yields one :py:class:`BulkReceipt` per input task.
+
+        Publish a lazily-generated stream of tasks with bounded in-flight
+        memory. Unlike :py:meth:`~Huey.enqueue`, this is **not** an atomic
+        batch: each member is committed independently and its individual
+        outcome is yielded as a receipt.
+
+        Each :py:class:`BulkReceipt` carries:
+
+        * ``task_id`` -- the stable id of the member task, used to resume
+          after a partial failure without re-sending members that already
+          succeeded;
+        * ``status`` -- one of ``BULK_SUCCESS`` (durably accepted),
+          ``BULK_FAILED`` (a definite rejection where nothing was stored, such
+          as an unserializable member, an invalid member, a full-queue
+          timeout, or cancellation), or ``BULK_UNKNOWN`` (the storage write
+          may or may not have landed, e.g. a connection dropped mid-write);
+        * ``reason`` and ``error`` -- a machine-readable code and the original
+          exception, when applicable;
+        * ``index`` -- the zero-based position of the member in the stream.
+
+        Back-pressure is enforced by two independent control records: an
+        in-flight semaphore (released at the explicit boundary where a
+        member's storage outcome is decided) and a bounded receipt channel
+        (released when the caller iterates each receipt). When the storage
+        backend supports it (the in-memory and SQLite storages), the queue
+        limit is enforced atomically, so concurrent publishers can never
+        overshoot the hard limit. Backends without atomic capacity
+        enforcement -- and immediate mode -- raise
+        :class:`~huey.exceptions.ConfigurationError` *before* the generator is
+        consumed.
+
+        Cancellation, an input-generator exception, an unserializable member
+        and a consumer that stops reading all terminate cleanly without
+        deadlock or dropping the last receipt. A generator error is raised as
+        :class:`~huey.exceptions.BulkEnqueueError` only after every receipt
+        already produced has been delivered.
+
+        Example::
+
+            def import_rows(rows):
+                for row in rows:  # rows may be huge; streamed, never listed
+                    yield process_row.s(row['id'], row)
+
+            with huey.bulk_enqueue(import_rows(reader),
+                                   max_in_flight=32,
+                                   queue_limit=1000) as session:
+                for receipt in session:
+                    if not receipt.ok:
+                        log.warning('task %s -> %s (%s)',
+                                    receipt.task_id,
+                                    receipt.status,
+                                    receipt.reason)
+
+        To resume after a partial failure, keep the ids returned with
+        ``BULK_SUCCESS`` and re-publish only the remaining members::
+
+            done = {r.task_id for r in receipts if r.status == BULK_SUCCESS}
+            retry = (make_task(row) for row in rows
+                     if stable_id(row) not in done)
+            with huey.bulk_enqueue(retry, max_in_flight=32) as session:
+                list(session)
+
+        .. note::
+            The session must be closed to stop its producer thread and release
+            every control record. Use it as a context manager (``with``) or
+            call :py:meth:`BulkEnqueueSession.close` explicitly.
+
     .. py:method:: revoke(task, revoke_until=None, revoke_once=False)
 
         .. seealso:: Use :py:meth:`Result.revoke` instead.

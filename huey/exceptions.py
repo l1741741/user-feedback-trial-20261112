@@ -3,6 +3,13 @@ class ConfigurationError(HueyException): pass
 class TaskLockedException(HueyException): pass
 class ResultTimeout(HueyException): pass
 class TaskTimeout(HueyException): pass
+class BulkEnqueueError(HueyException):
+    """Raised after all in-flight receipts were delivered, when the input
+    generator itself failed while being consumed by a bulk-enqueue session."""
+    def __init__(self, original):
+        self.original = original
+        super(BulkEnqueueError, self).__init__(
+            'bulk enqueue input generator raised %r' % original)
 
 class RateLimitExceeded(HueyException):
     def __init__(self, key, delay, retry=True):

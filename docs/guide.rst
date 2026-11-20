@@ -962,6 +962,70 @@ Equivalent example using a context-manager instead of a decorator:
 
 See :py:meth:`Huey.rate_limit` for API documentation.
 
+Bounded bulk enqueue
+--------------------
+
+When an import or batch job produces a very large number of tasks, materializing
+all of them before publishing would require unbounded memory and could overwhelm
+the queue. :py:meth:`Huey.bulk_enqueue` streams a one-shot generator of tasks
+through a bounded, back-pressured producer and hands you one receipt per member.
+
+The producer never runs ahead of two limits:
+
+* ``max_in_flight`` bounds how many tasks may be pulled from the generator
+  before their storage outcome is decided;
+* ``queue_limit`` (optional) bounds the number of tasks allowed to sit in the
+  storage queue. When it is full the producer blocks until the consumer makes
+  room, rather than raising or buffering everything.
+
+.. code-block:: python
+
+    def rows_to_tasks(reader):
+        for row in reader:          # streamed; the reader is never listed
+            yield process_row.s(row['id'], row)
+
+    with huey.bulk_enqueue(rows_to_tasks(reader),
+                           max_in_flight=32,
+                           queue_limit=1000) as session:
+        for receipt in session:
+            if not receipt.ok:
+                logger.warning('task %s ended %s (%s)',
+                               receipt.task_id, receipt.status, receipt.reason)
+
+Each receipt reports one of three outcomes:
+
+* ``BULK_SUCCESS`` -- the task was durably accepted;
+* ``BULK_FAILED`` -- a definite rejection where nothing was stored (an
+  unserializable or invalid member, a full-queue timeout, or cancellation);
+* ``BULK_UNKNOWN`` -- the write may or may not have landed, for example a
+  storage connection that dropped mid-write.
+
+Because every receipt carries the stable ``task_id``, you can resume after a
+partial failure by re-publishing only the members that did not succeed, instead
+of blindly re-sending the whole batch:
+
+.. code-block:: python
+
+    done = {r.task_id for r in receipts if r.status == BULK_SUCCESS}
+    retry = (process_row.s(row['id'], row) for row in reader
+             if row['id'] not in done)
+    with huey.bulk_enqueue(retry, max_in_flight=32) as session:
+        list(session)
+
+The ``timeout`` is a single fixed budget for the whole session, measured from a
+monotonic deadline; it is not reset each time the producer wakes. Pass a
+``threading.Event`` as ``cancel_event`` (or call
+:py:meth:`~BulkEnqueueSession.cancel`) to stop production; receipts already
+produced remain readable, and closing the session never deadlocks even if the
+consumer has stopped reading. If the input generator itself raises, the already
+produced receipts are still delivered first and the exception is then surfaced
+as :class:`~huey.exceptions.BulkEnqueueError`.
+
+The in-memory and SQLite storages enforce the queue limit atomically, so
+concurrent publishers cannot exceed the hard limit. Other backends, and
+immediate mode, reject the call with a
+:class:`~huey.exceptions.ConfigurationError` before the generator is consumed.
+
 Task pipelines
 --------------
 

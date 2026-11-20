@@ -43,6 +43,9 @@ class BaseStorage(object):
     """
     blocking = False  # Does dequeue() block until ready, or should we poll?
     priority = True
+    # Whether the storage can atomically enforce a hard queue-size limit,
+    # which is required by the bounded bulk-enqueue entry-point.
+    supports_bounded_enqueue = False
 
     def __init__(self, name='huey', **storage_kwargs):
         self.name = name
@@ -68,6 +71,24 @@ class BaseStorage(object):
         storage may raise a NotImplementedError for non-None priority values.
         """
         raise NotImplementedError
+
+    def enqueue_if_space(self, data, priority=None, limit=None):
+        """
+        Atomically enqueue the data only while the queue does not exceed the
+        given hard size limit. The size check and the insert must happen within
+        a single atomic operation so that concurrent publishers can never
+        overshoot the limit.
+
+        :param bytes data: Task data.
+        :param float priority: Priority, higher priorities processed first.
+        :param int limit: Hard upper bound on the queue size. The data is
+                          accepted only when the current size is below it.
+        :return: ``True`` when the data was stored, ``False`` when the queue
+                 is already at the limit.
+        """
+        raise NotImplementedError(
+            'storage %r does not support bounded enqueue' %
+            type(self).__name__)
 
     def dequeue(self):
         """
@@ -333,6 +354,8 @@ class BlackHoleStorage(BaseStorage):
 
 
 class MemoryStorage(BaseStorage):
+    supports_bounded_enqueue = True
+
     def __init__(self, *args, **kwargs):
         super(MemoryStorage, self).__init__(*args, **kwargs)
         self._c = 0  # Counter to ensure FIFO behavior for queue.
@@ -347,6 +370,15 @@ class MemoryStorage(BaseStorage):
             self._c += 1
             priority = 0 if priority is None else -priority
             heapq.heappush(self._queue, (priority, self._c, data))
+
+    def enqueue_if_space(self, data, priority=None, limit=None):
+        with self._lock:
+            if limit is not None and len(self._queue) >= limit:
+                return False
+            self._c += 1
+            priority = 0 if priority is None else -priority
+            heapq.heappush(self._queue, (priority, self._c, data))
+            return True
 
     def dequeue(self):
         with self._lock:
@@ -850,6 +882,7 @@ class BaseSqlStorage(BaseStorage):
 
 class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
+    supports_bounded_enqueue = True
     integrity_error = getattr(sqlite3, 'IntegrityError', None)
     operational_error = getattr(sqlite3, 'OperationalError', None)
     table_kv = ('create table if not exists kv ('
@@ -932,6 +965,21 @@ class SqliteStorage(BaseSqlStorage):
     def enqueue(self, data, priority=None):
         self.sql('insert into task (queue, data, priority) values (?, ?, ?)',
                  (self.name, self.to_blob(data), priority or 0), commit=True)
+
+    def enqueue_if_space(self, data, priority=None, limit=None):
+        # The count and the insert run inside one exclusive transaction, so
+        # concurrent publishers (threads or separate processes sharing the
+        # database) can never observe a stale count and overshoot the limit.
+        with self.db(commit=True) as curs:
+            if limit is not None:
+                curs.execute('select count(id) from task where queue = ?',
+                             (self.name,))
+                if curs.fetchone()[0] >= limit:
+                    return False
+            curs.execute('insert into task (queue, data, priority) '
+                         'values (?, ?, ?)',
+                         (self.name, self.to_blob(data), priority or 0))
+            return True
 
     def dequeue(self):
         # Quick check without the full exclusive lock.
