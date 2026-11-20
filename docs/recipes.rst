@@ -316,6 +316,72 @@ redis-py client and connection pool, and does not support redis-py's
 supported topology.
 
 
+.. _recipe-file-to-sqlite-migration:
+
+Migrating FileHuey to SqliteHuey Offline
+----------------------------------------
+
+Small deployments can move from :py:class:`FileHuey` to
+:py:class:`SqliteHuey` with a helper that is included in huey itself:
+
+.. code-block:: shell
+
+    # 1. Stop the consumers for both the old and the new queue.
+    # 2. Validate. This reads the source directory only.
+    python -m huey.migration check \
+        --source /srv/app/huey-data \
+        --destination /srv/app/huey.db \
+        --queue-name app \
+        --serialization pickle
+
+    # 3. See exactly what would be copied.
+    python -m huey.migration preview ... --json
+
+    # 4. Import, in one SQLite transaction.
+    python -m huey.migration run ... --migration-id 20261120-cutover
+
+    # 5. Confirm the destination matches the source.
+    python -m huey.migration verify ...
+
+The tool copies the *raw serialized bytes* of queued tasks, scheduled tasks,
+stored results, revocations, locks, rate-limit windows, chord state and
+identifiable counters into the four tables used by
+:py:class:`SqliteStorage`.  Task ids, priorities, ETAs and chain/chord
+associations are therefore preserved untouched.
+
+A few properties are worth knowing:
+
+* **No business code runs.** Envelopes are decoded with a restricted
+  unpickler that returns inert placeholders for anything outside a small
+  allow-list of primitive types. Unknown data is reported and blocks the
+  migration (or is explicitly copied/skipped with ``--unrecognized``).
+* **The destination is all-or-nothing.** Tasks, schedule entries, results,
+  counters and the migration metadata are written in a single transaction,
+  so an interrupted import leaves no half-consumable batch.
+* **Retries are safe.** The migration id and a content fingerprint of the
+  source are recorded in a ``huey_migration_meta`` table. Re-running the
+  same migration is a no-op; reusing an id against a changed source, or
+  importing into a populated database, is refused.
+* **The source is never modified**, so rolling back is a matter of pointing
+  the consumers back at the old directory.
+
+To inspect real business arguments (for example to confirm the migrated
+tasks are the ones you expect), use the explicit sampling command. It
+requires an opt-in flag because it runs the real unpickler::
+
+    python -m huey.migration sample ... --limit 3
+    python -m huey.migration sample ... --app myapp.huey --allow-unsafe-pickle
+
+``--locks=skip`` drops lock state (useful if the old process died holding
+locks), ``--counters=skip`` leaves unattributable counter files behind
+explicitly, and ``--strict-fifo`` creates the ``task`` table with
+``AUTOINCREMENT`` ids to match ``SqliteHuey(strict_fifo=True)``.
+
+A self-contained demonstration, including a simulated crash mid-import and a
+consumer resuming the migrated queue, is available with
+``python -m huey.migration demo``.
+
+
 .. _recipe-signed-serializer:
 
 Signed Serializer for Untrusted Environments
