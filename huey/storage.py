@@ -1,8 +1,10 @@
 from functools import cached_property
 import contextlib
+import datetime
 import hashlib
 import heapq
 import itertools
+import json
 import os
 import re
 import shutil
@@ -34,7 +36,14 @@ except ImportError:
 
 from huey.constants import EmptyData
 from huey.exceptions import ConfigurationError
+from huey.exceptions import RescheduleNotSupported
 from huey.utils import FileLock
+
+
+def _public_delivery(delivery):
+    # Strip internal bookkeeping (heap indexes, rowids) from the delivery
+    # metadata returned to the Huey layer / user.
+    return {k: v for k, v in delivery.items() if not k.startswith('_')}
 
 
 class BaseStorage(object):
@@ -43,6 +52,12 @@ class BaseStorage(object):
     """
     blocking = False  # Does dequeue() block until ready, or should we poll?
     priority = True
+    # When True, enqueue() / add_to_schedule() are called with a task_id
+    # keyword argument, and the storage tracks the task id alongside each
+    # delivery. Required to implement reschedule().
+    supports_task_ids = False
+    # When True, deliveries() and reschedule() are implemented atomically.
+    supports_reschedule = False
 
     def __init__(self, name='huey', **storage_kwargs):
         self.name = name
@@ -307,6 +322,60 @@ class BaseStorage(object):
         self.flush_results()
         self.flush_counters()
 
+    def deliveries(self, task_id):
+        """
+        Return metadata for every queued or scheduled delivery of the given
+        task id belonging to this queue, without modifying anything. Used by
+        :py:meth:`Huey.reschedule`.
+
+        :param str task_id: the task id to look for.
+        :return: list of dicts, each with keys ``task_id``, ``location``
+            (``'queue'`` or ``'schedule'``), ``priority``, ``eta`` (a datetime,
+            or ``None`` for queued tasks) and ``data`` (the opaque serialized
+            task, as bytes).
+        """
+        raise RescheduleNotSupported(
+            '%s does not support inspecting deliveries' % type(self).__name__)
+
+    def get_reschedule_operation(self, operation_id):
+        """
+        Return the recorded outcome of a previous reschedule that used the
+        given operation id, or ``None`` if it was never applied. Used to make
+        :py:meth:`Huey.reschedule` idempotent when the caller retries after a
+        crash or a lost response. The record is a dict containing at least
+        ``task_id``, ``location``, ``priority`` and ``eta``.
+        """
+        return None
+
+    def reschedule_task(self, task_id, expected, updated, location, eta,
+                        priority, operation_id=None):
+        """
+        Atomically replace the queued or scheduled delivery of ``task_id``.
+
+        The delivery must move in a single transaction: on return the original
+        delivery is gone and the replacement is visible, so the old and new
+        versions can never both be runnable. Implementations verify that the
+        current delivery still matches ``expected``; when it does not (because
+        a worker claimed it, or another writer changed it), nothing is modified
+        and ``None`` is returned.
+
+        :param str task_id: the task id being adjusted.
+        :param expected: list of dicts as returned by :py:meth:`deliveries`.
+        :param bytes updated: serialized replacement task data.
+        :param str location: ``'queue'`` or ``'schedule'``.
+        :param datetime eta: schedule time; ignored when ``location='queue'``.
+        :param float priority: priority column for a queued delivery.
+        :param str operation_id: optional stable idempotency key. Replaying the
+            same operation id for the same task returns the recorded outcome
+            instead of applying the change twice. Reusing it for a different
+            task raises :py:class:`RescheduleConflict`.
+        :return: dict with ``task_id``, ``status`` (``'rescheduled'`` or
+            ``'replayed'``), ``location``, ``priority`` and ``eta``; or
+            ``None`` if the delivery changed underneath the caller.
+        """
+        raise RescheduleNotSupported(
+            '%s does not support rescheduling' % type(self).__name__)
+
 
 class BlackHoleStorage(BaseStorage):
     def enqueue(self, data, priority=None): pass
@@ -333,6 +402,9 @@ class BlackHoleStorage(BaseStorage):
 
 
 class MemoryStorage(BaseStorage):
+    supports_task_ids = True
+    supports_reschedule = True
+
     def __init__(self, *args, **kwargs):
         super(MemoryStorage, self).__init__(*args, **kwargs)
         self._c = 0  # Counter to ensure FIFO behavior for queue.
@@ -340,18 +412,19 @@ class MemoryStorage(BaseStorage):
         self._results = {}
         self._schedule = []
         self._counters = {}
+        self._operations = {}  # operation_id -> result metadata.
         self._lock = threading.RLock()
 
-    def enqueue(self, data, priority=None):
+    def enqueue(self, data, priority=None, task_id=None):
         with self._lock:
             self._c += 1
             priority = 0 if priority is None else -priority
-            heapq.heappush(self._queue, (priority, self._c, data))
+            heapq.heappush(self._queue, (priority, self._c, data, task_id))
 
     def dequeue(self):
         with self._lock:
             try:
-                _, _, data = heapq.heappop(self._queue)
+                _, _, data, _ = heapq.heappop(self._queue)
             except IndexError:
                 pass
             else:
@@ -361,27 +434,30 @@ class MemoryStorage(BaseStorage):
         return len(self._queue)
 
     def enqueued_items(self, limit=None):
-        items = [data for _, _, data in sorted(self._queue)]
+        items = [e[2] for e in sorted(self._queue, key=lambda e: e[:2])]
         if limit:
             items = items[:limit]
         return items
 
     def flush_queue(self):
-        self._queue = []
-
-    def add_to_schedule(self, data, ts):
         with self._lock:
-            heapq.heappush(self._schedule, (ts, data))
+            self._queue = []
+
+    def add_to_schedule(self, data, ts, task_id=None):
+        with self._lock:
+            self._c += 1
+            heapq.heappush(self._schedule, (ts, self._c, data, task_id))
 
     def read_schedule(self, ts):
         with self._lock:
             accum = []
             while self._schedule:
-                sts, data = heapq.heappop(self._schedule)
+                entry = heapq.heappop(self._schedule)
+                sts, idx, data, tid = entry
                 if sts <= ts:
                     accum.append(data)
                 else:
-                    heapq.heappush(self._schedule, (sts, data))
+                    heapq.heappush(self._schedule, entry)
                     break
 
         return accum
@@ -390,13 +466,98 @@ class MemoryStorage(BaseStorage):
         return len(self._schedule)
 
     def scheduled_items(self, limit=None):
-        items = [data for _, data in sorted(self._schedule)]
+        items = [e[2] for e in sorted(self._schedule, key=lambda e: e[:2])]
         if limit:
             items = items[:limit]
         return items
 
     def flush_schedule(self):
-        self._schedule = []
+        with self._lock:
+            self._schedule = []
+
+    def _delivery_items(self, task_id):
+        # Internal helper: also records the heap entry index so the delivery
+        # can be removed without disturbing other queued tasks.
+        accum = []
+        for priority, idx, data, tid in self._queue:
+            if tid == task_id:
+                accum.append({'task_id': tid, 'location': 'queue',
+                              'priority': -priority, 'eta': None,
+                              'data': data, '_entry': ('queue', idx)})
+        for ts, idx, data, tid in self._schedule:
+            if tid == task_id:
+                accum.append({'task_id': tid, 'location': 'schedule',
+                              'priority': None, 'eta': ts, 'data': data,
+                              '_entry': ('schedule', idx)})
+        return accum
+
+    def deliveries(self, task_id):
+        with self._lock:
+            return [_public_delivery(d) for d in self._delivery_items(task_id)]
+
+    def get_reschedule_operation(self, operation_id):
+        with self._lock:
+            cached = self._operations.get(operation_id)
+            return None if cached is None else dict(cached)
+
+    def reschedule_task(self, task_id, expected, updated, location, eta,
+                        priority, operation_id=None):
+        with self._lock:
+            if operation_id is not None:
+                cached = self._operations.get(operation_id)
+                if cached is not None:
+                    if cached['task_id'] != task_id:
+                        raise RescheduleConflict(
+                            operation_id, task_id, cached['task_id'])
+                    result = dict(cached)
+                    result['status'] = 'replayed'
+                    return result
+
+            current = self._delivery_items(task_id)
+            if not self._same_deliveries(current, expected):
+                return None
+
+            # Ambiguity is reported by the Huey layer; do not guess here.
+            if len(current) != 1:
+                return None
+
+            kind, idx = current[0]['_entry']
+            if kind == 'queue':
+                self._queue[:] = [e for e in self._queue if e[1] != idx]
+                heapq.heapify(self._queue)
+            else:
+                self._schedule[:] = [e for e in self._schedule
+                                     if e[1] != idx]
+                heapq.heapify(self._schedule)
+
+            self._c += 1
+            if location == 'schedule':
+                heapq.heappush(self._schedule,
+                               (eta, self._c, updated, task_id))
+                priority = None
+            else:
+                priority = 0.0 if priority is None else float(priority)
+                heapq.heappush(self._queue,
+                               (0 - priority, self._c, updated, task_id))
+
+            result = {'task_id': task_id, 'status': 'rescheduled',
+                      'location': location, 'priority': priority,
+                      'eta': eta if location == 'schedule' else None,
+                      'operation_id': operation_id}
+            if operation_id is not None:
+                self._operations[operation_id] = dict(result)
+            return dict(result)
+
+    def _same_deliveries(self, current, expected):
+        if len(current) != len(expected):
+            return False
+        for a, b in zip(current, expected):
+            if (a['location'] != b['location'] or
+                    a['data'] != b.get('data') or
+                    a['priority'] != b.get('priority') or
+                    a['eta'] != b.get('eta')):
+                return False
+        return True
 
     def put_data(self, key, value, is_result=False):
         self._results[key] = value
@@ -791,6 +952,10 @@ class PriorityRedisExpireStorage(RedisPriorityQueue, RedisExpireStorage): pass
 class BaseSqlStorage(BaseStorage):
     begin_sql = 'begin'
     ddl = []
+    # Statements/columns are only overridden by backends that need to upgrade
+    # pre-existing databases in initialize_schema().
+    ddl_post_migrate = []
+    migrate_columns = ()
 
     def __init__(self, *args, **kwargs):
         create_tables = kwargs.pop('create_tables', True)
@@ -840,6 +1005,15 @@ class BaseSqlStorage(BaseStorage):
         with self.db(commit=True, close=True) as curs:
             for sql in self.ddl:
                 curs.execute(sql)
+            self._migrate_schema(curs)
+            for sql in self.ddl_post_migrate:
+                curs.execute(sql)
+
+    def _migrate_schema(self, curs):
+        for table, column, sql in self.migrate_columns:
+            curs.execute('select name from pragma_table_info(?)', (table,))
+            if column not in [row[0] for row in curs.fetchall()]:
+                curs.execute(sql)
 
     def sql(self, query, params=None, commit=False, results=False):
         with self.db(commit=commit) as curs:
@@ -852,26 +1026,47 @@ class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
     integrity_error = getattr(sqlite3, 'IntegrityError', None)
     operational_error = getattr(sqlite3, 'OperationalError', None)
+    supports_task_ids = True
+    supports_reschedule = True
     table_kv = ('create table if not exists kv ('
                 'queue text not null, key text not null, value blob not null, '
                 'primary key(queue, key))')
     table_sched = ('create table if not exists schedule ('
                    'id integer not null primary key, queue text not null, '
-                   'data blob not null, timestamp real not null)')
+                   'data blob not null, timestamp real not null, '
+                   'task_id text not null default \'\')')
     index_sched = ('create index if not exists schedule_queue_timestamp '
                    'on schedule (queue, timestamp)')
+    index_sched_task = ('create index if not exists schedule_queue_task_id '
+                        'on schedule (queue, task_id)')
     table_task = ('create table if not exists task ('
                   'id integer not null primary key, queue text not null, '
-                  'data blob not null, priority real not null default 0.0)')
+                  'data blob not null, priority real not null default 0.0, '
+                  'task_id text not null default \'\')')
     index_task = ('create index if not exists task_queue_priority_id on task '
                   '(queue, priority desc, id)')
+    index_task_task = ('create index if not exists task_queue_task_id '
+                       'on task (queue, task_id)')
     drop_index_task = 'drop index if exists task_priority_id'  # Old index.
     table_counter = ('create table if not exists counter ('
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
+    table_reschedule_op = ('create table if not exists reschedule_op ('
+                           'queue text not null, op_id text not null, '
+                           'task_id text not null, result text not null, '
+                           'primary key(queue, op_id))')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           table_counter, drop_index_task, table_reschedule_op]
+    # Added after 3.5.4. These are created by initialize_schema() after any
+    # missing "task_id" column has been added to a pre-existing database.
+    ddl_post_migrate = [index_sched_task, index_task_task]
+    migrate_columns = (
+        ('schedule', 'task_id',
+         'alter table schedule add column task_id text not null default \'\''),
+        ('task', 'task_id',
+         'alter table task add column task_id text not null default \'\''),
+    )
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
@@ -929,9 +1124,11 @@ class SqliteStorage(BaseSqlStorage):
                     raise
                 time.sleep(0.01)
 
-    def enqueue(self, data, priority=None):
-        self.sql('insert into task (queue, data, priority) values (?, ?, ?)',
-                 (self.name, self.to_blob(data), priority or 0), commit=True)
+    def enqueue(self, data, priority=None, task_id=None):
+        self.sql('insert into task (queue, data, priority, task_id) '
+                 'values (?, ?, ?, ?)',
+                 (self.name, self.to_blob(data), priority or 0, task_id or ''),
+                 commit=True)
 
     def dequeue(self):
         # Quick check without the full exclusive lock.
@@ -965,10 +1162,10 @@ class SqliteStorage(BaseSqlStorage):
     def flush_queue(self):
         self.sql('delete from task where queue=?', (self.name,), commit=True)
 
-    def add_to_schedule(self, data, ts):
-        params = (self.name, self.to_blob(data), ts.timestamp())
-        self.sql('insert into schedule (queue, data, timestamp) '
-                 'values (?, ?, ?)', params, commit=True)
+    def add_to_schedule(self, data, ts, task_id=None):
+        params = (self.name, self.to_blob(data), ts.timestamp(), task_id or '')
+        self.sql('insert into schedule (queue, data, timestamp, task_id) '
+                 'values (?, ?, ?, ?)', params, commit=True)
 
     def read_schedule(self, ts):
         with self.db(commit=True) as curs:
@@ -977,8 +1174,8 @@ class SqliteStorage(BaseSqlStorage):
                          'queue = ? and timestamp <= ? order by timestamp, id',
                          params)
             id_list, data = [], []
-            for task_id, task_data in curs.fetchall():
-                id_list.append(task_id)
+            for row_id, task_data in curs.fetchall():
+                id_list.append(row_id)
                 data.append(task_data)
             for i in range(0, len(id_list), 500):
                 chunk = id_list[i:i + 500]
@@ -1001,6 +1198,119 @@ class SqliteStorage(BaseSqlStorage):
 
     def flush_schedule(self):
         self.sql('delete from schedule where queue = ?', (self.name,), True)
+
+    def _deliveries(self, curs, task_id):
+        accum = []
+        curs.execute('select id, priority, data from task '
+                     'where queue = ? and task_id = ? order by id',
+                     (self.name, task_id))
+        for row_id, priority, data in curs.fetchall():
+            accum.append({'task_id': task_id, 'location': 'queue',
+                          'priority': priority, 'eta': None,
+                          'data': bytes(data), '_row_id': row_id})
+        curs.execute('select id, timestamp, data from schedule '
+                     'where queue = ? and task_id = ? order by id',
+                     (self.name, task_id))
+        for row_id, ts, data in curs.fetchall():
+            eta = datetime.datetime.fromtimestamp(ts)
+            accum.append({'task_id': task_id, 'location': 'schedule',
+                          'priority': None, 'eta': eta, 'data': bytes(data),
+                          '_row_id': row_id})
+        return accum
+
+    def deliveries(self, task_id):
+        with self.db() as curs:
+            return [_public_delivery(d)
+                    for d in self._deliveries(curs, task_id)]
+
+    def get_reschedule_operation(self, operation_id):
+        rows = self.sql('select task_id, result from reschedule_op '
+                        'where queue = ? and op_id = ?',
+                        (self.name, operation_id), results=True)
+        if not rows:
+            return None
+        task_id, result = rows[0]
+        record = json.loads(result)
+        record['task_id'] = task_id
+        return record
+
+    def reschedule_task(self, task_id, expected, updated, location, eta,
+                        priority, operation_id=None):
+        with self.db(commit=True) as curs:
+            if operation_id is not None:
+                curs.execute('select task_id, result from reschedule_op '
+                             'where queue = ? and op_id = ?',
+                             (self.name, operation_id))
+                row = curs.fetchone()
+                if row is not None:
+                    op_task_id, result = row
+                    if op_task_id != task_id:
+                        raise RescheduleConflict(
+                            operation_id, task_id, op_task_id)
+                    result = json.loads(result)
+                    result['status'] = 'replayed'
+                    result['operation_id'] = operation_id
+                    return result
+
+            current = self._deliveries(curs, task_id)
+            if not self._same_deliveries(current, expected):
+                return None
+
+            # Ambiguous (more than one) deliveries are reported by the Huey
+            # layer; do not guess here.
+            if len(current) != 1:
+                return None
+
+            delivery = current[0]
+            if delivery['location'] == 'queue':
+                curs.execute('delete from task where id = ?',
+                             (delivery['_row_id'],))
+                old_priority = delivery['priority']
+            else:
+                curs.execute('delete from schedule where id = ?',
+                             (delivery['_row_id'],))
+                old_priority = None
+
+            if location == 'schedule':
+                curs.execute('insert into schedule (queue, data, '
+                             'timestamp, task_id) values (?, ?, ?, ?)',
+                             (self.name, self.to_blob(updated),
+                              eta.timestamp(), task_id))
+                result_priority = None
+            else:
+                if priority is not None:
+                    result_priority = float(priority)
+                elif old_priority is not None:
+                    result_priority = old_priority
+                else:
+                    result_priority = 0.0
+                curs.execute('insert into task (queue, data, priority, '
+                             'task_id) values (?, ?, ?, ?)',
+                             (self.name, self.to_blob(updated),
+                              result_priority, task_id))
+
+            result = {'task_id': task_id, 'status': 'rescheduled',
+                      'location': location, 'priority': result_priority,
+                      'eta': eta if location == 'schedule' else None,
+                      'operation_id': operation_id}
+            if operation_id is not None:
+                curs.execute('insert into reschedule_op '
+                             '(queue, op_id, task_id, result) '
+                             'values (?, ?, ?, ?)',
+                             (self.name, operation_id, task_id,
+                              json.dumps(result, default=str)))
+            return dict(result)
+
+    def _same_deliveries(self, current, expected):
+        if len(current) != len(expected):
+            return False
+        for a, b in zip(current, expected):
+            if (a['location'] != b['location'] or
+                    a['data'] != b.get('data') or
+                    a['priority'] != b.get('priority') or
+                    a['eta'] != b.get('eta')):
+                return False
+        return True
 
     def put_data(self, key, value, is_result=False):
         self.sql('insert or replace into kv (queue, key, value) '

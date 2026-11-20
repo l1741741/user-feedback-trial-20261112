@@ -128,6 +128,7 @@ class Worker(BaseProcess):
             if task is not None:
                 self.delay = self.default_delay
                 self.task_count += 1
+                self._claim_task(task)
                 try:
                     self.huey.execute(task, now)
                 except Exception:
@@ -139,6 +140,14 @@ class Worker(BaseProcess):
                     raise WorkerRecycle()
             elif not self.huey.storage.blocking:
                 self.sleep()
+
+    def _claim_task(self, task):
+        # Test hook: called after the task has been atomically removed from
+        # the queue, but before it executes. Lets tests interleave a
+        # reschedule attempt with a claimed delivery deterministically.
+        hook = getattr(self.huey, '_on_task_claimed', None)
+        if hook is not None:
+            hook(task)
 
     def sleep(self):
         if self.delay > self.max_delay:

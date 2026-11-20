@@ -797,6 +797,98 @@ Huey object
             :py:meth:`~Huey.enqueue` directly when working with pipelines,
             groups, or chords.
 
+    .. py:method:: reschedule(task_id, eta=None, delay=None, priority=None, operation_id=None)
+
+        :param str task_id: id of the task to adjust.
+        :param datetime eta: new execution time. A time at or before "now"
+            moves the delivery to the queue for immediate execution.
+        :param delay: seconds from now (or a ``timedelta``) at which to run the
+            task. Mutually exclusive with ``eta``.
+        :param float priority: new priority (higher runs first). ``None``
+            preserves the existing value.
+        :param str operation_id: optional stable identifier for this change.
+        :returns: a :py:class:`RescheduleResult`.
+
+        Adjust an **existing queued or scheduled delivery in place**, keeping
+        its task id. Because the id does not change, the :py:class:`Result`
+        handle returned when the task was enqueued still refers to it, as do
+        retry counters, the ``on_complete`` / ``on_error`` pipeline, chord
+        membership, expiration and revocation state. This differs from
+        :py:meth:`Result.reschedule`, which revokes the original task and
+        enqueues a replacement with a *new* id.
+
+        This is the intended entry point for operators who need to run a
+        pending task sooner, push it back, or change its priority without
+        re-creating it.
+
+        Only a delivery that is still **in the queue or in the schedule** can
+        be adjusted. Once a worker has claimed a delivery (atomically removed
+        it), or if the task already ran or never existed,
+        :py:class:`TaskNotReschedulable` is raised and nothing is modified. If
+        more than one delivery exists for the id, that is reported rather than
+        guessing which one to move. Concurrent execution is arbitrated by a
+        single storage transaction: either the change applies to this delivery,
+        or it fails because the delivery was claimed -- the old and new versions
+        are never both runnable.
+
+        Moving a delivery across its ETA (for example from the schedule to the
+        queue) is done in one transaction, so the task can never be present in
+        both locations at once. Passing an ``eta`` in the past (or ``delay=0``)
+        queues the task to run as soon as a worker sees it.
+
+        ``operation_id`` makes the call idempotent: if the response is lost
+        after the database commit, retrying with the same operation id for the
+        same task returns the recorded outcome (``status == 'replayed'``)
+        instead of moving the task a second time. Reusing the id for a different
+        task raises :py:class:`RescheduleConflict`.
+
+        Invalid ``eta`` / ``delay`` / ``priority`` values are rejected
+        (``ValueError``) before anything is modified.
+
+        .. note::
+            Available for :py:class:`SqliteHuey`, :py:class:`CySqliteHuey` and
+            the in-memory storage. Other storages raise
+            :py:class:`RescheduleNotSupported`. CySqliteHuey shares the SQLite
+            storage layout and migration path.
+
+        .. code-block:: python
+
+            # Run a task that was scheduled for later, right away.
+            huey.reschedule(task_id, delay=0)
+
+            # Push a queued task back by ten minutes and raise its priority.
+            huey.reschedule(task_id, delay=600, priority=10)
+
+            # Safe to retry after a crash: the operation id records the result.
+            huey.reschedule(task_id, delay=0, operation_id='run-now-42')
+
+    .. py:method:: preview_reschedule(task_id, eta=None, delay=None, priority=None)
+
+        :param str task_id: id of the task to inspect.
+        :returns: a :py:class:`ReschedulePreview`.
+
+        Describe what :py:meth:`reschedule` would do for ``task_id`` without
+        modifying the queue or schedule. Applies the same argument validation.
+        ``ReschedulePreview.reschedulable`` is ``False`` with a ``reason`` of
+        ``'not_found'``, ``'ambiguous'``, or ``'undeserializable'`` when the
+        delivery cannot be adjusted.
+
+    .. py:method:: reschedule_many(task_ids, eta=None, delay=None, priority=None, operation_id_prefix=None)
+
+        :param task_ids: iterable of task ids.
+        :param eta: new execution time (see :py:meth:`reschedule`).
+        :param delay: new relative delay (see :py:meth:`reschedule`).
+        :param priority: new priority (see :py:meth:`reschedule`).
+        :param str operation_id_prefix: optional prefix. Each item uses
+            ``'<prefix>:<task id>'`` as its operation id.
+        :returns: a :py:class:`RescheduleBatch`.
+
+        Apply the same adjustment to several task ids. Each item is applied in
+        its own transaction and a failure for one item does **not** roll back
+        items that already succeeded -- the batch is **not atomic**. Every
+        requested id appears in exactly one of ``RescheduleBatch.results`` or
+        ``RescheduleBatch.errors``.
+
     .. py:method:: revoke(task, revoke_until=None, revoke_once=False)
 
         .. seealso:: Use :py:meth:`Result.revoke` instead.
@@ -1876,7 +1968,9 @@ Huey object
     list. See :ref:`groups-and-chords` in the guide for a detailed example.
 
 
-.. py:class:: ChordResult(results, callback_result, pipeline=None)
+.. py:class:: ChordResult
+
+(results, callback_result, pipeline=None)
 
     Returned by :py:meth:`Huey.enqueue` when enqueueing a :py:class:`chord`.
     Provides access to the individual member results, the callback result,
@@ -1924,6 +2018,119 @@ Huey object
 
         Reset the callback result and allow re-fetching a new result for the
         given task (i.e. after a task error and subsequent retry).
+
+Reschedule results
+------------------
+
+The objects below are returned by :py:meth:`Huey.reschedule`,
+:py:meth:`Huey.preview_reschedule` and :py:meth:`Huey.reschedule_many`. They
+are plain data objects; see those methods for the behavior that produces them.
+
+.. py:class:: RescheduleResult
+
+    The outcome of a single :py:meth:`Huey.reschedule` call.
+
+    .. py:attribute:: task_id
+
+        The task id (unchanged by rescheduling).
+
+    .. py:attribute:: status
+
+        One of ``'rescheduled'`` (same storage location), ``'queued'`` (moved
+        from the schedule to the queue), ``'scheduled'`` (moved from the queue
+        to the schedule), or ``'replayed'`` (the operation id had already been
+        applied and the recorded outcome is returned).
+
+    .. py:attribute:: location
+
+        ``'queue'`` or ``'schedule'`` -- where the delivery now lives.
+
+    .. py:attribute:: eta
+
+        The new execution time (a ``datetime``), or ``None`` for a delivery in
+        the queue.
+
+    .. py:attribute:: priority
+
+        The effective queue priority, or ``None`` when the task is scheduled
+        for the future.
+
+    .. py:attribute:: operation_id
+
+        The operation id, if one was supplied.
+
+    .. py:attribute:: previous
+
+        The delivery snapshots that were replaced.
+
+    .. py:attribute:: task
+
+        The deserialized :py:class:`Task` that was written back, if available.
+
+    .. py:method:: as_dict()
+
+        Return a JSON-friendly dict of the outcome.
+
+.. py:class:: ReschedulePreview
+
+    Returned by :py:meth:`Huey.preview_reschedule`. Describes what a reschedule
+    would do, without changing anything.
+
+    .. py:attribute:: reschedulable
+
+        ``True`` if the delivery could be adjusted.
+
+    .. py:attribute:: reason
+
+        When ``reschedulable`` is ``False``, one of ``'not_found'``,
+        ``'ambiguous'`` or ``'undeserializable'``. Otherwise ``None``.
+
+    .. py:attribute:: previous
+
+        The current delivery snapshots.
+
+    .. py:attribute:: location
+
+        The location the delivery would move to (``'queue'`` or
+        ``'schedule'``), or ``None`` if not reschedulable.
+
+    .. py:attribute:: eta
+
+        The eta the delivery would be given, or ``None``.
+
+    .. py:attribute:: priority
+
+        The priority the delivery would have, or ``None``.
+
+    .. py:method:: as_dict()
+
+        Return a JSON-friendly dict of the preview.
+
+.. py:class:: RescheduleBatch
+
+    Returned by :py:meth:`Huey.reschedule_many`.
+
+    .. py:attribute:: results
+
+        List of :py:class:`RescheduleResult` for the ids that were adjusted.
+
+    .. py:attribute:: errors
+
+        List of :py:class:`RescheduleItemError` for the ids that were not.
+
+    .. py:method:: ok()
+
+        ``True`` when every requested id succeeded.
+
+    .. py:method:: as_dict()
+
+        Return a JSON-friendly dict of ``results`` and ``errors``.
+
+.. py:class:: RescheduleItemError
+
+    A per-item failure in a :py:class:`RescheduleBatch`. ``task_id`` is the id
+    that failed, ``error`` is the exception instance, and ``as_dict()`` returns
+    a JSON-friendly summary including ``reason`` where applicable.
 
 Result
 ------
@@ -2114,7 +2321,6 @@ Result
     you use the :py:meth:`TaskWrapper.map` method. It is a simple wrapper
     around a number of individual :py:meth:`Result` instances, and provides a
     convenience API for fetching the results in bulk.
-
     .. py:method:: get(*args, **kwargs)
 
         Call :py:meth:`~Result.get` on each individual :py:meth:`Result`
@@ -2283,6 +2489,36 @@ Exceptions
 .. py:class:: TaskLockedException
 
     Raised by the consumer when a task lock cannot be acquired.
+
+.. py:class:: RescheduleError
+
+    Base class for errors raised by :py:meth:`Huey.reschedule` and
+    :py:meth:`Huey.reschedule_many`.
+
+.. py:class:: RescheduleNotSupported
+
+    Raised when the configured storage backend does not support in-place
+    rescheduling (anything other than :py:class:`SqliteHuey`,
+    :py:class:`CySqliteHuey` and the in-memory storage).
+
+.. py:class:: TaskNotReschedulable(task_id, reason='not_found')
+
+    Raised when a delivery cannot be adjusted. ``reason`` is one of:
+
+    * ``'not_found'`` -- no delivery exists for the id in this queue. It may
+      have been claimed by a worker, already run, or never existed (including
+      if the id belongs to a different queue).
+    * ``'ambiguous'`` -- more than one delivery exists for the id; Huey will not
+      guess which one to change.
+    * ``'undeserializable'`` -- the stored message could not be read back, so it
+      cannot be safely rewritten.
+
+    When this is raised, nothing has been modified.
+
+.. py:class:: RescheduleConflict(operation_id, task_id, existing_task_id)
+
+    Raised when an ``operation_id`` that was previously used to adjust a
+    different task is reused. Operation ids are unique per queue.
 
 .. py:class:: ResultTimeout
 

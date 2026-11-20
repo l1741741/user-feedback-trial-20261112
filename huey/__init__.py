@@ -17,6 +17,13 @@ from huey.api import chord
 from huey.api import crontab
 from huey.api import group
 from huey.exceptions import CancelExecution
+from huey.exceptions import RescheduleConflict
+from huey.exceptions import RescheduleNotSupported
 from huey.exceptions import RetryTask
+from huey.exceptions import TaskNotReschedulable
+from huey.reschedule import RescheduleBatch
+from huey.reschedule import RescheduleItemError
+from huey.reschedule import ReschedulePreview
+from huey.reschedule import RescheduleResult
 from huey.utils import Error
 from huey.utils import SKIPPED

@@ -61,12 +61,16 @@ handler beyond the standard ``(signal, task)`` pair.
    * - ``SIGNAL_TIMEOUT``
      - Task exceeded its execution timeout.
      - None
-   * - ``SIGNAL_RATE_LIMITED``
-     - Task was rate-limited by a :py:meth:`Huey.rate_limit`.
+   * - ``SIGNAL_RATE_LIMITED``     - Task was rate-limited by a :py:meth:`Huey.rate_limit`.
      - None
    * - ``SIGNAL_INTERRUPTED``
      - Consumer was shut down while the task was still executing (e.g., via
        ``SIGTERM``).
+     - None
+   * - ``SIGNAL_RESCHEDULED``
+     - A queued or scheduled delivery was adjusted in place by
+       :py:meth:`Huey.reschedule`. Emitted in the process that performs the
+       change (typically an operator's CLI invocation, not the consumer).
      - None
 
 Signal Ordering

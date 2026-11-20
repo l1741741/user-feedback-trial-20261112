@@ -4,6 +4,38 @@ class TaskLockedException(HueyException): pass
 class ResultTimeout(HueyException): pass
 class TaskTimeout(HueyException): pass
 
+
+class RescheduleError(HueyException): pass
+class RescheduleNotSupported(RescheduleError): pass
+
+class TaskNotReschedulable(RescheduleError):
+    """
+    Raised when a task delivery can no longer be adjusted, because it is not
+    present in the queue or schedule for this queue (it was already claimed by
+    a worker, already ran, or never existed), or because more than one delivery
+    exists for the requested task id.
+
+    ``reason`` is one of ``'not_found'`` or ``'ambiguous'``.
+    """
+    def __init__(self, task_id, reason='not_found'):
+        self.task_id = task_id
+        self.reason = reason
+        super(TaskNotReschedulable, self).__init__(
+            'task %s cannot be rescheduled (%s)' % (task_id, reason))
+
+class RescheduleConflict(RescheduleError):
+    """
+    Raised when an operation id was already used to reschedule a different
+    task. Operation ids are unique per queue and per task.
+    """
+    def __init__(self, operation_id, task_id, existing_task_id):
+        self.operation_id = operation_id
+        self.task_id = task_id
+        self.existing_task_id = existing_task_id
+        super(RescheduleConflict, self).__init__(
+            'operation "%s" was already used for task %s, not %s' % (
+                operation_id, existing_task_id, task_id))
+
 class RateLimitExceeded(HueyException):
     def __init__(self, key, delay, retry=True):
         self.key, self.delay, self.retry = key, delay, retry

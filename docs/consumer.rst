@@ -184,6 +184,104 @@ granularity of 60 seconds.
 
     huey_consumer my.app.huey -w 50 -k greenlet -C -s 60
 
+.. _reschedule-cli:
+
+Adjusting a queued task from the command line
+---------------------------------------------
+
+Operators sometimes need to run a pending task sooner, push it back, or change
+its priority without re-creating it. The ``huey_reschedule`` command adjusts an
+**existing** delivery in place and keeps its task id, so the original
+:py:class:`Result` handle (and the task's parameters, retry budget, pipeline,
+expiration and revocation state) all continue to refer to it.
+
+.. code-block:: shell
+
+    huey_reschedule my.app.huey --id 0d4f2c1e-... --delay 0
+
+Common options:
+
+``-i``, ``--id``
+    The task id, or a comma-separated list of ids. With several ids the same
+    adjustment is applied to each independently (see *partial failures* below).
+
+``-e``, ``--eta``
+    New absolute execution time, ISO-8601. A time at or before now moves the
+    task to the front of the queue.
+
+``-d``, ``--delay``
+    Run again after this many seconds. ``--delay 0`` means "as soon as a worker
+    picks it up". Mutually exclusive with ``--eta``.
+
+``-p``, ``--priority``
+    New priority. Higher numbers run first. Omit to keep the existing priority.
+
+``-o``, ``--operation-id``
+    A stable identifier for this change, so the command can be safely retried
+    after a crash or a lost response. Re-running with the same id returns the
+    previously recorded outcome instead of moving the task again. Applies to a
+    single id; reuse for a *different* task is refused.
+
+``-n``, ``--dry-run``
+    Show what would happen without changing the queue or schedule.
+
+``-j``, ``--json``
+    Emit machine-readable output.
+
+Examples:
+
+.. code-block:: shell
+
+    # Inspect first -- this never modifies anything.
+    huey_reschedule my.app.huey --id 0d4f... --delay 0 --dry-run
+
+    # Move a task scheduled for tonight to run now.
+    huey_reschedule my.app.huey --id 0d4f... --delay 0
+
+    # Push a queued task back ten minutes and raise its priority.
+    huey_reschedule my.app.huey --id 0d4f... --delay 600 --priority 10
+
+    # Safe to retry: the operation id records the result at the database.
+    huey_reschedule my.app.huey --id 0d4f... --delay 0 --operation-id run-42
+
+What can and cannot be adjusted
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Only a delivery that is still **in the queue or in the schedule** can be
+adjusted. If a worker has already claimed the task (atomically removed it),
+or if it already ran or never existed, the command reports
+``NOT RESCHEDULABLE (not_found)`` and exits non-zero. When a reschedule races
+with a consumer, exactly one of them wins: either the task is adjusted, or the
+reschedule reports that it can no longer be adjusted -- the old and new
+versions can never both run.
+
+If more than one delivery exists for an id, the command reports
+``ambiguous`` rather than guessing which one to move. An id belonging to a
+different queue on the same database is never touched.
+
+Invalid times and priorities (negative delays, non-numeric or non-finite
+priorities, malformed timestamps) are rejected before anything is changed.
+
+Idempotency and lost responses
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Every change is a single database transaction, so a failure either applies the
+whole move or nothing. If the process is interrupted *after* the commit but
+before the response reaches the operator, retry with the same
+``--operation-id``: the command returns the recorded outcome
+(``status: replayed``) instead of applying the change twice.
+
+Partial failures
+^^^^^^^^^^^^^^^^
+
+When several ids are given, each is applied in its own transaction. A failure
+for one id does **not** roll back ids that already succeeded. The output lists
+every id, so the boundary of what changed is explicit; the batch is not
+atomic.
+
+Exit codes: ``0`` success, ``1`` invalid arguments, ``2`` one or more ids could
+not be adjusted.
+
 .. _worker-types:
 
 Worker types

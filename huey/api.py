@@ -18,14 +18,26 @@ from huey.constants import EmptyData
 from huey.consumer import Consumer
 from huey.exceptions import CancelExecution
 from huey.exceptions import ConfigurationError
+from huey.exceptions import HueyException
 from huey.exceptions import RateLimitExceeded
 from huey.exceptions import RETRYING_EXCEPTIONS
+from huey.exceptions import RescheduleConflict
+from huey.exceptions import RescheduleNotSupported
 from huey.exceptions import ResultTimeout
 from huey.exceptions import RetryTask
 from huey.exceptions import TaskException
 from huey.exceptions import TaskLockedException
+from huey.exceptions import TaskNotReschedulable
 from huey.exceptions import TaskTimeout
 from huey.registry import Registry
+from huey.reschedule import normalize_eta
+from huey.reschedule import RescheduleBatch
+from huey.reschedule import RescheduleItemError
+from huey.reschedule import ReschedulePreview
+from huey.reschedule import RescheduleResult
+from huey.reschedule import UNCHANGED
+from huey.reschedule import validate_operation_id
+from huey.reschedule import validate_priority
 from huey.serializer import Serializer
 from huey.storage import BlackHoleStorage
 from huey.storage import CySqliteStorage
@@ -316,13 +328,20 @@ class Huey(object):
         if self._immediate:
             self.execute(task)
         else:
-            self.storage.enqueue(self.serialize_task(task), task.priority)
+            self._enqueue_task(task)
 
         if not self.results:
             return
 
         results = self._pipeline_results(task)
         return ResultGroup(results) if len(results) > 1 else results[0]
+
+    def _enqueue_task(self, task):
+        if self.storage.supports_task_ids:
+            self.storage.enqueue(self.serialize_task(task), task.priority,
+                                 task_id=task.id)
+        else:
+            self.storage.enqueue(self.serialize_task(task), task.priority)
 
     def _enqueue_chord(self, chord_obj):
         cid = str(uuid.uuid4())
@@ -698,7 +717,10 @@ class Huey(object):
     def add_schedule(self, task):
         data = self.serialize_task(task)
         eta = task.eta or datetime.datetime.fromtimestamp(0)
-        self.storage.add_to_schedule(data, eta)
+        if self.storage.supports_task_ids:
+            self.storage.add_to_schedule(data, eta, task_id=task.id)
+        else:
+            self.storage.add_to_schedule(data, eta)
         logger.info('Added task %s to schedule, eta %s', task.id, eta)
         self._emit(S.SIGNAL_SCHEDULED, task)
 
@@ -738,6 +760,251 @@ class Huey(object):
 
     def scheduled_count(self):
         return self.storage.schedule_size()
+
+    def _get_deliveries(self, task_id):
+        if not self.storage.supports_reschedule:
+            raise RescheduleNotSupported(
+                '%s does not support rescheduling tasks' %
+                type(self.storage).__name__)
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError('task id must be a non-empty string')
+        return self.storage.deliveries(task_id)
+
+    def _target_plan(self, delivery, task, eta, priority):
+        """
+        Decide where the replacement belongs and what its message fields should
+        be.
+
+        A target eta at or before "now" belongs in the queue, because a worker
+        executes a queued delivery as soon as it sees it. Note that a task
+        created with ``schedule(delay=...)`` starts life in the queue carrying
+        a future eta; the worker moves it to the schedule. When the caller does
+        not request a new time, both the storage location and the task's own
+        eta are preserved so we do not accidentally make a future task run
+        immediately.
+        """
+        now = self._get_timestamp()
+        if eta is UNCHANGED:
+            location = delivery['location']
+            new_eta = task.eta
+        elif eta is None or eta <= now:
+            location = 'queue'
+            new_eta = eta
+        else:
+            location = 'schedule'
+            new_eta = eta
+
+        new_priority = (task.priority if priority is None else priority)
+        return location, new_eta, new_priority
+
+    def _load_delivery_task(self, delivery):
+        task = self.deserialize_task(delivery['data'])
+        if delivery['location'] == 'schedule':
+            # The schedule row's timestamp is authoritative for the eta.
+            task.eta = delivery['eta']
+        return task
+
+    def _check_operation(self, task_id, operation_id):
+        if operation_id is None or not hasattr(self.storage,
+                                               'get_reschedule_operation'):
+            return None
+        record = self.storage.get_reschedule_operation(operation_id)
+        if record is None:
+            return None
+        if record.get('task_id') != task_id:
+            raise RescheduleConflict(operation_id, task_id,
+                                     record.get('task_id'))
+        return record
+
+    def reschedule(self, task_id, eta=None, delay=None, priority=None,
+                   operation_id=None):
+        """
+        Adjust an existing queued or scheduled delivery in place, keeping its
+        task id -- and therefore its :py:class:`Result` association -- intact.
+
+        Only a delivery that is still in the queue or in the schedule can be
+        adjusted. Once a worker has claimed the delivery, or if it already ran
+        or never existed, :py:class:`TaskNotReschedulable` is raised. If more
+        than one delivery exists for the id, that is also reported rather than
+        guessing which one to change. Concurrent execution is arbitrated by the
+        storage layer: either the adjustment is applied to this delivery, or it
+        raises because the delivery was claimed.
+
+        :param str task_id: id of the task to adjust.
+        :param datetime eta: new execution time. An ``eta`` in the past or at
+            the present moves the delivery to the queue for immediate
+            execution. If omitted (and no ``delay``), the current location is
+            preserved.
+        :param delay: seconds from now (or a timedelta) at which to run the
+            task. Mutually exclusive with ``eta``.
+        :param priority: new priority. ``None`` preserves the existing value.
+        :param str operation_id: optional stable identifier for this change. If
+            the same operation id is applied again for the same task, the
+            recorded outcome is returned rather than applying the change twice;
+            reusing it for a different task raises :py:class:`RescheduleConflict`.
+        :returns: :py:class:`RescheduleResult`.
+        """
+        validated_eta = normalize_eta(self, eta, delay)
+        validated_priority = validate_priority(priority)
+        operation_id = validate_operation_id(operation_id)
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError('task id must be a non-empty string')
+
+        if validated_eta is UNCHANGED and validated_priority is None:
+            raise ValueError('reschedule() requires eta, delay or priority')
+
+        replay = self._check_operation(task_id, operation_id)
+        if replay is not None:
+            return self._replay_result(task_id, replay)
+
+        current = self._get_deliveries(task_id)
+        if len(current) > 1:
+            raise TaskNotReschedulable(task_id, 'ambiguous')
+        if not current:
+            raise TaskNotReschedulable(task_id, 'not_found')
+
+        delivery = current[0]
+        try:
+            task = self._load_delivery_task(delivery)
+        except Exception as exc:
+            raise TaskNotReschedulable(task_id, 'undeserializable') from exc
+
+        location, new_eta, new_priority = self._target_plan(
+            delivery, task, validated_eta, validated_priority)
+
+        task.eta = new_eta
+        task.priority = new_priority
+        updated = self.serialize_task(task)
+
+        outcome = self.storage.reschedule_task(
+            task_id, current, updated, location, new_eta, new_priority,
+            operation_id=operation_id)
+
+        if outcome is None:
+            # The delivery was claimed, moved, or removed between our read and
+            # the write. Report the race explicitly; never leave two versions.
+            raise TaskNotReschedulable(task_id, 'not_found')
+
+        if outcome.get('status') == 'replayed':
+            # Another caller applied this operation id between our read and
+            # write; report what was actually recorded.
+            outcome_eta = outcome.get('eta')
+            if isinstance(outcome_eta, str):
+                try:
+                    outcome_eta = datetime.datetime.fromisoformat(outcome_eta)
+                except ValueError:
+                    outcome_eta = None
+            status = 'replayed'
+            location = outcome.get('location', location)
+            new_eta = outcome_eta
+            new_priority = outcome.get('priority', new_priority)
+        else:
+            status = self._status_for(delivery['location'], location)
+        self._emit(S.SIGNAL_RESCHEDULED, task)
+
+        return RescheduleResult(
+            task_id, status, location, new_eta,
+            outcome.get('priority'),
+            operation_id=operation_id,
+            previous=current,
+            deliveries=[{'task_id': task_id, 'location': location,
+                         'priority': outcome.get('priority'),
+                         'eta': new_eta}],
+            task=task)
+
+    def _status_for(self, old_location, new_location):
+        if old_location == 'schedule' and new_location == 'queue':
+            return 'queued'
+        if old_location == 'queue' and new_location == 'schedule':
+            return 'scheduled'
+        return 'rescheduled'
+
+    def _replay_result(self, task_id, record):
+        location = record.get('location')
+        eta = record.get('eta')
+        if isinstance(eta, str):
+            try:
+                eta = datetime.datetime.fromisoformat(eta)
+            except ValueError:
+                eta = None
+        return RescheduleResult(
+            task_id, 'replayed', location, eta,
+            record.get('priority'),
+            operation_id=record.get('operation_id'),
+            previous=[],
+            deliveries=[{'task_id': task_id, 'location': location,
+                         'priority': record.get('priority'), 'eta': eta}])
+
+    def preview_reschedule(self, task_id, eta=None, delay=None,
+                           priority=None):
+        """
+        Describe what :py:meth:`reschedule` would do for ``task_id`` without
+        changing the queue or schedule.
+
+        Applies the same argument validation as :py:meth:`reschedule`, and
+        reads (but never writes) the queue and schedule.
+        """
+        validated_eta = normalize_eta(self, eta, delay)
+        validated_priority = validate_priority(priority)
+        if validated_eta is UNCHANGED and validated_priority is None:
+            raise ValueError('preview_reschedule() requires eta, delay or '
+                             'priority')
+
+        current = self._get_deliveries(task_id)
+        if len(current) > 1:
+            return ReschedulePreview(task_id, False, 'ambiguous', current,
+                                     None, None, None)
+        if not current:
+            return ReschedulePreview(task_id, False, 'not_found', [], None,
+                                     None, None)
+
+        delivery = current[0]
+        try:
+            task = self._load_delivery_task(delivery)
+        except Exception:
+            return ReschedulePreview(task_id, False, 'undeserializable',
+                                     current, None, None, None)
+
+        location, new_eta, new_priority = self._target_plan(
+            delivery, task, validated_eta, validated_priority)
+        return ReschedulePreview(
+            task_id, True, None, current, location, new_eta, new_priority,
+            task_name=self._registry.task_to_string(type(task)))
+
+    def reschedule_many(self, task_ids, eta=None, delay=None, priority=None,
+                        operation_id_prefix=None):
+        """
+        Apply :py:meth:`reschedule` to several task ids.
+
+        Each item is applied independently, in its own transaction. An invalid
+        or unrunnable item is recorded in ``errors`` and does **not** roll back
+        items that were already applied -- the batch is not atomic. Every
+        requested id appears in exactly one of ``results`` or ``errors``.
+
+        ``operation_id_prefix`` (optional) makes each item idempotent by
+        deriving ``'<prefix>:<task id>'`` as its operation id.
+        """
+        validated_eta = normalize_eta(self, eta, delay)
+        validated_priority = validate_priority(priority)
+        if validated_eta is UNCHANGED and validated_priority is None:
+            raise ValueError('reschedule_many() requires eta, delay or '
+                             'priority')
+        if operation_id_prefix is not None:
+            validate_operation_id(operation_id_prefix)
+
+        batch = RescheduleBatch()
+        for task_id in task_ids:
+            try:
+                if not isinstance(task_id, str) or not task_id:
+                    raise ValueError('task id must be a non-empty string')
+                op_id = (None if operation_id_prefix is None
+                         else '%s:%s' % (operation_id_prefix, task_id))
+                batch.results.append(
+                    self.reschedule(task_id, eta=eta, delay=delay,
+                                    priority=priority, operation_id=op_id))
+            except (HueyException, ValueError) as exc:
+                batch.errors.append(RescheduleItemError(task_id, exc))
+        return batch
 
     def all_results(self):
         return self.storage.result_items()

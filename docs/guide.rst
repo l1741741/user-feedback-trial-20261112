@@ -1638,11 +1638,19 @@ Storage Options
     operational complexity of running a separate server process like Redis is
     undesirable.
 
+    Because deliveries carry their task id, ``SqliteHuey`` supports
+    :py:meth:`Huey.reschedule` (and the :ref:`huey_reschedule
+    <reschedule-cli>` command) to adjust a queued or scheduled task in place.
+
 :py:class:`CySqliteHuey`
     Same storage layout and characteristics as :py:class:`SqliteHuey`, but
     driven by `cysqlite <https://cysqlite.readthedocs.io/>`_ rather than the
     standard library ``sqlite3`` module. Connection tuning is done with an
     open-ended ``pragmas`` dict instead of a fixed set of parameters.
+
+    Like ``SqliteHuey``, it supports :py:meth:`Huey.reschedule`; the existing
+    SQLite tables are migrated in place to add the required ``task_id``
+    column.
 
 :py:class:`PostgresHuey`
     Workers dequeue using ``select ... for update skip locked``, so any number

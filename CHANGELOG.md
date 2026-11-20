@@ -3,6 +3,18 @@ Changelog
 
 ## Master
 
+* Add `Huey.reschedule()` for adjusting an existing queued or scheduled task
+  in place, preserving its task id (and therefore its `Result` association),
+  parameters, retry budget, pipeline, expiration and revocation state. Unlike
+  `Result.reschedule()`, no replacement task is created. Supported by
+  `SqliteHuey`, `CySqliteHuey` and the in-memory storage; other backends raise
+  `RescheduleNotSupported`. Moves across the ETA boundary are single-transaction
+  and an optional `operation_id` makes the change idempotent across retries.
+  Add `Huey.preview_reschedule()` and `Huey.reschedule_many()` (per-item, not
+  atomic), plus the `huey_reschedule` command-line tool and a
+  `SIGNAL_RESCHEDULED` signal. SQLite databases are migrated in place to add a
+  `task_id` column and index.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4

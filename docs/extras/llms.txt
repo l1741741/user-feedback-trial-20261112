@@ -34,6 +34,13 @@ Operational facts:
 - Task functions are regular `def` functions. `async def` execution is not
   supported. Use `huey.contrib.asyncio.aget_result` to await results from
   async code.
+- To move a pending task earlier/later or change its priority without
+  re-creating it, use `Huey.reschedule(task_id, ...)` or the installed
+  `huey_reschedule` command. It keeps the task id (so the `Result` handle still
+  works) and only adjusts deliveries still in the queue or schedule; a task a
+  worker has already claimed cannot be adjusted. Supported by `SqliteHuey`,
+  `CySqliteHuey` and in-memory storage. Pass `--operation-id` to make a retried
+  command safe against a lost response.
 
 ## Documentation
 
