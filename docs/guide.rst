@@ -353,6 +353,115 @@ For more information, see:
 * :py:class:`Result`
 * :py:class:`TaskException`
 
+.. _error-redaction:
+
+Redacting secrets from task failures
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Tasks often handle sensitive material: signed file URLs, tokens passed in
+arguments, or authentication fields. When such a task fails, that material can
+appear in the exception text and traceback, which Huey then writes to logs,
+the result store, the ``SIGNAL_ERROR`` signal and ``on_error`` handler
+arguments -- systems that may retain the data indefinitely.
+
+Huey provides an explicit, opt-in redaction policy via
+:py:class:`~huey.redaction.ErrorRedactor`. Pass an instance when constructing
+the Huey object:
+
+.. code-block:: python
+
+    from huey import RedisHuey
+    from huey import ErrorRedactor
+
+    redactor = ErrorRedactor(
+        # Literal values replaced wherever they occur.
+        secrets=(API_TOKEN, SERVICE_PASSWORD),
+        # Field names whose *values* are replaced in key=value / "key": value
+        # content. The key itself is retained.
+        sensitive_fields=('password', 'token', 'authorization'),
+        # Extra URL query parameters whose values are redacted. A built-in set
+        # (token, signature, api_key, ...) is always treated as sensitive.
+        sensitive_url_params=('Signature',))
+
+    huey = RedisHuey('my-app', error_redactor=redactor)
+
+What gets redacted
+""""""""""""""""""
+
+With a redactor configured, every *public* representation of a failure is
+sanitized consistently:
+
+* the ``error`` and ``traceback`` fields of the stored error result (and thus
+  the :py:class:`~huey.exceptions.TaskException` raised by
+  :py:meth:`Result.get`);
+* the exception argument handed to an ``on_error`` handler;
+* the exception delivered to ``SIGNAL_ERROR`` (and the other failure signals
+  such as ``SIGNAL_LOCKED`` / ``SIGNAL_RATE_LIMITED``);
+* Huey's own log records for the failure, including the formatted traceback.
+
+The policy covers exception ``args``, nested ``__cause__`` / ``__context__``
+chains, custom ``__str__`` / ``__repr__`` output, URL userinfo
+(``https://user:pass@host/...``) and sensitive URL query parameters. Binary
+arguments are never decoded: they are replaced by a length marker (or by the
+redaction placeholder when they contain a configured byte secret).
+
+What is preserved
+"""""""""""""""""
+
+Redaction is not a blanket replacement. To keep failures debuggable, the
+sanitized error retains:
+
+* the task id and remaining retry count in the error metadata;
+* the original exception *type* (e.g. ``builtins.ValueError``);
+* the code locations in the traceback (file, line number, function);
+* non-sensitive parts of messages and URLs (host, path, other parameters).
+
+What is intentionally not changed
+""""""""""""""""""""""""""""""""""
+
+* The business function, its actual call arguments and the retry conditions
+  run unchanged. Redaction applies to error *output*, never to task
+  invocation, so a task that legitimately needs a secret still receives it.
+* The original, in-memory exception object is not mutated or replaced. Retry
+  bookkeeping and the in-process ``post_execute`` hooks keep receiving the
+  raw exception. Only what leaves Huey through a public boundary is sanitized.
+
+Failure-safe behavior
+"""""""""""""""""""""
+
+If redaction itself raises, or the exception is recursive, unprintable, or
+contains binary data, Huey falls back to a safe
+:py:class:`~huey.redaction.RedactionFailedError` that carries only the
+exception type name. A redaction failure never breaks task finalization, never
+propagates out of the execution machinery, and can never cause the raw
+exception to be written in place of the sanitized one.
+
+Default behavior
+""""""""""""""""
+
+When ``error_redactor`` is not supplied (the default), exceptions are surfaced
+exactly as before. This preserves full backwards compatibility; redaction is
+strictly opt-in.
+
+Guarantee boundaries
+""""""""""""""""""""
+
+The policy covers Huey's own outputs listed above. It cannot redact:
+
+* content application code writes itself to its own loggers, files or
+  external services (for example, a task that logs a secret before raising);
+* the textual contents of source files referenced by traceback frames, or
+  logging performed by third-party libraries;
+* separate integrations that maintain their own exception handling, such as
+  the optional Django tasks backend
+  (``huey.contrib.djhuey.tasks_backend``).
+
+For more information, see:
+
+* :py:class:`~huey.redaction.ErrorRedactor`
+* :py:class:`~huey.redaction.RedactedError`
+* :py:class:`~huey.exceptions.TaskException`
+
 .. _immediate:
 
 Immediate mode

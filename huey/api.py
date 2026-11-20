@@ -26,6 +26,9 @@ from huey.exceptions import TaskException
 from huey.exceptions import TaskLockedException
 from huey.exceptions import TaskTimeout
 from huey.registry import Registry
+from huey.redaction import ErrorRedactor
+from huey.redaction import RedactedError
+from huey.redaction import redact_traceback_text
 from huey.serializer import Serializer
 from huey.storage import BlackHoleStorage
 from huey.storage import CySqliteStorage
@@ -63,6 +66,16 @@ class Huey(object):
         any ``on_error`` handler. When ``False``, the error is withheld until
         the task's retries are exhausted. Defaults to ``True`` for backwards
         compatibility.
+    :param error_redactor: an :class:`~huey.redaction.ErrorRedactor` instance
+        describing the redaction policy for failed tasks. When provided, every
+        public representation of a failure -- log messages, the
+        ``SIGNAL_ERROR`` signal, the stored error result (including its
+        traceback) and the exception passed to ``on_error`` handlers -- is
+        sanitized before leaving Huey. The original exception instance used
+        for retry bookkeeping and post-execute hooks is never modified. When
+        ``None`` (the default) exceptions are surfaced unchanged, preserving
+        the historical behavior.
+    :type error_redactor: :class:`~huey.redaction.ErrorRedactor` or None
     :param bool utc: use UTC internally by converting from local time.
     :param bool immediate: useful for debugging; causes tasks to be executed
         synchronously in the application.
@@ -95,12 +108,14 @@ class Huey(object):
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
                  use_zlib=False, immediate_use_memory=True, storage_class=None,
-                 store_intermediate_errors=True, **storage_kwargs):
+                 store_intermediate_errors=True, error_redactor=None,
+                 **storage_kwargs):
 
         self.name = name
         self.results = results
         self.store_none = store_none
         self.store_intermediate_errors = store_intermediate_errors
+        self.error_redactor = error_redactor
         self.utc = utc
         self._immediate = immediate
         self.immediate_use_memory = immediate_use_memory
@@ -440,6 +455,10 @@ class Huey(object):
 
         start = time.monotonic()
         exception = None
+        # Public counterpart of ``exception``: the sanitized exception used at
+        # every output boundary. Identical to ``exception`` unless an error
+        # redactor is configured.
+        public_exception = None
         retry_eta = None
         task_value = None
 
@@ -456,50 +475,61 @@ class Huey(object):
                 self._tasks_in_flight.discard(task)
                 duration = time.monotonic() - start
         except TaskTimeout as exc:
-            logger.warning('Task %s timed out after %ss.', task.id,
-                           task.timeout)
+            public_exception = self.redact_exception(exc)
+            logger.warning('Task %s timed out after %ss: %s', task.id,
+                           task.timeout, public_exception)
             exception = exc
-            self._emit(S.SIGNAL_TIMEOUT, task)
+            self._emit(S.SIGNAL_TIMEOUT, task, public_exception)
         except RateLimitExceeded as exc:
+            public_exception = self.redact_exception(exc)
             delay = task.retry_delay or exc.delay
             if exc.retry or task.retries:
-                logger.info('Task %s rate-limited on "%s", retrying in %s',
-                            task.id, exc.key, delay)
+                logger.info('Task %s rate-limited, retrying in %s: %s',
+                            task.id, delay, public_exception)
                 retry_eta = normalize_time(None, delay, self.utc)
                 if exc.retry:
                     task.retries += 1
             else:
-                logger.info('Task %s rate-limited on "%s"', task.id, exc.key)
+                logger.info('Task %s rate-limited: %s', task.id,
+                            public_exception)
             exception = exc
-            self._emit(S.SIGNAL_RATE_LIMITED, task)
+            self._emit(S.SIGNAL_RATE_LIMITED, task, public_exception)
         except TaskLockedException as exc:
-            logger.warning('Task %s not run, %s.', task.id, exc)
+            public_exception = self.redact_exception(exc)
+            logger.warning('Task %s not run, %s.', task.id, public_exception)
             exception = exc
-            self._emit(S.SIGNAL_LOCKED, task)
+            self._emit(S.SIGNAL_LOCKED, task, public_exception)
         except RetryTask as exc:
-            logger.info('Task %s raised RetryTask, retrying.', task.id)
+            public_exception = self.redact_exception(exc)
+            logger.info('Task %s raised RetryTask, retrying: %s', task.id,
+                        public_exception)
             task.retries += 1
             if exc.eta or exc.delay is not None:
                 retry_eta = normalize_time(exc.eta, exc.delay, self.utc)
             exception = exc
         except CancelExecution as exc:
+            public_exception = self.redact_exception(exc)
             if exc.retry or (exc.retry is None and task.retries):
                 task.retries = max(task.retries, 1)
                 msg = '(task will be retried)'
             else:
                 task.retries = 0
                 msg = '(aborted, will not be retried)'
-            logger.warning('Task %s raised CancelExecution %s.', task.id, msg)
-            self._emit(S.SIGNAL_CANCELED, task)
+            logger.warning('Task %s raised CancelExecution %s: %s', task.id,
+                           msg, public_exception)
+            self._emit(S.SIGNAL_CANCELED, task, public_exception)
             exception = exc
         except KeyboardInterrupt:
             logger.warning('Received exit signal, %s did not finish.', task.id)
             self._emit(S.SIGNAL_INTERRUPTED, task)
             return
         except Exception as exc:
-            logger.exception('Unhandled exception in task %s.', task.id)
+            # Compute the sanitized representation before logging: never emit
+            # the raw exception (or its traceback) to a public log boundary.
+            public_exception = self.redact_exception(exc)
+            self._log_task_error(task, exc, public_exception)
             exception = exc
-            self._emit(S.SIGNAL_ERROR, task, exc)
+            self._emit(S.SIGNAL_ERROR, task, public_exception)
         else:
             logger.info('%s executed in %0.3fs', task, duration)
 
@@ -523,17 +553,26 @@ class Huey(object):
             final = not task.retries
             surface = final or (self.store_intermediate_errors and
                                 not isinstance(exception, RETRYING_EXCEPTIONS))
+            # The public exception is what gets persisted and handed to other
+            # tasks; the raw exception stays local to this execution.
+            if public_exception is None:
+                public_exception = self.redact_exception(exception)
+            error = None
             if surface:
-                error = Error(self.build_error_result(task, exception))
+                error = Error(self.build_error_result(
+                    task, public_exception))
                 next_task = task if store else None
                 while next_task is not None:
                     self.put_result(next_task.id, error)
                     next_task = next_task.on_complete if final else None
+            # Post-execute hooks are in-process extensions: keep receiving the
+            # original exception for backward compatibility.
             self._run_post_execute(task, task_value, exception)
             if surface and task.on_error:
-                # Copy, as on_error is shared across retries.
+                # Copy, as on_error is shared across retries. The handler
+                # receives the sanitized exception, matching the error result.
                 handler = copy.copy(task.on_error)
-                handler.extend_data(exception)
+                handler.extend_data(public_exception)
                 self.enqueue(handler)
             if final:
                 self._abort_chord_member(task, error)
@@ -542,6 +581,23 @@ class Huey(object):
                 self._requeue_task(task, self._get_timestamp(), retry_eta)
 
         return task_value
+
+    def _log_task_error(self, task, exception, public_exception):
+        """
+        Log an unhandled task failure without leaking the raw exception text.
+        With a redactor configured, the sanitized exception and its redacted
+        traceback (frame locations retained) are logged. Without one, the
+        historical ``logger.exception`` behavior is preserved exactly.
+        """
+        if self.error_redactor is None:
+            logger.exception('Unhandled exception in task %s.', task.id)
+            return
+        try:
+            tb_text = self._build_redacted_traceback(public_exception)
+        except Exception:
+            tb_text = '(traceback unavailable)'
+        logger.error('Unhandled exception in task %s: %s\n%s',
+                     task.id, public_exception, tb_text, exc_info=False)
 
     def _abort_chord_member(self, task, value):
         # The rest of the pipeline won't run, so report to its chord here.
@@ -607,8 +663,16 @@ class Huey(object):
                                  'hook %s for %s.', name, task)
 
     def build_error_result(self, task, exception):
-        tb = ''.join(traceback.format_exception(
-            type(exception), exception, exception.__traceback__))
+        # ``exception`` here is the public exception for this failure: the
+        # sanitized RedactedError when an error redactor is configured, or the
+        # original exception otherwise. The traceback rendered below likewise
+        # passes through the text redaction policy, so secret literals,
+        # sensitive fields and URL credentials cannot reach the result store.
+        if isinstance(exception, RedactedError):
+            tb = self._build_redacted_traceback(exception)
+        else:
+            tb = ''.join(traceback.format_exception(
+                type(exception), exception, exception.__traceback__))
         if isinstance(exception, TaskException):
             error = exception.metadata.get('error') or repr(exception)
         else:
@@ -620,6 +684,54 @@ class Huey(object):
             'traceback': tb,
             'task_id': task.id,
         }
+
+    def redact_exception(self, exception):
+        """
+        Return the exception that may leave Huey through a public boundary
+        (logs, SIGNAL_ERROR, error result, on_error). Returns the original
+        exception unchanged when no redactor is configured, so default
+        behavior is fully preserved. Redaction failures never propagate: they
+        degrade to a safe RedactionFailedError carrying only the type name.
+        """
+        if self.error_redactor is None or exception is None:
+            return exception
+        try:
+            return self.error_redactor.redact_exception(exception)
+        except Exception:
+            # Absolute last line of defense: never let the redaction policy
+            # break task finalization or leak the raw exception.
+            try:
+                from huey.redaction import RedactionFailedError
+                return RedactionFailedError(
+                    '%s.%s' % (type(exception).__module__,
+                               type(exception).__name__))
+            except Exception:
+                from huey.redaction import RedactionFailedError
+                return RedactionFailedError('unknown')
+
+    def _build_redacted_traceback(self, redacted):
+        """
+        Build a debuggable but sanitized traceback string for a redacted
+        exception. Frame code locations (file, line, function) are preserved
+        from the original failure, while every rendered frame line and the
+        final exception text pass through the redaction policy.
+        """
+        redactor = self.error_redactor
+        lines = ['Traceback (redacted):\n']
+        original = getattr(redacted, '__original_exception__', None)
+        if original is not None:
+            try:
+                for frame in traceback.extract_tb(
+                        original.__traceback__).format():
+                    lines.append(redact_traceback_text(redactor, frame))
+            except Exception:
+                # Frame extraction failing must not suppress the error result.
+                lines.append('(traceback frames unavailable)\n')
+        lines.append(redact_traceback_text(
+            redactor, '%s: %s\n' % (
+                getattr(redacted, 'original_type',
+                        type(redacted).__name__), redacted.args[0])))
+        return ''.join(lines)
 
     def _task_key(self, task_class, key):
         if isinstance(task_class, TaskWrapper):

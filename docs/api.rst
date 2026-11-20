@@ -2347,6 +2347,53 @@ Exceptions
     General exception raised by :py:class:`Result` handles when reading the
     result of a task that failed due to an error.
 
+Error redaction
+---------------
+
+See :ref:`error-redaction` in the guide for the full discussion and the
+guarantee boundaries. The relevant types live in :py:mod:`huey.redaction`.
+
+.. py:class:: ErrorRedactor(secrets=None, sensitive_fields=None, sensitive_url_params=None, max_depth=10, max_width=50)
+
+    A configurable redaction policy. Pass an instance to a Huey constructor
+    via the ``error_redactor`` parameter to enable redaction of task failures.
+
+    :param secrets: literal secret values (strings or bytes) replaced
+        wherever they occur in public failure output.
+    :param sensitive_fields: field names whose values are redacted in
+        ``key=value`` / ``"key": value`` content. The key name is retained.
+    :param sensitive_url_params: extra URL query-parameter names whose values
+        are redacted. A built-in set of authentication-related names is
+        always active.
+    :param max_depth: maximum depth followed across exception cause/context
+        chains and nested arguments.
+    :param max_width: maximum number of arguments rendered per exception.
+
+    .. code-block:: python
+
+        from huey import ErrorRedactor, RedisHuey
+
+        redactor = ErrorRedactor(
+            secrets=(API_TOKEN, SERVICE_PASSWORD),
+            sensitive_fields=('password', 'token'),
+            sensitive_url_params=('Signature',))
+        huey = RedisHuey('my-app', error_redactor=redactor)
+
+.. py:class:: RedactedError
+
+    The picklable, sanitized exception produced for a failed task when an
+    :py:class:`ErrorRedactor` is configured. Exposes the original exception
+    type name as ``original_type`` while its ``args`` contain only sanitized
+    strings. Instances are real exceptions and are what ``on_error`` handlers
+    and ``SIGNAL_ERROR`` receivers get.
+
+.. py:class:: RedactionFailedError
+
+    A safe :py:class:`RedactedError` subtype used when redaction itself
+    fails. It carries only the original exception type name, guaranteeing that
+    a redaction error never leaks the raw exception or interrupts task
+    finalization.
+
 Storage
 -------
 
