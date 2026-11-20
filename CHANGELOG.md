@@ -3,6 +3,17 @@ Changelog
 
 ## Master
 
+* Add `Consumer.drain()`, an explicit drain-shutdown entry point that stops
+  workers from picking up new tasks and returns a waitable `DrainResult`.
+  Tasks dequeued but not yet started are re-enqueued rather than dropped;
+  in-flight tasks finish normally. The drain wait supports a total timeout
+  that reports remaining tasks and the forced-shutdown escalation path
+  instead of claiming success. Supported for thread and process workers.
+* A task dequeued while the consumer is stopping is now put back on the
+  queue instead of being started.
+* Health checks no longer restart workers once the stop-flag is set, and a
+  failing shutdown hook can no longer prevent a worker from exiting.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4

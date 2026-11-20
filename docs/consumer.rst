@@ -268,6 +268,59 @@ consumer **without** letting it finish any currently-executing tasks, those
 tasks will be lost. To be alerted when this occurs, you can use Huey's
 :ref:`signals` (specifically ``signals.SIGNAL_INTERRUPTED``).
 
+.. _consumer-drain:
+
+Draining the consumer programmatically
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Deployment tooling that embeds the consumer can request an explicit drain
+shutdown, which stops workers from picking up new tasks and waits for
+in-flight tasks to finish before the workers and scheduler exit:
+
+.. code-block:: python
+
+    consumer = huey.create_consumer()
+    consumer.start()
+
+    # Later, e.g. when a deploy begins:
+    drain = consumer.drain(timeout=60)
+    report = drain.wait()
+    if report.drained:
+        pass  # Safe to close resources and exit.
+    else:
+        # report.pending lists the tasks still in flight. Escalate with
+        # consumer.stop() to force shutdown.
+        consumer.stop()
+
+``drain()`` returns immediately with a :py:class:`DrainResult` handle;
+:py:meth:`DrainResult.wait` blocks and returns a :py:class:`DrainReport`.
+Calling ``drain()`` multiple times (and waiting from multiple threads) is
+safe: all callers share a single drain and observe the same report.
+
+Semantics:
+
+* Once a drain begins, no new task functions start. A task that was
+  dequeued but not yet started is put back on the queue (with its
+  priority), so it is not silently lost -- dequeue removes the message
+  from every backend, so re-enqueueing is the loss-free strategy.
+* Tasks already in flight run to completion, including result storage,
+  ``on_complete`` successors and post-execute hooks. Shutdown hooks run
+  exactly once per worker, and a failing hook cannot hang the drain.
+* The ``timeout`` (which defaults to the consumer's ``shutdown_timeout``)
+  bounds the total wait. If it elapses first, the report has
+  ``drained=False`` and names the remaining tasks plus the escalation
+  path (``Consumer.stop()``); success is never reported while tasks are
+  still running. ``wait(timeout)`` only bounds the caller's own patience
+  and returns an unresolved snapshot (``resolved=False``) instead.
+* Draining is supported for the ``thread`` and ``process`` worker types.
+  With process workers, a task dequeued concurrently with ``drain()``
+  may be admitted if the worker checked the stop-flag before the drain
+  began; the drain still waits for it to finish. Also note that with
+  process workers, ``report.pending`` reflects the parent process and is
+  always empty -- worker liveness is the source of truth there.
+* ``SIGINT``/``SIGTERM`` handling, health checks and ``max_tasks``
+  recycling are unaffected.
+
 .. _consumer-deployments:
 
 Deployments

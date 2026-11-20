@@ -93,12 +93,17 @@ class Worker(BaseProcess):
     process_name = 'Worker'
 
     def __init__(self, huey, stop_flag, default_delay, max_delay, backoff,
-                 max_tasks=None):
+                 max_tasks=None, drain_lock=None):
         self.delay = self.default_delay = default_delay
         self.max_delay = max_delay
         self.backoff = backoff
         self.max_tasks = max_tasks
         self.task_count = 0
+        # Lock shared with the consumer (thread/greenlet modes only) that
+        # makes the admit-or-requeue decision atomic with respect to the
+        # start of a drain. None in process mode, where the stop-flag is
+        # the only channel from the parent.
+        self.drain_lock = drain_lock
         super(Worker, self).__init__(huey, stop_flag)
 
     def initialize(self):
@@ -127,6 +132,8 @@ class Worker(BaseProcess):
         else:
             if task is not None:
                 self.delay = self.default_delay
+                if not self._admit_task(task):
+                    return
                 self.task_count += 1
                 try:
                     self.huey.execute(task, now)
@@ -139,6 +146,41 @@ class Worker(BaseProcess):
                     raise WorkerRecycle()
             elif not self.huey.storage.blocking:
                 self.sleep()
+
+    def _admit_task(self, task):
+        """
+        Decide whether a dequeued task may begin executing.
+
+        Once the consumer begins stopping or draining, no new task
+        functions may start. Because dequeue() already removed the message
+        from storage (none of the backends provide an ack/nack protocol),
+        an unadmitted task is put back on the queue with its priority so
+        it is not silently lost; a subsequent consumer will run it.
+
+        Returns True when the task should execute.
+        """
+        if self.drain_lock is not None:
+            # Thread/greenlet mode: holding the drain lock orders the
+            # admission decision against the start of a drain, so a task
+            # is either admitted before the drain began (and will be
+            # waited on) or re-enqueued.
+            with self.drain_lock:
+                admitted = not self.stop_flag.is_set()
+        else:
+            # Process mode: the stop-flag pipe is the only channel from
+            # the parent, so admission is bounded by this check.
+            admitted = not self.stop_flag.is_set()
+
+        if admitted:
+            return True
+
+        self._logger.info('Consumer is stopping, re-enqueueing %s.', task)
+        try:
+            self.huey.storage.enqueue(
+                self.huey.serialize_task(task), task.priority)
+        except Exception:
+            self._logger.exception('Error re-enqueueing %s.', task)
+        return False
 
     def sleep(self):
         if self.delay > self.max_delay:
@@ -379,6 +421,151 @@ WORKER_TO_ENVIRONMENT = {
 }
 
 
+class DrainReport(object):
+    """
+    Outcome of a drain request, returned by DrainResult.wait().
+
+    ``drained`` is only ever True when every worker and the scheduler have
+    actually stopped and no tasks remain in flight -- it is never reported
+    while background threads/processes are still running. ``resolved`` is
+    False when the wait() call's own timeout elapsed before the drain
+    finished; such a report is a snapshot, not a final result.
+    """
+    def __init__(self, drained, pending=(), resolved=True, message=''):
+        self.drained = drained
+        self.pending = tuple(pending)  # Ids of tasks still in flight.
+        self.resolved = resolved
+        self.message = message
+
+    def __repr__(self):
+        return ('DrainReport(drained=%s, resolved=%s, pending=%s)' %
+                (self.drained, self.resolved, list(self.pending)))
+
+
+class DrainResult(object):
+    """
+    Waitable completion status for a consumer drain request.
+
+    Created once per consumer by Consumer.drain(); repeated drain() calls
+    return the same object, so multiple requesters and any number of
+    waiters all observe a single, consistent outcome. The final report is
+    resolved exactly once, even if a shutdown hook misbehaves.
+    """
+    def __init__(self, consumer, timeout):
+        self._consumer = consumer
+        self._timeout = timeout
+        self._done = threading.Event()
+        self._lock = threading.Lock()
+        self._report = None
+        self._monitor_started = False
+        self._monitor = threading.Thread(target=self._run_monitor,
+                                         name='DrainMonitor')
+        self._monitor.daemon = True
+
+    def start_monitor(self):
+        with self._lock:
+            if not self._monitor_started:
+                self._monitor_started = True
+                self._monitor.start()
+
+    @property
+    def done(self):
+        return self._done.is_set()
+
+    @property
+    def report(self):
+        """The final DrainReport, or None if the drain has not resolved."""
+        with self._lock:
+            return self._report
+
+    def wait(self, timeout=None):
+        """
+        Wait for the drain to resolve and return a DrainReport.
+
+        ``timeout`` only bounds this caller's patience; it does not change
+        the drain itself. If it elapses first, an unresolved snapshot is
+        returned (``resolved=False``) -- never a success report.
+        """
+        self._done.wait(timeout)
+        report = self.report
+        if report is not None:
+            return report
+        pending = self._pending_tasks()
+        return DrainReport(
+            drained=False, resolved=False, pending=pending,
+            message='drain still in progress (%d task(s) in flight%s); '
+                    'wait again, or call Consumer.stop() to force '
+                    'shutdown' % (len(pending),
+                                  ': %s' % ', '.join(pending) if pending
+                                  else ''))
+
+    def _pending_tasks(self):
+        # Best-effort snapshot of the in-flight set, which workers mutate
+        # concurrently. Only meaningful for in-process (thread/greenlet)
+        # workers; with process workers the parent's set is always empty
+        # and liveness of the worker processes is the source of truth.
+        tasks_in_flight = self._consumer.huey._tasks_in_flight
+        for _ in range(3):
+            try:
+                return sorted(str(task.id) for task in tasks_in_flight)
+            except RuntimeError:
+                continue
+        return []
+
+    def _run_monitor(self):
+        consumer = self._consumer
+        deadline = None
+        if self._timeout is not None:
+            deadline = time.monotonic() + self._timeout
+        try:
+            started = self._await_startup(consumer, deadline)
+            if started:
+                timeout = None if deadline is None else max(
+                    deadline - time.monotonic(), 0)
+                stopped = consumer._join_workers(timeout)
+            else:
+                # The consumer never started: nothing is running.
+                stopped = True
+        except Exception:
+            logger.exception('Drain monitor failed while waiting for '
+                             'workers to stop.')
+            stopped = False
+        pending = self._pending_tasks()
+        drained = stopped and not pending
+        if drained:
+            message = ('consumer drained: all workers stopped, no tasks '
+                       'in flight')
+        else:
+            message = (
+                'drain incomplete: %d task(s) still in flight%s; call '
+                'Consumer.stop() to force shutdown' % (
+                    len(pending),
+                    ': %s' % ', '.join(pending) if pending else ''))
+        report = DrainReport(drained=drained, pending=pending,
+                             message=message)
+        with self._lock:
+            self._report = report
+        self._done.set()
+        if drained:
+            logger.info('%s.', message)
+        else:
+            logger.warning('%s.', message)
+
+    def _await_startup(self, consumer, deadline):
+        # A drain may be requested before or while the consumer starts.
+        # Workers can only be joined once they exist, so wait for start()
+        # to finish (bounded by the drain deadline, if any).
+        while not consumer._started.is_set():
+            if deadline is None:
+                consumer._started.wait()
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                consumer._started.wait(min(remaining, 0.1))
+        return True
+
+
 class Consumer(object):
     """
     Consumer sets up and coordinates the execution of the workers and scheduler
@@ -448,6 +635,12 @@ class Consumer(object):
         self.huey._timeout_handler = self.environment.timeout
         self.stop_flag = self.environment.get_stop_flag()
 
+        # Drain-shutdown state. The drain lock also serializes worker task
+        # admission against the start of a drain (thread/greenlet modes).
+        self._drain_lock = threading.Lock()
+        self._drain_result = None
+        self._started = threading.Event()
+
         # In the event the consumer was killed while running a task that held
         # a lock, this ensures that all locks are flushed before starting.
         if flush_locks or extra_locks:
@@ -490,7 +683,10 @@ class Consumer(object):
             default_delay=self.default_delay,
             max_delay=self.max_delay,
             backoff=self.backoff,
-            max_tasks=self.max_tasks)
+            max_tasks=self.max_tasks,
+            # A threading lock cannot synchronize across fork(), so process
+            # workers rely on the stop-flag check alone (see _admit_task).
+            drain_lock=None if self.environment.forks else self._drain_lock)
 
     def _create_scheduler(self):
         return self.scheduler_class(
@@ -521,6 +717,10 @@ class Consumer(object):
                     process.shutdown()
                 except KeyboardInterrupt:
                     pass
+                except Exception:
+                    # A failing shutdown hook must not prevent the process
+                    # from exiting (drain/stop waiters rely on it).
+                    self._logger.exception('Error in shutdown of %s.', name)
         return self.environment.create_process(_run, name)
 
     def start(self):
@@ -560,6 +760,47 @@ class Consumer(object):
         # Finally set the signal handlers for main process.
         self._set_signal_handlers()
 
+        # Unblock a drain monitor that is waiting for start-up to finish.
+        self._started.set()
+
+    def drain(self, timeout=None):
+        """
+        Begin draining the consumer and return a waitable DrainResult.
+
+        Draining stops workers from picking up new tasks -- a task that
+        was dequeued but not yet started is put back on the queue rather
+        than dropped -- and lets tasks already in flight finish normally,
+        including their results, successors and cleanup hooks, before the
+        workers and scheduler exit.
+
+        ``timeout`` bounds the total time to wait for in-flight tasks and
+        defaults to the consumer's ``shutdown_timeout`` (None means wait
+        indefinitely). If the timeout elapses first, the report returned
+        by DrainResult.wait() indicates which tasks remain and that
+        Consumer.stop() may be used to force shutdown; success is never
+        reported while tasks are still running.
+
+        Supported for the "thread" and "process" worker types. With
+        process workers, a task dequeued concurrently with drain() may be
+        admitted if the worker checked the stop-flag before the drain
+        began; the drain still waits for it to finish.
+
+        May be called multiple times and from any thread: all callers
+        share a single drain and observe the same result.
+        """
+        if timeout is None:
+            timeout = self.shutdown_timeout
+        with self._drain_lock:
+            if self._drain_result is not None:
+                return self._drain_result
+            self._logger.info('Draining consumer: no new tasks will '
+                              'start, waiting for in-flight tasks.')
+            self.stop_flag.set()
+            result = DrainResult(self, timeout)
+            self._drain_result = result
+            result.start_monitor()
+            return result
+
     def stop(self, graceful=False):
         """
         Set the stop-flag.
@@ -572,7 +813,7 @@ class Consumer(object):
         if graceful:
             self._logger.info('Shutting down gracefully...')
             try:
-                success = self._join_workers()
+                success = self._join_workers(self.shutdown_timeout)
             except KeyboardInterrupt:
                 self._logger.info('Received request to shut down now.')
                 self._restart = False
@@ -590,16 +831,30 @@ class Consumer(object):
     def _interrupt_workers(self):
         self.environment.interrupt_workers([p for _, p in self.worker_threads])
 
-    def _join_workers(self):
+    def _join_workers(self, timeout=None):
         deadline = None
-        if self.shutdown_timeout is not None:
-            deadline = time.monotonic() + self.shutdown_timeout
+        if timeout is not None:
+            deadline = time.monotonic() + timeout
+        # Re-read the process list until it is stable: a health-check that
+        # raced with the stop request may have replaced a worker.
+        seen = set()
+        while True:
+            procs = [p for _, p in self.worker_threads] + [self.scheduler]
+            new_procs = [p for p in procs if id(p) not in seen]
+            if not new_procs:
+                break
+            seen.update(id(p) for p in new_procs)
+            for proc in new_procs:
+                if deadline is None:
+                    proc.join()
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    proc.join(remaining)
+            if deadline is not None and time.monotonic() >= deadline:
+                break
         procs = [p for _, p in self.worker_threads] + [self.scheduler]
-        for proc in procs:
-            if deadline is None:
-                proc.join()
-            else:
-                proc.join(max(deadline - time.monotonic(), 0))
         return not any(self.environment.is_alive(p) for p in procs)
 
     def run(self):
@@ -614,6 +869,15 @@ class Consumer(object):
                 health_check_ts = self.loop(health_check_ts)
             except ConsumerStopped:
                 break
+
+        if self._drain_result is not None:
+            # A drain was requested: wait for in-flight tasks to finish
+            # before reporting interrupted tasks and exiting, so tasks
+            # that complete normally are not misreported as interrupted.
+            report = self._drain_result.wait()
+            if not report.drained:
+                self._logger.warning('Exiting with drain incomplete: %s',
+                                     report.message)
 
         self.huey.notify_interrupted_tasks()
 
@@ -659,6 +923,10 @@ class Consumer(object):
         Check the health of the worker processes. Workers that have died will
         be replaced with new workers.
         """
+        if self.stop_flag.is_set():
+            # Stopping or draining: never start replacement workers.
+            self._logger.debug('Stop-flag set, skipping health check.')
+            return True
         self._logger.debug('Checking worker health.')
         workers = []
         restart_occurred = False

@@ -437,6 +437,304 @@ class TestConsumerShutdown(BaseTestCase):
         self.assertRaises(ConsumerStopped, consumer.loop)
 
 
+class TestConsumerDrain(BaseTestCase):
+    def setUp(self):
+        super(TestConsumerDrain, self).setUp()
+        self._handlers = [(s, signal.getsignal(s))
+                          for s in (signal.SIGINT, signal.SIGTERM)]
+
+    def tearDown(self):
+        for signum, handler in self._handlers:
+            signal.signal(signum, handler)
+        super(TestConsumerDrain, self).tearDown()
+
+    def make_blocking_task(self):
+        release = threading.Event()
+        started = threading.Event()
+
+        @self.huey.task()
+        def block():
+            started.set()
+            release.wait(10)
+            return 1337
+
+        return block, started, release
+
+    def test_drain_waits_for_inflight_task_and_result(self):
+        block, started, release = self.make_blocking_task()
+        shutdown_hooks = []
+
+        @self.huey.on_shutdown()
+        def record_shutdown():
+            shutdown_hooks.append(1)
+
+        signals = []
+        @self.huey.signal()
+        def capture(sig, task, *args, **kwargs):
+            signals.append(sig)
+
+        result = block()
+        consumer = self.consumer(workers=1)
+        consumer.start()
+        self.assertTrue(started.wait(5))
+
+        drain = consumer.drain(timeout=5)
+        self.assertFalse(drain.done)  # Task still running.
+        self.assertEqual(len(self.huey), 0)  # Task was dequeued already.
+
+        release.set()
+        report = drain.wait(5)
+        self.assertTrue(report.resolved)
+        self.assertTrue(report.drained)
+        self.assertEqual(report.pending, ())
+
+        # The in-flight task completed normally: result written back,
+        # complete signal emitted, not reported as interrupted.
+        self.assertEqual(result.get(blocking=True, timeout=2), 1337)
+        self.assertIn(SIGNAL_COMPLETE, signals)
+        self.assertNotIn(SIGNAL_INTERRUPTED, signals)
+
+        # Shutdown hooks ran exactly once for the single worker.
+        self.assertEqual(shutdown_hooks, [1])
+
+    def test_drain_at_startup_dequeues_nothing(self):
+        state = []
+
+        @self.huey.task()
+        def task_a(n):
+            state.append(n)
+
+        task_a(1)
+        consumer = self.consumer(workers=1)
+
+        # Drain requested before the consumer even starts.
+        drain = consumer.drain(timeout=5)
+        consumer.start()
+
+        report = drain.wait(5)
+        self.assertTrue(report.drained)
+        self.assertEqual(state, [])  # Task never started.
+        self.assertEqual(len(self.huey), 1)  # Task remains queued.
+
+        # The queued task is intact and runnable by a later consumer.
+        self.execute_next()
+        self.assertEqual(state, [1])
+
+    def test_dequeued_task_is_reenqueued_not_lost(self):
+        state = []
+
+        @self.huey.task()
+        def task_a(n):
+            state.append(n)
+            return n + 1
+
+        task_a(1)
+        consumer = self.consumer(workers=1)
+        consumer.drain(timeout=1)  # Sets the stop-flag.
+
+        # Simulate a worker that dequeued just as the drain began: the
+        # task must be put back, not executed and not dropped.
+        worker, _ = consumer.worker_threads[0]
+        worker.loop()
+        self.assertEqual(state, [])
+        self.assertEqual(len(self.huey), 1)
+
+        # The re-enqueued message is intact and still executes.
+        self.assertEqual(self.execute_next(), 2)
+        self.assertEqual(state, [1])
+
+    def test_drain_timeout_reports_pending_and_escalation(self):
+        block, started, release = self.make_blocking_task()
+        result = block()
+        consumer = self.consumer(workers=1)
+        consumer.start()
+        self.assertTrue(started.wait(5))
+
+        drain = consumer.drain(timeout=0.2)
+        report = drain.wait(5)
+        self.assertTrue(report.resolved)
+        self.assertFalse(report.drained)  # Must not claim success.
+        self.assertEqual(len(report.pending), 1)
+        self.assertIn('Consumer.stop()', report.message)
+
+        # The worker thread is, in fact, still running the task.
+        _, worker_t = consumer.worker_threads[0]
+        self.assertTrue(worker_t.is_alive())
+
+        # Escalate: release the task and force shutdown as advised.
+        release.set()
+        consumer.stop(graceful=True)
+        self.assertEqual(result.get(blocking=True, timeout=2), 1337)
+
+    def test_drain_is_idempotent_and_waiters_agree(self):
+        block, started, release = self.make_blocking_task()
+        block()
+        consumer = self.consumer(workers=1)
+        consumer.start()
+        self.assertTrue(started.wait(5))
+
+        drain1 = consumer.drain(timeout=5)
+        drain2 = consumer.drain(timeout=5)  # Repeated request.
+        self.assertIs(drain1, drain2)
+
+        reports = []
+        def waiter():
+            reports.append(drain1.wait(5))
+        waiters = [threading.Thread(target=waiter) for _ in range(2)]
+        for t in waiters:
+            t.start()
+
+        release.set()
+        report = drain1.wait(5)
+        for t in waiters:
+            t.join(5)
+        self.assertTrue(report.drained)
+        # Both waiters observed the same, single outcome.
+        self.assertEqual(len(reports), 2)
+        self.assertTrue(all(r is report for r in reports))
+
+    def test_drain_wait_timeout_returns_unresolved_snapshot(self):
+        block, started, release = self.make_blocking_task()
+        block()
+        consumer = self.consumer(workers=1)
+        consumer.start()
+        self.assertTrue(started.wait(5))
+
+        drain = consumer.drain(timeout=5)
+        snapshot = drain.wait(0.05)  # Caller's own patience expires.
+        self.assertFalse(snapshot.resolved)
+        self.assertFalse(snapshot.drained)
+        self.assertEqual(len(snapshot.pending), 1)
+
+        release.set()
+        report = drain.wait(5)
+        self.assertTrue(report.drained)
+
+    def test_drain_resolves_despite_failing_shutdown_hook(self):
+        block, started, release = self.make_blocking_task()
+
+        @self.huey.on_shutdown()
+        def broken_hook():
+            raise ValueError('hook failed')
+
+        block()
+        consumer = self.consumer(workers=1)
+        consumer.start()
+        self.assertTrue(started.wait(5))
+
+        drain = consumer.drain(timeout=5)
+        release.set()
+        report = drain.wait(5)  # Hook failure must not hang waiters.
+        self.assertTrue(report.drained)
+
+    def test_drain_after_stop_resolves(self):
+        consumer = self.consumer(workers=1)
+        consumer.start()
+        consumer.stop(graceful=True)
+
+        report = consumer.drain(timeout=5).wait(5)
+        self.assertTrue(report.drained)
+        self.assertEqual(report.pending, ())
+
+    def test_drain_run_loop_exits_after_tasks_finish(self):
+        block, started, release = self.make_blocking_task()
+        signals = []
+
+        @self.huey.signal()
+        def capture(sig, task, *args, **kwargs):
+            signals.append(sig)
+
+        result = block()
+        consumer = self.consumer(workers=1)
+        consumer._set_signal_handlers = lambda: None  # Not main thread.
+        run_t = threading.Thread(target=consumer.run)
+        run_t.start()
+        self.assertTrue(started.wait(5))
+
+        drain = consumer.drain(timeout=5)
+        release.set()
+        self.assertTrue(drain.wait(5).drained)
+        run_t.join(5)
+        self.assertFalse(run_t.is_alive())
+
+        # The completed task was not misreported as interrupted.
+        self.assertEqual(result.get(blocking=True, timeout=2), 1337)
+        self.assertIn(SIGNAL_COMPLETE, signals)
+        self.assertNotIn(SIGNAL_INTERRUPTED, signals)
+
+    @unittest.skipIf(sys.platform == 'win32', 'requires fork()')
+    @slow_test()
+    def test_drain_process_workers(self):
+        # Drain with process workers: a real consumer process tree, a
+        # blocking task controlled via a fork-shared Event, and a sqlite
+        # backend shared by parent and children (no external service).
+        import multiprocessing
+        mp = multiprocessing.get_context('fork')
+        started = mp.Event()
+        release = mp.Event()
+
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            huey = SqliteHuey('draintest',
+                              filename=os.path.join(tmp_dir, 'h.db'))
+
+            @huey.task()
+            def block():
+                started.set()
+                release.wait(30)
+                return 1337
+
+            huey.pending_count()  # Parent opens connection before fork.
+            consumer = huey.create_consumer(
+                workers=2, worker_type='process', check_worker_health=False)
+            result = block()
+            consumer.start()
+            try:
+                self.assertTrue(started.wait(10))
+                drain = consumer.drain(timeout=10)
+                self.assertFalse(drain.done)
+
+                release.set()
+                report = drain.wait(10)
+                self.assertTrue(report.resolved)
+                self.assertTrue(report.drained)
+                self.assertEqual(result.get(blocking=True, timeout=5), 1337)
+            finally:
+                release.set()
+                consumer.stop(graceful=True)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    @unittest.skipIf(sys.platform == 'win32', 'requires fork()')
+    @slow_test()
+    def test_drain_process_workers_at_startup(self):
+        # Drain requested before start(): process workers must not pick
+        # up the queued task, and the task must remain in the queue.
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            huey = SqliteHuey('draintest',
+                              filename=os.path.join(tmp_dir, 'h.db'))
+
+            @huey.task()
+            def task_a(n):
+                return n + 1
+
+            huey.pending_count()
+            consumer = huey.create_consumer(
+                workers=1, worker_type='process', check_worker_health=False)
+            task_a(1)
+            drain = consumer.drain(timeout=10)
+            consumer.start()
+            try:
+                report = drain.wait(10)
+                self.assertTrue(report.drained)
+                self.assertEqual(huey.pending_count(), 1)  # Not lost.
+            finally:
+                consumer.stop(graceful=True)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 class TestForkSafeFlag(unittest.TestCase):
     def test_set_wait(self):
         flag = ForkSafeFlag()
