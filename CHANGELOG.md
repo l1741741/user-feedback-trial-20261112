@@ -5,6 +5,15 @@ Changelog
 
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
+* Add explicit task-graph instantiation for reusable templates:
+  `Huey.instantiate()`, `Task.instantiate()` / `Task.clone()`,
+  `group.instantiate()` and `chord.instantiate()`, plus a `Param` placeholder
+  for per-publication values. Each instance receives fresh task ids, deep-copied
+  per-task data, fresh chord bookkeeping and a cleared resolved expiration,
+  without modifying the template. A sub-graph referenced from more than one
+  position is rejected rather than silently published twice. Default
+  `enqueue()` behavior is unchanged.
+
 ## 3.5.4
 
 * Fix possible hang if worker holding the stop flag was killed while holding

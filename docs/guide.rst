@@ -1465,6 +1465,116 @@ For more information, see the following API docs:
 * :py:class:`ResultGroup` and :py:class:`ChordResult`
 
 
+.. _reusable-task-graphs:
+
+Reusing a task graph template
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Pipelines, groups and chords can be cached and published repeatedly, but the
+objects themselves are *not* reusable as-is. Publishing resolves ``expires``,
+stamps chord bookkeeping onto member tasks and appends results into successor
+tasks, so enqueueing the same object twice carries state from the first
+publication into the second.
+
+Use :py:meth:`Huey.instantiate` (or, equivalently,
+:py:meth:`Task.instantiate` / ``task.clone()``) to publish an independent
+instance:
+
+.. code-block:: python
+
+    from huey import Param
+
+    @huey.task()
+    def reserve(order_id, items):
+        return {'order': order_id, 'items': items}
+
+    @huey.task()
+    def charge(payload):
+        return payload
+
+    @huey.task()
+    def notify(results):
+        return len(results)
+
+    # Build the template once, e.g. at import time.
+    order_template = chord([
+        reserve.s(Param('order_id'), Param('items')).then(charge),
+        reserve.s(Param('order_id'), Param('items')).then(charge),
+    ], notify.s())
+
+    # Publish it once per order. The template is never modified.
+    for order in pending_orders:
+        huey.enqueue(order_template.instantiate(
+            order_id=order.id, items=order.items))
+
+What instantiation guarantees:
+
+* **Fresh ids.** Every task in the instance (head, pipeline, error handlers,
+  nested chords and their callbacks) gets a new task id and its own result.
+  Two instances can therefore run concurrently without overwriting each
+  other's results.
+* **Copied data.** Arguments and keyword arguments are deep-copied per task.
+  Two tasks in one publication never share a mutable argument, even if the
+  template accidentally reused the same list or dict for both, mirroring how
+  separately-serialized messages behave at runtime.
+* **Resolved placeholders.** :py:class:`Param` values are substituted anywhere
+  they appear, including nested inside containers. A missing value raises
+  :py:class:`~huey.exceptions.GraphInstantiationError` and leaves the
+  template untouched.
+* **Nothing is written back.** The template's ids, arguments, chord configs
+  and resolved expiration are unchanged by instantiation and by running the
+  instances. A resolved ``expires`` on a previously-published template is
+  cleared in the instance so it is computed at publication time.
+* **Failure isolation.** If instantiation or serialization of one instance
+  raises, the template and any other instances are unaffected; simply build
+  the next instance.
+
+Compatibility: :py:meth:`Huey.enqueue` behaves exactly as before. Instantiation
+is opt-in; nothing clones automatically.
+
+How shared sub-graphs are treated
+"""""""""""""""""""""""""""""""""
+
+A template can reference one task object from several positions (for example
+``t = fetch.s(u); group([t, t])``). Huey has no fan-in, so there is no single
+well-defined run for such a node: each reference would be published separately
+and execute more than once with the same task id. Rather than silently
+double-running or duplicating the node into independent copies,
+:py:meth:`~Huey.instantiate` rejects it with
+:py:class:`~huey.exceptions.GraphInstantiationError`:
+
+.. code-block:: python
+
+    t = fetch.s(url)
+    # Raises GraphInstantiationError: `t` is used from two positions.
+    group([t, t]).instantiate()
+
+    # Build one task instance per position instead.
+    group([fetch.s(url), fetch.s(url)]).instantiate()
+
+Two references are *not* treated as duplicates:
+
+* A chord callback. A chord publishes its callback to every member through one
+  ``ChordConfig``; the instance reuses a single callback clone with a fresh
+  chord id. This also works if the template was itself published before.
+* A shared ``on_error`` handler, as produced by :py:meth:`group.error`. Every
+  member may share the handler task; it is cloned once per instance.
+
+Group and chord ``tasks`` must be a list or tuple to be instantiated; a
+generator cannot be reused as a template and is rejected with ``TypeError``
+rather than being consumed.
+
+``group.instantiate()`` and ``chord.instantiate()`` return the same type, with
+callbacks, nested chords and member pipelines cloned consistently. An empty
+group or chord instantiates to an empty one, and enqueueing it behaves as
+before (an empty chord still runs its callback with ``[]``).
+
+If you want to keep running the very same task graph (same ids), that is plain
+:py:meth:`~Huey.enqueue`, with its existing single-publication semantics.
+``template.instantiate()`` with no arguments is enough when you only need a
+fresh copy of the same shape.
+
+
 Signals
 -------
 

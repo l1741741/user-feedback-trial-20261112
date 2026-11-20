@@ -14,8 +14,10 @@ from huey.api import TaskWrapper
 from huey.api import chord
 from huey.api import crontab
 from huey.api import group
+from huey.api import Param
 from huey.constants import EmptyData
 from huey.exceptions import CancelExecution
+from huey.exceptions import GraphInstantiationError
 from huey.exceptions import RateLimitExceeded
 from huey.exceptions import ResultTimeout
 from huey.exceptions import ConfigurationError
@@ -2450,6 +2452,641 @@ class TestChordPrimitive(BaseTestCase):
         self.assertEqual(self.execute_next(), -1)
         self.assertEqual(len(self.huey), 0)
         self.assertEqual(state, [99])
+
+
+class _GraphSnapshot(object):
+    """Structural snapshot of a task graph, for before/after comparison."""
+    def __init__(self, node):
+        self.nodes = []
+        self.ids = []
+        self._walk(node)
+
+    def _task(self, task):
+        while task is not None:
+            self.nodes.append((task.id, task.args, task.kwargs,
+                               task.expires_resolved,
+                               task.chord_config.cid if task.chord_config
+                               else None,
+                               task.on_error is not None))
+            self.ids.append(task.id)
+            if task.on_error is not None:
+                self._task(task.on_error)
+            task = task.on_complete
+
+    def _walk(self, node):
+        if isinstance(node, group):
+            for t in node.tasks:
+                self._walk(t)
+        elif isinstance(node, chord):
+            for t in node.tasks:
+                self._walk(t)
+            self._task(node.callback)
+        else:
+            self._task(node)
+
+
+class TestTaskGraphInstantiation(BaseTestCase):
+    def template_fixture(self):
+        state = []
+
+        @self.huey.task()
+        def produce(order, key, opts=None):
+            state.append(('produce', order))
+            return {'order': order, 'items': []}
+
+        @self.huey.task()
+        def charge(order=None, items=None, coupon=None):
+            state.append(('charge', order))
+            items.append('charged')
+            return (order, items, coupon)
+
+        @self.huey.task()
+        def ship(results):
+            state.append(('ship', results))
+            return results
+
+        @self.huey.task()
+        def on_err(exc):
+            state.append(('error', str(exc)))
+
+        return state, produce, charge, ship, on_err
+
+    def test_instantiate_pipeline_isolated_ids_and_data(self):
+        state, produce, charge, ship, on_err = self.template_fixture()
+
+        shared = {'coupon': 'SAVE'}
+        template = produce.s(Param('order'), Param('key'), opts=shared)
+        template.then(charge)
+        template.error(on_err)
+
+        before = _GraphSnapshot(template)
+        instance = template.instantiate(
+            order='A-1', key='k1', opts='not-the-template',
+            coupon='C-A')
+
+        # Fresh ids throughout, and the template is untouched.
+        self.assertEqual(_GraphSnapshot(template).nodes, before.nodes)
+        self.assertNotEqual(instance.id, template.id)
+        self.assertNotEqual(instance.on_complete.id, template.on_complete.id)
+        self.assertNotEqual(instance.on_error.id, template.on_error.id)
+        self.assertIsNot(instance.on_complete, template.on_complete)
+        self.assertIsNot(instance.on_error, template.on_error)
+
+        # Placeholders were filled without mutating the template; the
+        # placeholder only occupies existing positional parameters.
+        self.assertEqual(instance.args, ('A-1', 'k1'))
+        self.assertEqual(instance.on_complete.kwargs, {})
+        self.assertEqual(template.args, (Param('order'), Param('key')))
+        self.assertEqual(template.on_complete.kwargs, {})
+        self.assertEqual(template.kwargs['opts'], {'coupon': 'SAVE'})
+        # The unused 'coupon' value is ignored, not written into the graph.
+        self.assertNotIn('coupon', instance.kwargs)
+
+        other = template.instantiate(
+            order='B-2', key='k2', opts='B', coupon='C-B')
+        self.assertNotEqual(instance.id, other.id)
+
+        # Publishing both copies runs each independently through the consumer
+        # path. The pipeline Result holds one handle per task in the chain.
+        r1 = self.huey.enqueue(instance)
+        r2 = self.huey.enqueue(other)
+        while len(self.huey):
+            self.execute_next()
+
+        self.assertEqual(len(r1), 2)
+        self.assertEqual(r1.get()[-1], ('A-1', ['charged'], None))
+        self.assertEqual(r2.get()[-1], ('B-2', ['charged'], None))
+        self.assertEqual(state.count(('produce', 'A-1')), 1)
+        self.assertEqual(state.count(('produce', 'B-2')), 1)
+
+    def test_instantiate_repeated_enqueue_does_not_accumulate(self):
+        state, produce, charge, ship, on_err = self.template_fixture()
+
+        @self.huey.task()
+        def tail(results):
+            return ('tail', results)
+
+        template = produce.s('template-order', 'k').then(charge).then(tail)
+        fresh1 = template.instantiate()
+        fresh2 = template.instantiate()
+        args_before = (fresh1.args, fresh1.on_complete.args,
+                       fresh1.on_complete.on_complete.args)
+
+        self.huey.enqueue(fresh1)
+        self.huey.enqueue(fresh2)
+        while len(self.huey):
+            self.execute_next()
+
+        # Enqueueing the same Task object twice accumulates arguments; each
+        # instantiation therefore has to be a separate graph.
+        self.assertEqual((fresh1.args, fresh1.on_complete.args,
+                          fresh1.on_complete.on_complete.args), args_before)
+        self.assertEqual(fresh1.args, ('template-order', 'k'))
+        self.assertEqual(state.count(('produce', 'template-order')), 2)
+
+    def test_instantiate_empty_and_nested_groups(self):
+        @self.huey.task()
+        def ident(v):
+            return v
+
+        empty = group([])
+        result = self.huey.enqueue(empty.instantiate())
+        self.assertEqual(result.get(), [])
+
+        inner = group([ident.s(Param('a')), group([ident.s(Param('b'))])])
+        outer = group([inner, group([])])
+        template = outer
+        before = _GraphSnapshot(template)
+
+        instance = template.instantiate(a='a', b='b')
+        self.assertEqual(_GraphSnapshot(template).nodes, before.nodes)
+        result = self.huey.enqueue(instance)
+        while len(self.huey):
+            self.execute_next()
+        self.assertEqual(result.get(), [['a', ['b']], []])
+
+    def test_instantiate_chord_and_nested_chord_isolated(self):
+        @self.huey.task()
+        def ident(v):
+            return v
+
+        @self.huey.task()
+        def gather(vs):
+            return vs
+
+        template = chord([
+            chord([ident.s(Param('x')), ident.s('fixed')], gather),
+            chord([ident.s('fixed2')], gather),
+        ], gather)
+        before = _GraphSnapshot(template)
+
+        inst1 = template.instantiate(x='one')
+        inst2 = template.instantiate(x='two')
+        self.assertEqual(_GraphSnapshot(template).nodes, before.nodes)
+
+        # Chord bookkeeping ids differ between instances and from the
+        # template's callback, and the nested callbacks are distinct objects.
+        self.assertNotEqual(inst1.callback.id, template.callback.id)
+        self.assertNotEqual(inst1.callback.id, inst2.callback.id)
+        self.assertIsNot(inst1.tasks[0].callback, inst2.tasks[0].callback)
+        self.assertIsNot(inst1.tasks[0].callback, template.tasks[0].callback)
+
+        r1 = self.huey.enqueue(inst1)
+        r2 = self.huey.enqueue(inst2)
+        while len(self.huey):
+            self.execute_next()
+
+        self.assertEqual(r1.get(), [['one', 'fixed'], ['fixed2']])
+        self.assertEqual(r2.get(), [['two', 'fixed'], ['fixed2']])
+
+    def test_instantiate_shared_callback_within_one_publication(self):
+        # A callback shared by several members of a published chord is cloned
+        # once per instantiation, so all members reference the same
+        # instance-local callback. The template callback is not reused.
+        @self.huey.task()
+        def ident(v):
+            return v
+
+        @self.huey.task()
+        def gather(vs):
+            return vs
+
+        callback = gather.s()
+        template = chord([ident.s(1), ident.s(2)], callback)
+        instance = template.instantiate()
+        self.assertIsNot(instance.callback, template.callback)
+        self.assertNotEqual(instance.callback.id, template.callback.id)
+
+        # Publishing stamps the chord config onto each member; within one
+        # publication both members share the same callback object.
+        self.huey.enqueue(instance)
+        member_cfgs = [t.chord_config for t in instance.tasks]
+        self.assertTrue(all(c is not None for c in member_cfgs))
+        self.assertIs(member_cfgs[0].callback, member_cfgs[1].callback)
+        self.assertIs(member_cfgs[0].callback, instance.callback)
+        self.assertEqual(member_cfgs[0].cid, member_cfgs[1].cid)
+        self.assertNotEqual(member_cfgs[0].cid, template.callback.id)
+
+        while len(self.huey):
+            self.execute_next()
+
+    def test_instantiate_chord_member_pipelines_and_errors(self):
+        state = []
+
+        @self.huey.task()
+        def ident(v):
+            return v
+
+        @self.huey.task()
+        def fail(v):
+            raise ValueError('bad %s' % v)
+
+        @self.huey.task()
+        def gather(vs):
+            return vs
+
+        @self.huey.task()
+        def on_err(exc):
+            state.append(str(exc))
+            return 'err: %s' % exc
+
+        template = chord([
+            ident.s(Param('p')).then(ident).error(on_err),
+            fail.s('fixed').error(on_err),
+        ], gather)
+        before = _GraphSnapshot(template)
+        instance = template.instantiate(p=5)
+        self.assertEqual(_GraphSnapshot(template).nodes, before.nodes)
+        for idx in (0, 1):
+            self.assertNotEqual(instance.tasks[idx].on_error.id,
+                                template.tasks[idx].on_error.id)
+            self.assertIsNot(instance.tasks[idx].on_error,
+                             template.tasks[idx].on_error)
+
+        result = self.huey.enqueue(instance)
+        while len(self.huey):
+            self.execute_next()
+        values = result.get()
+        self.assertEqual(values[0], 5)
+        self.assertIsInstance(values[1], Error)
+        self.assertEqual(len(state), 1)
+        self.assertEqual(state[0], 'bad fixed')
+
+        # The template's error handlers are untouched.
+        self.assertEqual(len(template.tasks[0].on_error.args), 0)
+        self.assertEqual(template.tasks[1].on_error.args, ())
+
+    def test_instantiate_missing_parameter_does_not_mutate_template(self):
+        @self.huey.task()
+        def task_a(x, y=None):
+            return (x, y)
+
+        template = task_a.s(Param('x'), y=Param('y'))
+        before = _GraphSnapshot(template)
+        self.assertRaises(GraphInstantiationError, template.instantiate, x=1)
+        self.assertEqual(_GraphSnapshot(template).nodes, before.nodes)
+        self.assertEqual(template.args, (Param('x'),))
+        self.assertEqual(template.kwargs, {'y': Param('y')})
+
+    def test_instantiate_partial_failure_then_success(self):
+        # A failed instantiation must not poison later ones.
+        @self.huey.task()
+        def task_a(x):
+            return x
+
+        @self.huey.task()
+        def bad(x):
+            raise ValueError(x)
+
+        template = task_a.s(Param('x')).then(bad)
+        self.assertRaises(GraphInstantiationError, template.instantiate)
+        good = template.instantiate(x=7)
+        self.assertEqual(good.args, (7,))
+        self.assertNotEqual(good.id, template.id)
+
+    def test_instantiate_serialization_failure_then_retry(self):
+        @self.huey.task()
+        def task_a(x):
+            return x
+
+        template = task_a.s(Param('x'))
+
+        class Broken(object):
+            # Copies fine, but cannot be pickled for the queue.
+            def __deepcopy__(self, memo):
+                clone = Broken()
+                clone.copied = True
+                return clone
+
+            def __reduce__(self):
+                raise ValueError('cannot serialize')
+
+        good = template.instantiate(x='ok')
+        rgood = self.huey.enqueue(good)
+        bad = template.instantiate(x=Broken())
+        self.assertRaises(ValueError, self.huey.enqueue, bad)
+
+        # A serialization failure does not corrupt the template or later
+        # instances; the failed instance is simply not in the queue.
+        self.execute_next()
+        self.assertEqual(rgood.get(), 'ok')
+        retry = template.instantiate(x='again')
+        rretry = self.huey.enqueue(retry)
+        self.execute_next()
+        self.assertEqual(rretry.get(), 'again')
+
+    def test_instantiate_concurrent_from_same_template(self):
+        @self.huey.task()
+        def task_a(order, items):
+            items.append(order)
+            return (order, list(items))
+
+        # The same mutable object is supplied to both instantiations; each
+        # instance must still get its own copy.
+        shared_items = []
+        template = task_a.s(Param('order'), Param('items'))
+        before = _GraphSnapshot(template)
+
+        import threading
+        results = {}
+        errors = []
+        start = threading.Barrier(2)
+
+        def worker(order):
+            try:
+                start.wait()
+                inst = template.instantiate(order=order, items=shared_items)
+                results[order] = (inst, self.huey.enqueue(inst))
+            except Exception as exc:  # pragma: no cover - test failure path.
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=('t%d' % i,))
+                   for i in range(2)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+
+        self.assertEqual(errors, [])
+        self.assertNotEqual(results['t0'][0].id, results['t1'][0].id)
+        self.assertIsNot(results['t0'][0].args[1], results['t1'][0].args[1])
+        while len(self.huey):
+            self.execute_next()
+
+        # Neither the template nor the caller's list is written back.
+        self.assertEqual(shared_items, [])
+        self.assertEqual(_GraphSnapshot(template).nodes, before.nodes)
+        self.assertEqual(sorted(r.get() for _, r in results.values()),
+                         [('t0', ['t0']), ('t1', ['t1'])])
+
+    def test_instantiate_resets_resolved_expiration(self):
+        @self.huey.task()
+        def task_a(x):
+            return x
+
+        template = task_a.s(1, expires=60)
+        # Simulate the template having been published once already.
+        self.huey.enqueue(template)
+        self.execute_next()
+        self.assertIsNotNone(template.expires_resolved)
+
+        instance = template.instantiate()
+        self.assertIsNone(instance.expires_resolved)
+        self.assertEqual(template.expires_resolved is not None, True)
+
+    def test_instantiate_resolves_nested_placeholders(self):
+        @self.huey.task()
+        def task_a(payload):
+            return payload
+
+        template = task_a.s({
+            'order': Param('order'),
+            'lines': [Param('order'), {'nested': Param('order')}],
+        })
+        instance = template.instantiate(order='O-9')
+        self.assertEqual(instance.args[0], {
+            'order': 'O-9',
+            'lines': ['O-9', {'nested': 'O-9'}]})
+        self.assertEqual(template.args[0]['order'], Param('order'))
+
+        r = self.huey.enqueue(instance)
+        self.execute_next()
+        self.assertEqual(r.get()['order'], 'O-9')
+
+    def test_instantiate_shared_subgraph_is_reported(self):
+        # A task instance used in two positions is not expanded into two
+        # copies (which would double-execute), nor silently shared; the graph
+        # is ambiguous, so instantiation refuses it.
+        @self.huey.task()
+        def ident(v):
+            return v
+
+        shared = ident.s(Param('v'))
+        template = group([shared, shared])
+        before = _GraphSnapshot(template)
+
+        self.assertRaisesRegex(
+            GraphInstantiationError, 'more than one position',
+            template.instantiate, v=1)
+        self.assertEqual(_GraphSnapshot(template).nodes, before.nodes)
+
+        # Building a separate instance per position is the supported form.
+        template = group([ident.s(Param('v')), ident.s(Param('v'))])
+        instance = template.instantiate(v=2)
+        result = self.huey.enqueue(instance)
+        while len(self.huey):
+            self.execute_next()
+        self.assertEqual(result.get(), [2, 2])
+
+    def test_instantiate_shared_error_handler_allowed(self):
+        # A single error handler shared by every member of a group is the
+        # documented group.error() pattern; it is not a duplicate publication
+        # of the graph's work.
+        @self.huey.task()
+        def ident(v):
+            return v
+
+        @self.huey.task()
+        def on_err(exc):
+            return 'handled'
+
+        on_err_task = on_err.s()
+        template = group([ident.s(1), ident.s(2)])
+        for member in template.tasks:
+            member.on_error = on_err_task
+        instance = template.instantiate()
+        self.assertIs(instance.tasks[0].on_error,
+                      instance.tasks[1].on_error)
+        self.assertIsNot(instance.tasks[0].on_error, on_err_task)
+
+    def test_instantiate_preserves_task_subclass_and_registry(self):
+        class CustomTask(Task):
+            marker = 'custom'
+
+        @self.huey.task(task_base=CustomTask)
+        def task_c(v):
+            return v
+
+        template = task_c.s(Param('v'))
+        instance = template.instantiate(v=3)
+        self.assertTrue(isinstance(instance, CustomTask))
+        self.assertTrue(instance is not template)
+
+        r = self.huey.enqueue(instance)
+        task = self.huey.dequeue()
+        self.assertTrue(isinstance(task, CustomTask))
+        self.assertEqual(task.execute(), 3)
+        self.huey.execute(task)
+        self.assertEqual(r.get(), 3)
+
+        # Instances still round-trip through the task registry.
+        message = self.huey._registry.create_message(instance)
+        restored = self.huey._registry.create_task(message)
+        self.assertTrue(isinstance(restored, CustomTask))
+        self.assertEqual(restored.execute(), 3)
+
+    def test_instantiate_chord_template_after_a_publish(self):
+        # The original problem: publishing a chord stamps chord_config onto
+        # the members. Instantiating from a template that has already been
+        # published must not carry that state into the new publication.
+        @self.huey.task()
+        def ident(v):
+            return v
+
+        @self.huey.task()
+        def gather(vs):
+            return vs
+
+        template = chord([ident.s(1), ident.s(2)], gather.s())
+        r0 = self.huey.enqueue(template)
+        while len(self.huey):
+            self.execute_next()
+        self.assertEqual(r0.get(), [1, 2])
+        template_cids = {t.chord_config.cid for t in template.tasks}
+
+        instance = template.instantiate()
+        self.assertIsNot(instance.tasks[0].chord_config,
+                         template.tasks[0].chord_config)
+        self.assertIsNot(instance.tasks[0].chord_config.callback,
+                         template.tasks[0].chord_config.callback)
+        self.assertEqual({t.chord_config.cid for t in instance.tasks},
+                         {instance.tasks[0].chord_config.cid})
+
+        r1 = self.huey.enqueue(instance)
+        while len(self.huey):
+            self.execute_next()
+        self.assertEqual(r1.get(), [1, 2])
+
+        # Publishing the instance gives it a fresh chord id; the template's
+        # member configs are unchanged.
+        self.assertTrue({t.chord_config.cid for t in instance.tasks}
+                        .isdisjoint(template_cids))
+
+    def test_instantiate_custom_task_subclass_state(self):
+        class StatefulTask(Task):
+            def __init__(self, *args, **kwargs):
+                super(StatefulTask, self).__init__(*args, **kwargs)
+                self.extra = []
+
+        @self.huey.task(task_base=StatefulTask)
+        def task_s(v):
+            return v
+
+        template = task_s.s(Param('v'))
+        template.extra.append('template')
+        self.assertIsInstance(template, StatefulTask)
+
+        a = template.instantiate(v=1)
+        b = template.instantiate(v=2)
+        self.assertEqual(a.extra, ['template'])
+        self.assertIsNot(a.extra, template.extra)
+        self.assertIsNot(a.extra, b.extra)
+        self.assertEqual(template.extra, ['template'])
+
+    def test_instantiate_does_not_share_subgraph_between_callbacks(self):
+        # A template that (perhaps by mistake) reuses one mutable argument
+        # object for two separate tasks must not let those tasks share it at
+        # runtime -- each gets its own copy, just as separate serialized
+        # messages would.
+        @self.huey.task()
+        def mutate(tag, data):
+            data.append(tag)
+            return (tag, list(data))
+
+        shared = []
+        template = group([
+            mutate.s('a', shared),
+            mutate.s('b', shared),
+        ])
+        instance = template.instantiate()
+        self.assertIsNot(instance.tasks[0].args[1], instance.tasks[1].args[1])
+
+        result = self.huey.enqueue(instance)
+        while len(self.huey):
+            self.execute_next()
+        self.assertEqual(result.get(), [('a', ['a']), ('b', ['b'])])
+        # And the template's shared object is still empty.
+        self.assertEqual(shared, [])
+
+    def test_instantiate_result_group_references_instance_tasks(self):
+        @self.huey.task()
+        def ident(v):
+            return v
+
+        @self.huey.task()
+        def gather(vs):
+            return vs
+
+        template = chord([ident.s(Param('v')), ident.s('fixed')], gather)
+        before = _GraphSnapshot(template)
+        instance = template.instantiate(v='A')
+        result = self.huey.enqueue(instance)
+        while len(self.huey):
+            self.execute_next()
+
+        # Result handles refer to the instance's tasks, never the template's.
+        template_ids = {node for node in before.ids}
+        self.assertTrue(all(r.id not in template_ids
+                            for r in result.results))
+        self.assertEqual(result.results.get(), ['A', 'fixed'])
+        self.assertEqual(result.get(), ['A', 'fixed'])
+        # Reading results must not write back into the template.
+        self.assertEqual(_GraphSnapshot(template).nodes, before.nodes)
+
+    def test_instantiate_real_consumer_two_orders(self):
+        # Exercise both instances through an actual Consumer (thread workers)
+        # rather than the manual dequeue/execute loop.
+        state = []
+
+        @self.huey.task()
+        def reserve(order):
+            state.append(('reserve', order))
+            return {'order': order, 'lines': []}
+
+        @self.huey.task()
+        def pick(order=None, lines=None):
+            state.append(('pick', order))
+            lines.append('picked')
+            return {'order': order, 'lines': lines}
+
+        @self.huey.task()
+        def finalize(order=None, lines=None):
+            state.append(('finalize', order))
+            return (order, lines)
+
+        @self.huey.task()
+        def notify(results):
+            return sorted(r[0] for r in results)
+
+        template = chord([reserve.s(Param('order')).then(pick).then(finalize)
+                          for _ in range(2)], notify)
+        before = _GraphSnapshot(template)
+
+        r1 = self.huey.enqueue(template.instantiate(order='ORDER-A'))
+        r2 = self.huey.enqueue(template.instantiate(order='ORDER-B'))
+
+        with self.consumer_context(workers=2):
+            got1 = r1.get(blocking=True, timeout=5)
+            got2 = r2.get(blocking=True, timeout=5)
+
+        self.assertEqual(got1, ['ORDER-A', 'ORDER-A'])
+        self.assertEqual(got2, ['ORDER-B', 'ORDER-B'])
+        self.assertEqual(state.count(('finalize', 'ORDER-A')), 2)
+        self.assertEqual(state.count(('finalize', 'ORDER-B')), 2)
+        self.assertEqual(_GraphSnapshot(template).nodes, before.nodes)
+
+    def test_instantiate_one_shot_iterable_refused(self):
+        # Instantiation must not consume a generator template, since that
+        # would make the next publication empty.
+        @self.huey.task()
+        def ident(v):
+            return v
+
+        template = group(ident.s(i) for i in range(3))
+        self.assertRaisesRegex(TypeError, 'generator', template.instantiate)
+        self.assertEqual(len(list(template.tasks)), 3)
+
+    def test_publication_api_type_checks(self):
+        self.assertRaises(TypeError, self.huey.instantiate, object())
+        self.assertRaises(TypeError, self.huey.instantiate, [1, 2])
 
 
 class TestTaskChaining(BaseTestCase):

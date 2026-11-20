@@ -797,6 +797,48 @@ Huey object
             :py:meth:`~Huey.enqueue` directly when working with pipelines,
             groups, or chords.
 
+        .. note::
+            Enqueueing the *same* object repeatedly is not safe for reuse.
+            Enqueueing resolves expirations, stamps chord bookkeeping onto
+            members and appends results to successor tasks. Build a fresh graph
+            for each publication, or use :py:meth:`~Huey.instantiate` (or
+            :py:meth:`Task.instantiate`) to copy a template.
+
+    .. py:method:: instantiate(graph, params=None, **values)
+
+        :param graph: a :py:class:`Task` (including pipelines and error
+            handlers), a :py:class:`group` or a :py:class:`chord` to use as a
+            reusable template.
+        :param dict params: mapping of :py:class:`Param` placeholder name to
+            value.
+        :param values: additional placeholder values, as keyword arguments.
+        :returns: a new graph of the same type, ready to enqueue.
+
+        Produce an independent instance of a task graph template. This is the
+        supported way to cache a chain or chord and publish it repeatedly for
+        different inputs.
+
+        Every task in the instance -- the head, the ``on_complete`` pipeline,
+        ``on_error`` handlers, nested group/chord callbacks and chord
+        bookkeeping -- receives a new task id. Argument and keyword values are
+        deep-copied per task, placeholders are resolved, and any resolved
+        expiration is cleared so it is computed at publication time. The
+        template itself is never modified.
+
+        The clone memo is per instantiation, so two concurrent calls against
+        the same template can neither observe nor corrupt each other's state,
+        and a failure part-way through (missing placeholder, unpicklable
+        value) leaves the template and any earlier instances untouched.
+
+        See :ref:`reusable-task-graphs` in the guide for details on sharing,
+        groups and chords, and the exact publication semantics.
+
+        .. code-block:: python
+
+            template = cache.s(Param('order_id')).then(charge).error(alert)
+            for order in orders:
+                huey.enqueue(template.instantiate(order_id=order.id))
+
     .. py:method:: revoke(task, revoke_until=None, revoke_once=False)
 
         .. seealso:: Use :py:meth:`Result.revoke` instead.
@@ -1541,6 +1583,39 @@ Huey object
         will be retried. A :py:class:`RetryTask`, rate-limit or lock rejection
         with a retry pending does not count as a failure.
 
+    .. py:method:: instantiate(params=None, **values)
+
+        :param dict params: mapping of :py:class:`Param` placeholder name to
+            value.
+        :param values: additional placeholder values as keyword arguments.
+        :returns: an independent copy of this task and its pipeline.
+
+        See :py:meth:`Huey.instantiate`. ``clone`` is an alias for this method
+        so a template reads naturally as
+        ``template.clone(order_id=...)``.
+
+
+.. py:class:: Param(name)
+
+    Placeholder for a value supplied when instantiating a task graph.
+
+    Use a ``Param`` anywhere in a template's arguments (positional or keyword,
+    including nested inside dicts, lists and tuples). When the template is
+    instantiated, each placeholder is replaced with the value supplied for that
+    name. Instantiation fails with
+    :py:class:`~huey.exceptions.GraphInstantiationError` if a value is missing.
+
+    .. code-block:: python
+
+        from huey import Param
+
+        template = send_invoice.s(Param('customer_id'),
+                                  amount=Param('amount'))
+        result = huey.enqueue(template.instantiate(customer_id=42, amount=10))
+
+    Placeholders are never serialized onto a published task: they are always
+    resolved by :py:meth:`Huey.instantiate`.
+
 
 .. py:function:: crontab(minute='*', hour='*', day='*', month='*', day_of_week='*'[, strict=False])
 
@@ -1675,7 +1750,9 @@ Huey object
     that may be executed in parallel. When a group is enqueued, Huey returns a
     :py:class:`ResultGroup` for reading the results.
 
-    :param list tasks: any number of :py:class:`Task` instances.
+    :param list tasks: any number of :py:class:`Task` instances. Use a list or
+        tuple (not a one-shot iterator) if the group will be reused as a
+        template.
 
     Example:
 
@@ -1733,6 +1810,12 @@ Huey object
                 group([fetch.s(u) for u in urls])
                 .error(on_fetch_error)
                 .then(aggregate))
+
+    .. py:method:: instantiate(params=None, **values)
+
+        :returns: an independent ``group`` with new task ids and copied data.
+
+        See :py:meth:`Huey.instantiate`.
 
 .. py:class:: chord(tasks, callback)
 
@@ -1874,6 +1957,15 @@ Huey object
     When the inner chords complete and their callbacks finish, the outer
     chord's callback (``final``) receives the two inner callback results as a
     list. See :ref:`groups-and-chords` in the guide for a detailed example.
+
+    .. py:method:: instantiate(params=None, **values)
+
+        :returns: an independent ``chord`` with fresh task ids, callbacks and a
+            fresh chord id.
+
+        See :py:meth:`Huey.instantiate`. Chord bookkeeping (``chord_config``)
+        written onto a template by a previous publication is not copied as-is;
+        the instance receives its own chord id and its own callback clone.
 
 
 .. py:class:: ChordResult(results, callback_result, pipeline=None)

@@ -16,7 +16,9 @@ from huey.api import SqliteHuey
 from huey.api import chord
 from huey.api import crontab
 from huey.api import group
+from huey.api import Param
 from huey.exceptions import CancelExecution
+from huey.exceptions import GraphInstantiationError
 from huey.exceptions import RetryTask
 from huey.utils import Error
 from huey.utils import SKIPPED

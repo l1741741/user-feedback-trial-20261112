@@ -1,4 +1,5 @@
 import copy
+import contextvars
 import datetime
 import inspect
 import itertools
@@ -18,6 +19,7 @@ from huey.constants import EmptyData
 from huey.consumer import Consumer
 from huey.exceptions import CancelExecution
 from huey.exceptions import ConfigurationError
+from huey.exceptions import GraphInstantiationError
 from huey.exceptions import RateLimitExceeded
 from huey.exceptions import RETRYING_EXCEPTIONS
 from huey.exceptions import ResultTimeout
@@ -323,6 +325,24 @@ class Huey(object):
 
         results = self._pipeline_results(task)
         return ResultGroup(results) if len(results) > 1 else results[0]
+
+    def instantiate(self, graph, params=None, **values):
+        """
+        Return an independent copy of a task graph template.
+
+        The template may be a :py:class:`Task` (including pipelines and error
+        handlers), a :py:class:`group` or a :py:class:`chord`. The returned
+        graph contains new task ids, deep-copied data and placeholders
+        (:py:class:`Param`) resolved from ``params`` and ``values``. The
+        template itself is never modified, so it can be instantiated
+        repeatedly and concurrently.
+
+        :param graph: a Task, group or chord to use as a template.
+        :param dict params: mapping of placeholder name to value.
+        :param values: additional placeholder values.
+        :returns: a new Task, group or chord, ready to enqueue.
+        """
+        return _instantiate_graph(graph, params, values)
 
     def _enqueue_chord(self, chord_obj):
         cid = str(uuid.uuid4())
@@ -906,6 +926,26 @@ class Task(object):
             self.on_error = _signature(task, args, kwargs)
         return self
 
+    def instantiate(self, params=None, **values):
+        """
+        Return an independent copy of this task and its pipeline, suitable for
+        enqueueing as a fresh publication.
+
+        Every task in the cloned graph (the task itself, its ``on_complete``
+        chain, its ``on_error`` handler and any chord bookkeeping) receives a
+        new task id. Arguments and keyword arguments are deep-copied, and any
+        :py:class:`Param` placeholder is replaced with the corresponding value
+        from ``params`` (or the ``**values`` keyword arguments). The source
+        task graph is not modified.
+
+        :param dict params: mapping of placeholder name to value.
+        :param values: additional placeholder values.
+        :returns: a new :py:class:`Task` instance.
+        """
+        return _instantiate_graph(self, params, values)
+
+    clone = instantiate
+
     def execute(self):
         # Implementation provided by subclass, see: TaskWrapper.create_task().
         raise NotImplementedError
@@ -928,9 +968,305 @@ def _signature(task, args=(), kwargs=None):
     return task
 
 
+class Param(object):
+    """
+    Placeholder for a value supplied when instantiating a task graph.
+
+    Use ``Param`` in the arguments of a task that will serve as a template::
+
+        template = charge.s(Param('order_id'), amount=Param('amount'))
+        instance = template.instantiate(order_id=42, amount=10)
+
+    Placeholders are resolved anywhere they appear in a task's arguments,
+    including nested inside dicts, lists, tuples, namedtuples and custom
+    objects that support copying. A placeholder that is not supplied a value
+    raises :py:class:`~huey.exceptions.GraphInstantiationError`.
+
+    Placeholders are only meaningful in templates. A published task's
+    arguments must not contain a :py:class:`Param`; instantiate the template
+    first.
+    """
+    __slots__ = ('name',)
+
+    def __init__(self, name):
+        if not isinstance(name, str) or not name:
+            raise ValueError('Param name must be a non-empty string.')
+        self.name = name
+
+    def __repr__(self):
+        return 'Param(%r)' % (self.name,)
+
+    def __eq__(self, other):
+        return isinstance(other, Param) and self.name == other.name
+
+    def __hash__(self):
+        return hash((Param, self.name))
+
+    def __reduce__(self):
+        return (Param, (self.name,))
+
+    def __deepcopy__(self, memo):
+        # When a graph is being instantiated, deep-copying a Param resolves it
+        # so placeholders nested in arbitrary objects are filled in too.
+        if id(self) in memo:
+            return memo[id(self)]
+        params = _instantiation_params.get()
+        if params is None:
+            clone = Param(self.name)
+            memo[id(self)] = clone
+            return clone
+        resolved = _copy_graph_data(_resolve_param(self, params), params,
+                                    memo)
+        memo[id(self)] = resolved
+        return resolved
+
+
+# Active parameter mapping for the instantiation in progress on this thread /
+# context. Used by Param.__deepcopy__ when arguments are copied generically.
+_instantiation_params = contextvars.ContextVar('huey_instantiation_params',
+                                               default=None)
+
+
+def _resolve_param(param, params):
+    try:
+        return params[param.name]
+    except KeyError:
+        raise GraphInstantiationError(
+            'No value supplied for task graph parameter %r.' % param.name)
+
+
+def _copy_graph_data(value, params, memo):
+    """
+    Deep-copy task arguments, replacing ``Param`` placeholders.
+
+    The memo is scoped to a single task invocation, so alias relationships
+    within one task's arguments are preserved, but no two tasks in an instance
+    ever share a mutable object -- even if the template used the same object
+    for both. That mirrors runtime semantics, where each task's data is
+    serialized and deserialized independently.
+    """
+    if isinstance(value, Param):
+        # Copy the caller-supplied value so that two instances of the same
+        # template never share a mutable object, even if the caller passed the
+        # same list/dict to both instantiate() calls. Nested Params inside the
+        # supplied value are literal data, not more placeholders.
+        resolved = _resolve_param(value, params)
+        token = _instantiation_params.set(None)
+        try:
+            return copy.deepcopy(resolved, memo)
+        finally:
+            _instantiation_params.reset(token)
+
+    key = id(value)
+    if key in memo:
+        return memo[key]
+
+    if isinstance(value, dict):
+        clone = {}
+        memo[key] = clone
+        for k, v in value.items():
+            clone[_copy_graph_data(k, params, memo)] = _copy_graph_data(
+                v, params, memo)
+        return clone
+    elif isinstance(value, list):
+        clone = []
+        memo[key] = clone
+        clone.extend(_copy_graph_data(v, params, memo) for v in value)
+        return clone
+    elif isinstance(value, set):
+        clone = set()
+        memo[key] = clone
+        clone.update(_copy_graph_data(v, params, memo) for v in value)
+        return clone
+    elif isinstance(value, frozenset):
+        clone = frozenset(_copy_graph_data(v, params, memo) for v in value)
+        memo[key] = clone
+        return clone
+    elif isinstance(value, tuple):
+        items = tuple(_copy_graph_data(v, params, memo) for v in value)
+        if type(value) is tuple:
+            clone = items
+        else:
+            # Preserve namedtuples and other tuple subclasses where possible.
+            try:
+                clone = type(value)(*items)
+            except TypeError:
+                clone = items
+        memo[key] = clone
+        return clone
+
+    return copy.deepcopy(value, memo)
+
+
+class _GraphInstance(object):
+    """
+    Clones a task graph for one publication.
+
+    Each distinct template task maps to exactly one clone, so a sub-graph that
+    the template shares is shared in the instance, not expanded into
+    independent copies. A shared node is still published from each position
+    that references it, so all those occurrences execute with the same task id
+    and store results under the same key. That is not fan-in and can cause a
+    callback to run more than once, so it is reported by
+    :py:meth:`shared_tasks` rather than silently changing the graph's meaning.
+
+    Chord bookkeeping is the exception: a ``chord`` template installs one
+    ``ChordConfig`` (pointing at the callback) on the tail of every member at
+    publish time. Those repeated references are not separate publications of
+    the callback, so they are tracked separately and excluded from the
+    sharing check.
+    """
+    def __init__(self, params=None, values=None):
+        self.params = {}
+        if params:
+            if not isinstance(params, dict):
+                raise TypeError('params must be a dict.')
+            self.params.update(params)
+        if values:
+            self.params.update(values)
+        self.tasks = {}
+        self.positions = {}
+        self.chords = {}
+
+    def task(self, task, position=None):
+        if task is None:
+            return None
+
+        # Map by identity: the source object is retained alongside its clone
+        # so that an id cannot be silently reused by an unrelated object.
+        key = id(task)
+        entry = self.tasks.get(key)
+        if entry is not None and entry[0] is not task:
+            raise GraphInstantiationError(
+                'Task graph changed while it was being instantiated.')
+        elif entry is None:
+            entry = self.tasks[key] = (task, self._clone_task(task))
+
+        if position is not None:
+            self.positions.setdefault(key, []).append(position)
+        return entry[1]
+
+    def shared_tasks(self):
+        # A chord callback is referenced once by its chord and once per member
+        # via the shared ChordConfig; those config references are bookkeeping,
+        # not additional publications. An error handler shared by every member
+        # of a group (group.error()) is also fine -- but a task used both as a
+        # handler and as a normal graph position is still two publications.
+        shared = []
+        for key, positions in self.positions.items():
+            real = [p for p in positions if p != 'chord-config']
+            if len(real) > 1 and not all(p == 'error' for p in real):
+                shared.append(self.tasks[key][1])
+        return shared
+
+    def _clone_task(self, task):
+        clone = copy.copy(task)
+        # Copy any attributes added by a custom Task subclass so instances do
+        # not share mutable subclass state with the template or each other.
+        # Fall back to a shallow copy for values that cannot be deep-copied
+        # (e.g. an open handle) rather than failing the whole instantiation.
+        extra = getattr(task, '__dict__', {})
+        for name, value in extra.items():
+            if name not in _TASK_STATE_ATTRS:
+                try:
+                    value = copy.deepcopy(value)
+                except Exception:
+                    try:
+                        value = copy.copy(value)
+                    except Exception:
+                        pass
+                setattr(clone, name, value)
+
+        clone.id = clone.create_id()
+        clone.revoke_id = 'r:%s' % clone.id
+        # Each invocation gets its own memo: arguments within one task keep
+        # their internal aliasing, but two tasks never share mutable state.
+        clone.args = _copy_graph_data(task.args, self.params, {})
+        clone.kwargs = _copy_graph_data(task.kwargs, self.params, {})
+        # The expiration is resolved when the instance is enqueued, not when
+        # the template was built or published.
+        clone.expires_resolved = None
+        clone._deadline = None
+        clone.on_complete = self.task(task.on_complete, 'complete')
+        # Error handlers may legitimately be shared by every member of a group
+        # (group.error()), so they do not count toward the sharing check.
+        clone.on_error = self.task(task.on_error)
+        clone.chord_config = self.chord_config(task.chord_config)
+        return clone
+
+    def chord_config(self, chord_config):
+        if chord_config is None:
+            return None
+
+        # Chord bookkeeping keys derive from the chord id, so every instance
+        # needs a fresh one. Members that shared a chord in the template share
+        # one new id within the instance.
+        cid = self.chords.get(chord_config.cid)
+        if cid is None:
+            cid = self.chords[chord_config.cid] = str(uuid.uuid4())
+        return ChordConfig(cid, chord_config.size, chord_config.idx,
+                           self.task(chord_config.callback, 'chord-config'))
+
+    def node(self, node):
+        if isinstance(node, group):
+            return group([self.node(t) for t in self._members(node)])
+        elif isinstance(node, chord):
+            # Clone the callback first so that a callback shared with a member
+            # pipeline maps to the same instance-local copy.
+            callback = self.task(node.callback, 'chord')
+            return chord([self.node(t) for t in self._members(node)],
+                         callback)
+        elif isinstance(node, Task):
+            return self.task(node, 'root')
+        raise TypeError('Cannot instantiate unknown task graph node: %r' %
+                        (node,))
+
+    def _members(self, node):
+        tasks = node.tasks
+        if isinstance(tasks, (list, tuple)):
+            return tasks
+        # Iterating a one-shot iterable here would consume the template and
+        # leave it unusable for the next publication.
+        raise TypeError(
+            'Cannot instantiate a %s whose tasks are a %s; build it from a '
+            'list or tuple so the template can be reused.' %
+            (type(node).__name__, type(tasks).__name__))
+
+
+# Attributes cloned explicitly by _GraphInstance._clone_task. Anything else in
+# a task's __dict__ belongs to a subclass and is deep-copied.
+_TASK_STATE_ATTRS = frozenset((
+    'name', 'args', 'kwargs', 'id', 'revoke_id', 'eta', 'retries',
+    'retry_delay', 'retry_backoff', 'priority', 'expires', 'expires_resolved',
+    'timeout', 'chord_config', '_deadline', 'on_complete', 'on_error'))
+
+
 class PeriodicTask(Task):
     def validate_datetime(self, timestamp):
         return False
+
+
+def _instantiate_graph(node, params=None, values=None):
+    """Clone a Task, group or chord for a fresh publication."""
+    if not isinstance(node, (Task, group, chord)):
+        raise TypeError('Cannot instantiate a %s; expected a Task, group or '
+                        'chord.' % type(node).__name__)
+    inst = _GraphInstance(params, values)
+    token = _instantiation_params.set(inst.params)
+    try:
+        clone = inst.node(node)
+    finally:
+        _instantiation_params.reset(token)
+
+    shared = inst.shared_tasks()
+    if shared:
+        raise GraphInstantiationError(
+            'The task graph references the same task instance from more than '
+            'one position (%s). A shared sub-graph is published once per '
+            'reference, which would execute it more than once with the same '
+            'task id. Build one instance per position, or instantiate the '
+            'branches separately.' % ', '.join(sorted(t.id for t in shared)))
+    return clone
 
 
 class TaskWrapper(object):
@@ -1167,6 +1503,12 @@ class group(object):
             task.error(*args, **kwargs)
         return self
 
+    def instantiate(self, params=None, **values):
+        """Return an independent ``group`` with new task ids and data."""
+        return _instantiate_graph(self, params, values)
+
+    clone = instantiate
+
 
 class chord(object):
     def __init__(self, tasks, callback):
@@ -1180,6 +1522,12 @@ class chord(object):
     def error(self, task, *args, **kwargs):
         self.callback.error(task, *args, **kwargs)
         return self
+
+    def instantiate(self, params=None, **values):
+        """Return an independent ``chord`` with new task ids and data."""
+        return _instantiate_graph(self, params, values)
+
+    clone = instantiate
 
 
 class Result(object):
