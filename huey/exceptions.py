@@ -1,5 +1,27 @@
 class HueyException(Exception): pass
 class ConfigurationError(HueyException): pass
+
+class MessageDecodeError(HueyException):
+    """
+    A message read from the storage backend could not be decoded. This covers
+    truncated or corrupt compressed streams, checksum failures, unexpected
+    trailing data, and signature verification failures. Error messages are
+    deliberately sanitized: they never include message arguments, keying
+    material, or the raw message content.
+    """
+    pass
+
+class MessageTooLarge(MessageDecodeError):
+    """
+    A message exceeded the configured decoding budget, either in its
+    serialized (transfer) form or in cumulative decompressed output.
+    """
+    def __init__(self, what, limit):
+        self.what = what
+        self.limit = limit
+        super(MessageTooLarge, self).__init__(
+            '%s exceeds the configured limit of %d bytes' % (what, limit))
+
 class TaskLockedException(HueyException): pass
 class ResultTimeout(HueyException): pass
 class TaskTimeout(HueyException): pass

@@ -8,6 +8,7 @@ _atexit.register(_shutil.rmtree, TEST_TMP_DIR, ignore_errors=True)
 
 from huey.tests.test_api import *
 from huey.tests.test_asyncio import *
+from huey.tests.test_bounded_decode import *
 from huey.tests.test_consumer import *
 from huey.tests.test_crontab import *
 from huey.tests.test_django_tasks import *

@@ -70,6 +70,12 @@ class Huey(object):
         result data. The default implementation uses pickle.
     :param bool compression: compress tasks and result data (gzip by default).
     :param bool use_zlib: use zlib for compression instead of gzip.
+    :param int max_message_bytes: optional decoding budget limiting the size
+        of a serialized message read from the storage backend. Only used with
+        the default serializer; configure a custom serializer directly.
+    :param int max_decompressed_bytes: optional decoding budget limiting the
+        cumulative decompressed size of a message. Only used with the default
+        serializer; configure a custom serializer directly.
     :param bool immediate_use_memory: automatically switch to a local in-memory
         storage backend when immediate-mode is enabled.
     :param storage_kwargs: arbitrary keyword arguments that will be passed to
@@ -94,8 +100,10 @@ class Huey(object):
 
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
-                 use_zlib=False, immediate_use_memory=True, storage_class=None,
-                 store_intermediate_errors=True, **storage_kwargs):
+                 use_zlib=False, max_message_bytes=None,
+                 max_decompressed_bytes=None, immediate_use_memory=True,
+                 storage_class=None, store_intermediate_errors=True,
+                 **storage_kwargs):
 
         self.name = name
         self.results = results
@@ -105,7 +113,11 @@ class Huey(object):
         self._immediate = immediate
         self.immediate_use_memory = immediate_use_memory
         if serializer is None:
-            serializer = Serializer(compression, use_zlib=use_zlib)
+            serializer = Serializer(
+                compression,
+                use_zlib=use_zlib,
+                max_message_bytes=max_message_bytes,
+                max_decompressed_bytes=max_decompressed_bytes)
         self.serializer = serializer
 
         # Initialize storage.

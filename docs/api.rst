@@ -231,7 +231,7 @@ Huey types
 Huey object
 -----------
 
-.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, storage_class=None, store_intermediate_errors=True, **storage_kwargs)
+.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, max_message_bytes=None, max_decompressed_bytes=None, immediate_use_memory=True, storage_class=None, store_intermediate_errors=True, **storage_kwargs)
 
     :param str name: the name of the task queue, e.g. your application's name.
     :param bool results: whether to store task results.
@@ -251,6 +251,12 @@ Huey object
         result data. The default implementation uses ``pickle``.
     :param bool compression: compress tasks and result data.
     :param bool use_zlib: use zlib for compression instead of gzip.
+    :param int max_message_bytes: decoding budget limiting the size of a
+        serialized message read from the storage backend. Only applied to the
+        default serializer; see :ref:`bounded-decoding`.
+    :param int max_decompressed_bytes: decoding budget limiting the cumulative
+        decompressed size of a message. Only applied to the default
+        serializer; see :ref:`bounded-decoding`.
     :param bool immediate_use_memory: automatically switch to a local in-memory
         storage backend whenever immediate-mode is enabled.
     :param storage_class: storage implementation to use, e.g.
@@ -2211,12 +2217,17 @@ Consumer
 Serializer
 ----------
 
-.. py:class:: Serializer(compression=False, compression_level=6, use_zlib=False, pickle_protocol=pickle.HIGHEST_PROTOCOL)
+.. py:class:: Serializer(compression=False, compression_level=6, use_zlib=False, pickle_protocol=pickle.HIGHEST_PROTOCOL, max_message_bytes=None, max_decompressed_bytes=None)
 
     :param bool compression: use gzip compression
     :param int compression_level: 0 for least, 9 for most.
     :param bool use_zlib: use zlib for compression instead of gzip.
     :param int pickle_protocol: pickle protocol version.
+    :param int max_message_bytes: optional decoding budget for the serialized
+        (transfer) size of a message; see :ref:`bounded-decoding`.
+    :param int max_decompressed_bytes: optional decoding budget for the
+        cumulative decompressed size of a message; see
+        :ref:`bounded-decoding`.
 
     The Serializer class implements a simple interface that can be extended to
     provide your own serialization format. The default implementation uses
@@ -2267,6 +2278,83 @@ Serializer
     Both the application and the consumer must use the same ``secret`` and
     ``salt``.
 
+.. _bounded-decoding:
+
+Bounded decoding
+----------------
+
+When compression is enabled, a small message can decompress into an object
+far larger than the consumer's memory budget. To guard against this, the
+serializer accepts an optional *decoding budget*:
+
+* ``max_message_bytes`` -- maximum size of the serialized message as read
+  from the storage backend. Checked before any decompression or
+  deserialization takes place.
+* ``max_decompressed_bytes`` -- maximum cumulative size of the decompressed
+  payload. Enforced incrementally while decompressing: the stream is never
+  fully decompressed first and measured afterwards, so peak memory stays
+  proportional to the budget rather than to the payload.
+
+The same budget applies everywhere a message is decoded: regular task
+dequeue, scheduled-task batches, :py:class:`Result` reads, result groups,
+and chained (pipelined) tasks. A message that violates the budget raises
+:py:class:`MessageTooLarge`; truncated streams, checksum failures, and
+unexpected trailing data raise :py:class:`MessageDecodeError`. A bad message
+is discarded (or skipped, when reading a batch) and never reaches
+``pickle`` -- it does not affect other messages in the same batch, and the
+consumer keeps running.
+
+Example:
+
+.. code-block:: python
+
+    from huey import RedisHuey
+
+    huey = RedisHuey(
+        'my-app',
+        compression=True,
+        max_message_bytes=256 * 1024,        # 256KB on the wire.
+        max_decompressed_bytes=4 * 1024 * 1024)  # 4MB after decompression.
+
+Or, with an explicitly-constructed serializer (required for
+:py:class:`SignedSerializer`):
+
+.. code-block:: python
+
+    from huey import RedisHuey
+    from huey.serializer import SignedSerializer
+
+    huey = RedisHuey(
+        'my-app',
+        serializer=SignedSerializer(
+            secret='my-secret-key',
+            compression=True,
+            max_message_bytes=256 * 1024,
+            max_decompressed_bytes=4 * 1024 * 1024))
+
+When a budget is configured, decoding is strict about malformed input:
+
+* truncated gzip/zlib streams are rejected,
+* checksum failures are rejected,
+* concatenated gzip members are supported, with the budget applied
+  cumulatively across all members; anything following the final member that
+  is not another well-formed member is rejected,
+* any trailing data after a zlib stream is rejected.
+
+When no budget is configured (the default), decoding behaves exactly as in
+previous versions.
+
+With :py:class:`SignedSerializer`, the HMAC signature is always verified
+before the (executable) pickle deserialization runs, so an unauthenticated
+message is never unpickled. Errors raised during decoding are sanitized:
+they never contain message arguments, keying material, or the raw message
+content.
+
+.. note::
+    The budget only bounds quantities that can be measured reliably -- the
+    serialized byte counts. It does not (and cannot) precisely limit the
+    memory used by the arbitrary Python objects produced by deserialization.
+
 .. _exceptions:
 
 Exceptions
@@ -2279,6 +2367,19 @@ Exceptions
 .. py:class:: ConfigurationError
 
     Raised when Huey encounters a configuration problem.
+
+.. py:class:: MessageDecodeError
+
+    Raised when a message read from the storage backend cannot be decoded:
+    truncated or corrupt compressed streams, checksum failures, or unexpected
+    trailing data. Only raised when a decoding budget is configured; see
+    :ref:`bounded-decoding`.
+
+.. py:class:: MessageTooLarge
+
+    Raised when a message exceeds the configured decoding budget, either in
+    serialized size or cumulative decompressed size. Subclass of
+    :py:class:`MessageDecodeError`.
 
 .. py:class:: TaskLockedException
 
