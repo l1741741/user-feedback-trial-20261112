@@ -363,7 +363,7 @@ Huey object
             # ... later ...
             consumer.stop(graceful=True)
 
-    .. py:method:: task(retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
+    .. py:method:: task(retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, tenant=None, **kwargs)
 
         :param int retries: number of times to retry the function if an
             unhandled exception occurs when it is executed.
@@ -379,6 +379,11 @@ Huey object
             :ref:`priority` (supported by every storage backend except
             :py:class:`RedisHuey` and :py:class:`RedisExpireHuey`, which have
             priority-aware counterparts).
+        :param str tenant: default stable tenant key assigned to every
+            invocation. Individual calls may override it with their own
+            ``tenant`` keyword argument. Only affects ordering when the
+            storage was configured with ``tenant_fair=True``; see
+            :ref:`tenant_fair`.
         :param bool context: when the task is executed, include the
             :py:class:`Task` instance as a keyword argument.
         :param str name: name for this task. If not provided, Huey will default
@@ -453,7 +458,7 @@ Huey object
         revocation, etc.), see :py:class:`TaskWrapper`, :py:class:`Task`,
         and :py:class:`Result`.
 
-    .. py:method:: periodic_task(validate_datetime, retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
+    .. py:method:: periodic_task(validate_datetime, retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, tenant=None, **kwargs)
 
         :param function validate_datetime: function which accepts a
             ``datetime`` instance and returns whether the task should be

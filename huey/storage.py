@@ -43,9 +43,32 @@ class BaseStorage(object):
     """
     blocking = False  # Does dequeue() block until ready, or should we poll?
     priority = True
+    # Whether the storage implements shared, persistent tenant-fair
+    # scheduling. Storages that do not support it reject tenant_fair=True.
+    supports_tenant_fair = False
+    # Stable identifier for tasks that were enqueued without a tenant when
+    # tenant-fair scheduling is enabled.
+    default_tenant = ''
 
-    def __init__(self, name='huey', **storage_kwargs):
+    def __init__(self, name='huey', tenant_fair=False, **storage_kwargs):
         self.name = name
+        self.tenant_fair = bool(tenant_fair)
+        if self.tenant_fair and not self.supports_tenant_fair:
+            raise ConfigurationError(
+                'tenant-fair scheduling is not supported by the %s storage '
+                'backend.' % type(self).__name__)
+
+    def normalize_tenant(self, tenant):
+        """
+        Return the concrete bucket key for an enqueued task. When tenant-fair
+        scheduling is enabled, tasks published without a tenant share a single
+        explicit default bucket instead of bypassing the fair rotation.
+        """
+        if not self.tenant_fair:
+            return None
+        if tenant is None:
+            return self.default_tenant
+        return tenant
 
     def close(self):
         """
@@ -55,13 +78,15 @@ class BaseStorage(object):
         """
         pass
 
-    def enqueue(self, data, priority=None):
+    def enqueue(self, data, priority=None, tenant=None):
         """
         Given an opaque chunk of data, add it to the queue.
 
         :param bytes data: Task data.
         :param float priority: Priority, higher priorities processed first.
                                Defaults to 0.
+        :param str tenant: Optional stable tenant key. Only used when the
+                           storage was configured with ``tenant_fair=True``.
         :return: No return value.
 
         Some storage may not implement support for priority. In that case, the
@@ -309,7 +334,7 @@ class BaseStorage(object):
 
 
 class BlackHoleStorage(BaseStorage):
-    def enqueue(self, data, priority=None): pass
+    def enqueue(self, data, priority=None, tenant=None): pass
     def dequeue(self): pass
     def queue_size(self): return 0
     def enqueued_items(self, limit=None): return []
@@ -333,6 +358,8 @@ class BlackHoleStorage(BaseStorage):
 
 
 class MemoryStorage(BaseStorage):
+    supports_tenant_fair = True
+
     def __init__(self, *args, **kwargs):
         super(MemoryStorage, self).__init__(*args, **kwargs)
         self._c = 0  # Counter to ensure FIFO behavior for queue.
@@ -340,17 +367,61 @@ class MemoryStorage(BaseStorage):
         self._results = {}
         self._schedule = []
         self._counters = {}
+        # Shared, monotonic per-tenant rotation positions. All threads in the
+        # process contend on ``self._lock``, so there is a single fair state.
+        self._tenant_positions = {}
+        self._tenant_counter = 0
         self._lock = threading.RLock()
 
-    def enqueue(self, data, priority=None):
+    def _next_tenant_position(self):
+        self._tenant_counter += 1
+        return self._tenant_counter
+
+    def enqueue(self, data, priority=None, tenant=None):
         with self._lock:
             self._c += 1
             priority = 0 if priority is None else -priority
-            heapq.heappush(self._queue, (priority, self._c, data))
+            tenant = self.normalize_tenant(tenant)
+            if self.tenant_fair:
+                bucket = tenant
+                if bucket not in self._tenant_positions:
+                    self._tenant_positions[bucket] = \
+                        self._next_tenant_position()
+            else:
+                bucket = None
+            heapq.heappush(
+                self._queue,
+                (priority, self._c, data) if bucket is None
+                else (bucket, priority, self._c, data))
+
+    def _dequeue_fair(self):
+        # Caller holds self._lock. Pick the active tenant whose rotation
+        # position is oldest, then take that tenant's highest-priority,
+        # FIFO-oldest task. The heap is only ordered by tenant, so the
+        # within-tenant choice is explicit.
+        if not self._queue:
+            return
+        tenant = min((item[0] for item in self._queue),
+                     key=lambda t: self._tenant_positions[t])
+        idx = min((i for i, item in enumerate(self._queue)
+                   if item[0] == tenant),
+                  key=lambda i: (self._queue[i][1], self._queue[i][2]))
+        item = self._queue.pop(idx)
+        heapq.heapify(self._queue)
+        # The served tenant goes to the back of the rotation.
+        self._tenant_positions[tenant] = self._next_tenant_position()
+        if not any(queued[0] == tenant for queued in self._queue):
+            # Drop empty tenants so they cannot consume a rotation turn
+            # later, and so state cannot bias a tenant that drains and
+            # re-enqueues after a long idle period.
+            self._tenant_positions.pop(tenant, None)
+        return item[-1]
 
     def dequeue(self):
         with self._lock:
             try:
+                if self.tenant_fair:
+                    return self._dequeue_fair()
                 _, _, data = heapq.heappop(self._queue)
             except IndexError:
                 pass
@@ -361,13 +432,40 @@ class MemoryStorage(BaseStorage):
         return len(self._queue)
 
     def enqueued_items(self, limit=None):
+        if self.tenant_fair:
+            # Replay the rotation non-destructively so the reported order
+            # matches repeated dequeue() calls rather than a static snapshot
+            # of the rotation positions.
+            by_tenant = {}
+            for bucket, neg_priority, seq, data in self._queue:
+                by_tenant.setdefault(bucket, []).append(
+                    ((neg_priority, seq), data))
+            positions = dict(self._tenant_positions)
+            counter = self._tenant_counter
+            items = []
+            while by_tenant:
+                tenant = min(by_tenant, key=lambda key: positions[key])
+                bucket_items = by_tenant[tenant]
+                bucket_items.sort(key=lambda entry: entry[0])
+                items.append(bucket_items.pop(0)[1])
+                if not bucket_items:
+                    del by_tenant[tenant]
+                counter += 1
+                positions[tenant] = counter
+            if limit:
+                items = items[:limit]
+            return items
+
         items = [data for _, _, data in sorted(self._queue)]
         if limit:
             items = items[:limit]
         return items
 
     def flush_queue(self):
-        self._queue = []
+        with self._lock:
+            self._queue = []
+            self._tenant_positions = {}
+            self._tenant_counter = 0
 
     def add_to_schedule(self, data, ts):
         with self._lock:
@@ -457,12 +555,17 @@ class RedisStorage(BaseStorage):
     def __init__(self, name='huey', blocking=True, read_timeout=1,
                  connection_pool=None, url=None, client_name=None,
                  notify_result=False, notify_result_ttl=60,
-                 clean_name=True, **connection_params):
+                 clean_name=True, tenant_fair=False, **connection_params):
 
         if Redis is None:
             raise ConfigurationError('"redis" python module not found, cannot '
                                      'use Redis storage backend. Run "pip '
                                      'install redis" to install.')
+
+        if tenant_fair and not self.supports_tenant_fair:
+            raise ConfigurationError(
+                'tenant-fair scheduling is not supported by the %s storage '
+                'backend.' % type(self).__name__)
 
         # Drop common empty values from the connection_params.
         for p in ('host', 'port', 'db'):
@@ -522,7 +625,7 @@ class RedisStorage(BaseStorage):
     def convert_ts(self, ts):
         return time.mktime(ts.timetuple()) + (ts.microsecond * 1e-6)
 
-    def enqueue(self, data, priority=None):
+    def enqueue(self, data, priority=None, tenant=None):
         if priority:
             raise NotImplementedError('Task priorities are not supported by '
                                       'this storage.')
@@ -746,7 +849,7 @@ class RedisExpireStorage(RedisStorage):
 class RedisPriorityQueue(object):
     priority = True
 
-    def enqueue(self, data, priority=None):
+    def enqueue(self, data, priority=None, tenant=None):
         priority = 0 if priority is None else -priority
         # Prefix the message with an encoded timestamp to ensure that messages
         # created with the same priority are stored in the correct order. Since
@@ -838,8 +941,22 @@ class BaseSqlStorage(BaseStorage):
 
     def initialize_schema(self):
         with self.db(commit=True, close=True) as curs:
+            # Migrate pre-feature databases before any DDL that references
+            # the tenant column.
+            self._migrate_tenant_schema(curs)
             for sql in self.ddl:
                 curs.execute(sql)
+
+    def _migrate_tenant_schema(self, curs):
+        # Databases created before tenant-fair scheduling exist lack the
+        # task.tenant column. ALTER TABLE ... ADD COLUMN with a default is a
+        # metadata-only operation on modern SQLite and keeps old messages
+        # readable; they land in the explicit default bucket.
+        curs.execute('pragma table_info(task)')
+        columns = set(row[1] for row in curs.fetchall())
+        if columns and 'tenant' not in columns:
+            curs.execute("alter table task add column tenant text not null "
+                         "default ''")
 
     def sql(self, query, params=None, commit=False, results=False):
         with self.db(commit=commit) as curs:
@@ -852,6 +969,7 @@ class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
     integrity_error = getattr(sqlite3, 'IntegrityError', None)
     operational_error = getattr(sqlite3, 'OperationalError', None)
+    supports_tenant_fair = True
     table_kv = ('create table if not exists kv ('
                 'queue text not null, key text not null, value blob not null, '
                 'primary key(queue, key))')
@@ -862,20 +980,33 @@ class SqliteStorage(BaseSqlStorage):
                    'on schedule (queue, timestamp)')
     table_task = ('create table if not exists task ('
                   'id integer not null primary key, queue text not null, '
-                  'data blob not null, priority real not null default 0.0)')
+                  'data blob not null, priority real not null default 0.0, '
+                  "tenant text not null default '')")
     index_task = ('create index if not exists task_queue_priority_id on task '
                   '(queue, priority desc, id)')
+    # Within-tenant selection index for tenant-fair scheduling.
+    index_task_tenant = ('create index if not exists '
+                         'task_queue_tenant_priority_id on task '
+                         '(queue, tenant, priority desc, id)')
     drop_index_task = 'drop index if exists task_priority_id'  # Old index.
+    # Persistent, shared fair-rotation state. Every consumer process reads and
+    # advances this table inside the same exclusive transaction as its claim,
+    # so workers cannot each maintain a private rotation.
+    table_tenant_state = (
+        'create table if not exists tenant_state ('
+        'queue text not null, tenant text not null, '
+        'position integer not null, primary key(queue, tenant))')
     table_counter = ('create table if not exists counter ('
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           index_task_tenant, table_tenant_state, table_counter,
+           drop_index_task]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
-                 create_tables=True, **kwargs):
+                 tenant_fair=False, create_tables=True, **kwargs):
         self.filename = filename
         self._cache_mb = cache_mb
         self._fsync = fsync
@@ -898,7 +1029,8 @@ class SqliteStorage(BaseSqlStorage):
 
         self.to_blob = memoryview
 
-        super(SqliteStorage, self).__init__(name, create_tables=create_tables)
+        super(SqliteStorage, self).__init__(
+            name, tenant_fair=tenant_fair, create_tables=create_tables)
 
     def _create_connection(self):
         conn = sqlite3.connect(self.filename, timeout=self._timeout,
@@ -929,15 +1061,27 @@ class SqliteStorage(BaseSqlStorage):
                     raise
                 time.sleep(0.01)
 
-    def enqueue(self, data, priority=None):
-        self.sql('insert into task (queue, data, priority) values (?, ?, ?)',
-                 (self.name, self.to_blob(data), priority or 0), commit=True)
+    def enqueue(self, data, priority=None, tenant=None):
+        tenant = self.normalize_tenant(tenant)
+        if tenant is None:
+            self.sql('insert into task (queue, data, priority) '
+                     'values (?, ?, ?)',
+                     (self.name, self.to_blob(data), priority or 0),
+                     commit=True)
+        else:
+            self.sql('insert into task (queue, data, priority, tenant) '
+                     'values (?, ?, ?, ?)',
+                     (self.name, self.to_blob(data), priority or 0, tenant),
+                     commit=True)
 
     def dequeue(self):
         # Quick check without the full exclusive lock.
         if not self.sql('select 1 from task where queue = ? limit 1',
                         (self.name,), results=True):
             return
+
+        if self.tenant_fair:
+            return self._dequeue_tenant_fair()
 
         with self.db(commit=True) as curs:
             curs.execute('select id, data from task where queue = ? '
@@ -949,11 +1093,120 @@ class SqliteStorage(BaseSqlStorage):
                 if curs.rowcount == 1:
                     return data
 
+    def _dequeue_tenant_fair(self):
+        # The whole rotation decision and the claim run in one exclusive
+        # transaction, so concurrent consumers share the exact same fair
+        # state and a failed/rolled-back claim never advances the rotation.
+        with self.db(commit=True) as curs:
+            # Tenants that currently have executable work. Scheduled tasks
+            # live in a separate table and therefore never appear here.
+            curs.execute('select distinct tenant from task where queue = ?',
+                         (self.name,))
+            active = [row[0] for row in curs.fetchall()]
+            if not active:
+                return
+
+            # Register any tenant not yet tracked, stamping it at the back of
+            # the global rotation. Re-registered after a drain, a tenant gets
+            # a fresh position instead of keeping stale bias.
+            placeholders = ','.join('?' * len(active))
+            curs.execute(
+                'select tenant from tenant_state where queue = ? and tenant '
+                'in (%s)' % placeholders,
+                (self.name, *active))
+            known = set(row[0] for row in curs.fetchall())
+            unknown = [tenant for tenant in active if tenant not in known]
+            if unknown:
+                curs.execute(
+                    'select coalesce(max(position), 0) from tenant_state '
+                    'where queue = ?', (self.name,))
+                position = curs.fetchone()[0]
+                for tenant in unknown:
+                    position += 1
+                    curs.execute(
+                        'insert into tenant_state (queue, tenant, position) '
+                        'values (?, ?, ?)', (self.name, tenant, position))
+
+            # The tenant with the smallest position served least recently.
+            curs.execute(
+                'select tenant from tenant_state where queue = ? and tenant '
+                'in (%s) order by position limit 1' % placeholders,
+                (self.name, *active))
+            tenant = curs.fetchone()[0]
+
+            # Within a tenant, priority order and same-priority FIFO remain
+            # unchanged from the non-fair backend.
+            curs.execute(
+                'select id, data from task where queue = ? and tenant = ? '
+                'order by priority desc, id limit 1',
+                (self.name, tenant))
+            result = curs.fetchone()
+            if result is None:
+                # Another transaction cannot have removed rows under our
+                # exclusive lock, so this indicates corrupted state; roll
+                # back rather than silently advancing the rotation.
+                raise self.operational_error(
+                    'tenant-fair rotation selected an empty tenant')
+            tid, data = result
+            curs.execute('delete from task where id = ?', (tid,))
+            if curs.rowcount != 1:
+                raise self.operational_error(
+                    'tenant-fair claim affected %s rows' % curs.rowcount)
+
+            # Move the served tenant to the back of the rotation. A tenant
+            # cannot take a second turn before every other active tenant got
+            # one, regardless of task volume or priority.
+            curs.execute(
+                'select coalesce(max(position), 0) from tenant_state '
+                'where queue = ?', (self.name,))
+            new_position = curs.fetchone()[0] + 1
+            curs.execute(
+                'update tenant_state set position = ? where queue = ? '
+                'and tenant = ?', (new_position, self.name, tenant))
+
+            # Empty tenants leave the rotation table entirely, so they can
+            # neither burn a later turn nor hold a long-term bias.
+            curs.execute('select 1 from task where queue = ? and tenant = ? '
+                         'limit 1', (self.name, tenant))
+            if curs.fetchone() is None:
+                curs.execute(
+                    'delete from tenant_state where queue = ? and tenant = ?',
+                    (self.name, tenant))
+            return data
+
     def queue_size(self):
         return self.sql('select count(id) from task where queue=?',
                         (self.name,), results=True)[0][0]
 
     def enqueued_items(self, limit=None):
+        if self.tenant_fair:
+            # Replay the rotation non-destructively so the reported order
+            # matches repeated dequeue() calls: each turn picks the tenant
+            # with the smallest current position, then moves it to the tail.
+            rows = self.sql(
+                'select t.id, t.data, t.tenant, coalesce(ts.position, ~0) as '
+                'pos from task t left join tenant_state ts on '
+                'ts.queue = t.queue and ts.tenant = t.tenant where '
+                't.queue = ? order by t.tenant, t.priority desc, t.id',
+                (self.name,), results=True)
+            by_tenant = {}
+            positions = {}
+            for tid, data, tenant, pos in rows:
+                by_tenant.setdefault(tenant, []).append((tid, data))
+                positions[tenant] = pos
+            counter = max(positions.values()) if positions else 0
+            items = []
+            while by_tenant:
+                tenant = min(by_tenant, key=lambda key: positions[key])
+                items.append(by_tenant[tenant].pop(0)[1])
+                if not by_tenant[tenant]:
+                    del by_tenant[tenant]
+                counter += 1
+                positions[tenant] = counter
+            if limit is not None:
+                items = items[:limit]
+            return items
+
         sql = 'select data from task where queue=? order by priority desc, id'
         params = (self.name,)
         if limit is not None:
@@ -963,7 +1216,12 @@ class SqliteStorage(BaseSqlStorage):
         return [i for i, in self.sql(sql, params, results=True)]
 
     def flush_queue(self):
-        self.sql('delete from task where queue=?', (self.name,), commit=True)
+        with self.db(commit=True) as curs:
+            curs.execute('delete from task where queue=?', (self.name,))
+            # The rotation state is derived purely from the queue, so a
+            # flush resets it as well.
+            curs.execute('delete from tenant_state where queue=?',
+                         (self.name,))
 
     def add_to_schedule(self, data, ts):
         params = (self.name, self.to_blob(data), ts.timestamp())
@@ -1079,7 +1337,8 @@ class SqliteStorage(BaseSqlStorage):
 
 class CySqliteStorage(SqliteStorage):
     def __init__(self, name='huey', filename='huey.db', pragmas=None,
-                 timeout=5, strict_fifo=False, create_tables=True, **kwargs):
+                 timeout=5, strict_fifo=False, tenant_fair=False,
+                 create_tables=True, **kwargs):
         if cysqlite is None:
             raise ConfigurationError('"cysqlite" not found. Run "pip install '
                                      'cysqlite" to install.')
@@ -1098,6 +1357,7 @@ class CySqliteStorage(SqliteStorage):
             filename,
             timeout=timeout,
             strict_fifo=strict_fifo,
+            tenant_fair=tenant_fair,
             create_tables=create_tables,
             pragmas=pragmas,
             **kwargs)
@@ -1114,12 +1374,16 @@ class CySqliteStorage(SqliteStorage):
 class PostgresStorage(BaseSqlStorage):
     def __init__(self, name='huey', dsn=None, connection=None, blocking=True,
                  read_timeout=1, table_prefix='huey', create_tables=True,
-                 **connection_params):
+                 tenant_fair=False, **connection_params):
         if psycopg is None:
             raise ConfigurationError('"psycopg" (version 3.2 or newer) not '
                                      'found, cannot use Postgres storage '
                                      'backend. Run "pip install psycopg" to '
                                      'install.')
+        if tenant_fair and not self.supports_tenant_fair:
+            raise ConfigurationError(
+                'tenant-fair scheduling is not supported by the %s storage '
+                'backend.' % type(self).__name__)
         self.dsn = dsn
         self.connection = connection  # Zero-arg callable returning conn.
         self.blocking = blocking
@@ -1212,7 +1476,7 @@ class PostgresStorage(BaseSqlStorage):
             local.conn = conn
         return conn
 
-    def enqueue(self, data, priority=None):
+    def enqueue(self, data, priority=None, tenant=None):
         with self.db(commit=True) as curs:
             curs.execute('insert into {} (queue, data, priority) '
                          'values (%s, %s, %s)'.format(self.table_task),
@@ -1414,7 +1678,7 @@ class FileStorage(BaseStorage):
             shutil.rmtree(path)
             os.makedirs(path)
 
-    def enqueue(self, data, priority=None):
+    def enqueue(self, data, priority=None, tenant=None):
         priority = int(priority or 0)
         if priority < 0: raise ValueError('priority must be a positive number')
         if priority > self.MAX_PRIORITY:

@@ -5,6 +5,14 @@ Changelog
 
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
+* Add opt-in tenant-fair scheduling for the SQLite and in-memory storage
+  backends (`tenant_fair=True`). Tasks may carry a stable `tenant` key; the
+  storage rotates between tenants that have executable work while preserving
+  priority and FIFO ordering within each tenant. The rotation state is
+  persisted in the database and shared by all consumers via a single
+  transactional claim. Disabled by default; see `TENANT_FAIR.md` and the
+  "Tenant-fair scheduling" guide section.
+
 ## 3.5.4
 
 * Fix possible hang if worker holding the stop flag was killed while holding

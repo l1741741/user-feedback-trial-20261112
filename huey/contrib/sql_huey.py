@@ -129,7 +129,7 @@ class SqlStorage(BaseStorage):
             self.database.close()
             self.database.connect()
 
-    def enqueue(self, data, priority=None):
+    def enqueue(self, data, priority=None, tenant=None):
         self.check_conn()
         self.Task.create(queue=self.name, data=data, priority=priority or 0)
 

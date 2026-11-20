@@ -50,6 +50,19 @@ logger = logging.getLogger('huey')
 _sentinel = object()
 
 
+def validate_tenant(tenant):
+    """
+    A tenant key is an opaque, stable non-empty string. ``None`` means the
+    task was not assigned to any tenant and is handled according to the
+    storage backend's compatibility rules (see the tenant-fair docs).
+    """
+    if tenant is None:
+        return None
+    if not isinstance(tenant, str) or not tenant:
+        raise ValueError('tenant must be a non-empty string or None')
+    return tenant
+
+
 class Huey(object):
     """
     Huey executes tasks by exposing function decorators that cause the function
@@ -307,6 +320,15 @@ class Huey(object):
         elif isinstance(task, chord):
             return self._enqueue_chord(task)
 
+        # A retried task is the same serialized object, so it keeps its
+        # tenant. Derived pipeline tasks (on_complete / on_error) inherit the
+        # origin task's tenant unless they declare their own. There is no
+        # thread-local or request-local tenant state, so a tenant can never
+        # leak from one publishing request into another.
+        for derived in (task.on_complete, task.on_error):
+            if derived is not None and derived.tenant is None:
+                derived.tenant = task.tenant
+
         # Resolve the expiration time when the task is enqueued.
         if task.expires:
             task.resolve_expires(self.utc)
@@ -316,7 +338,8 @@ class Huey(object):
         if self._immediate:
             self.execute(task)
         else:
-            self.storage.enqueue(self.serialize_task(task), task.priority)
+            self.storage.enqueue(self.serialize_task(task), task.priority,
+                                 task.tenant)
 
         if not self.results:
             return
@@ -534,6 +557,9 @@ class Huey(object):
                 # Copy, as on_error is shared across retries.
                 handler = copy.copy(task.on_error)
                 handler.extend_data(exception)
+                # The error handler belongs to this task's pipeline and keeps
+                # the same tenant (already propagated at enqueue time).
+                handler.tenant = task.tenant
                 self.enqueue(handler)
             if final:
                 self._abort_chord_member(task, error)
@@ -799,11 +825,13 @@ class Task(object):
     default_retry_delay = 0
     default_retry_backoff = 0
     default_timeout = None
+    default_tenant = None
 
     def __init__(self, args=None, kwargs=None, id=None, eta=None, retries=None,
                  retry_delay=None, priority=None, expires=None,
                  on_complete=None, on_error=None, expires_resolved=None,
-                 timeout=None, chord_config=None, retry_backoff=None):
+                 timeout=None, chord_config=None, retry_backoff=None,
+                 tenant=None):
         self.name = type(self).__name__
         self.args = () if args is None else args
         self.kwargs = {} if kwargs is None else kwargs
@@ -821,6 +849,7 @@ class Task(object):
         self.expires_resolved = expires_resolved
         self.timeout = timeout if timeout is not None else self.default_timeout
         self.chord_config = chord_config
+        self.tenant = tenant if tenant is not None else self.default_tenant
         self._deadline = None
 
         self.on_complete = on_complete
@@ -851,6 +880,8 @@ class Task(object):
             rep += ', on error %s' % self.on_error
         if self.chord_config:
             rep += ', chord %s' % self.chord_config.cid
+        if self.tenant:
+            rep += ' tenant=%s' % self.tenant
         return rep
 
     def __hash__(self):
@@ -968,6 +999,15 @@ class TaskWrapper(object):
                 'huey does not support async functions. Wrap the coroutine '
                 'with asyncio.run() in a regular function.')
 
+        # The decorator exposes "tenant" while the Task class attribute is
+        # "default_tenant"; map one onto the other and validate the value.
+        if 'tenant' in settings:
+            settings['default_tenant'] = validate_tenant(
+                settings.pop('tenant'))
+        elif 'default_tenant' in settings:
+            settings['default_tenant'] = validate_tenant(
+                settings['default_tenant'])
+
         def execute(self):
             args, kwargs = self.data
             if self.context:
@@ -998,7 +1038,8 @@ class TaskWrapper(object):
 
     def schedule(self, args=None, kwargs=None, eta=None, delay=None,
                  priority=None, retries=None, retry_delay=None,
-                 retry_backoff=None, expires=None, timeout=None, id=None):
+                 retry_backoff=None, expires=None, timeout=None, id=None,
+                 tenant=None):
         if eta is None and delay is None:
             if isinstance(args, (int, float)):
                 delay = args
@@ -1024,7 +1065,8 @@ class TaskWrapper(object):
             retry_backoff=retry_backoff,
             priority=priority,
             expires=expires,
-            timeout=timeout)
+            timeout=timeout,
+            tenant=validate_tenant(tenant))
         return self.huey.enqueue(task)
 
     def _apply(self, it):
@@ -1057,7 +1099,9 @@ class TaskWrapper(object):
                                retry_backoff=kwargs.pop('retry_backoff', None),
                                priority=kwargs.pop('priority', None),
                                expires=kwargs.pop('expires', None),
-                               timeout=kwargs.pop('timeout', None))
+                               timeout=kwargs.pop('timeout', None),
+                               tenant=validate_tenant(
+                                   kwargs.pop('tenant', None)))
 
 
 class TaskLock(object):
@@ -1298,7 +1342,8 @@ class Result(object):
             timeout=self.task.timeout,
             chord_config=self.task.chord_config,
             on_complete=on_complete,
-            on_error=on_error)
+            on_error=on_error,
+            tenant=self.task.tenant)
         return self.huey.enqueue(task)
 
     def reset(self):

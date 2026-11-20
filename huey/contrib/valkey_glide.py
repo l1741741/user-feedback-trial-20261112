@@ -54,7 +54,7 @@ class ValkeyGlideStorage(RedisStorage):
                                      'properly with blocking operations.')
         self.read_timeout = read_timeout
 
-    def enqueue(self, data, priority=None):
+    def enqueue(self, data, priority=None, tenant=None):
         if priority:
             raise NotImplementedError('Task priorities are not supported by '
                                       'this storage.')

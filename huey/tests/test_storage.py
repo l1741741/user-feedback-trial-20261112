@@ -610,7 +610,8 @@ class TestSqliteStorage(StorageTests, BaseTestCase):
                                    'type = ? and tbl_name = ?',
                                    ('index', 'task'))
         self.assertEqual([r[0] for r in curs.fetchall()],
-                         ['task_queue_priority_id'])
+                         ['task_queue_priority_id',
+                          'task_queue_tenant_priority_id'])
 
 
 @unittest.skipIf(cysqlite is None, 'requires cysqlite')

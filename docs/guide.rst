@@ -607,6 +607,132 @@ For more information:
 * :py:class:`PriorityRedisHuey`
 * :py:meth:`~Huey.task` and :py:meth:`~Huey.periodic_task`
 
+.. _tenant_fair:
+
+Tenant-fair scheduling
+----------------------
+
+When several independent tenants share one queue, a tenant that continuously
+publishes high-priority tasks can keep every other tenant waiting
+indefinitely. Tenant-fair scheduling adds a storage-side round-robin *between
+tenants* on top of the existing priority ordering *within a tenant*.
+
+This feature is **disabled by default**. Enable it when constructing the
+Huey instance; it is supported by :py:class:`SqliteHuey`,
+:py:class:`CySqliteHuey` and the in-memory storage used in immediate mode.
+Other backends raise a :py:class:`~huey.exceptions.ConfigurationError`
+instead of silently ignoring the setting:
+
+.. code-block:: python
+
+    from huey import SqliteHuey
+
+    huey = SqliteHuey(filename='queue.db', tenant_fair=True)
+
+Publishing tasks with a tenant key
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A tenant key is a stable, non-empty string. Pass it per invocation, or set a
+default on the task decorator that individual calls may override:
+
+.. code-block:: python
+
+    @huey.task()
+    def ingest(tenant_id, payload):
+        ...
+
+    # Per-call tenant key.
+    ingest('acme', payload, tenant='acme')
+
+    # Decorator-level default for every invocation.
+    @huey.task(tenant='acme')
+    def acme_report(payload):
+        ...
+
+    # An explicit call always wins over the decorator default.
+    acme_report(payload, tenant='globex')
+
+Invalid keys (empty string or a non-string value) raise ``ValueError`` at
+publish time. Tasks published without a tenant key are not dropped from the
+fair rotation: when the feature is enabled they share one explicit *default
+bucket* and take turns exactly like any other tenant. With the feature
+disabled (the default), the ``tenant`` argument is stored on the task but has
+no effect on ordering, and the queue keeps its historical priority/FIFO
+behavior.
+
+Guarantees and boundaries
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+While tenant-fair scheduling is enabled, every dequeue follows these rules:
+
+1. Only tenants that currently have an executable task participate. The
+   tenant with the oldest rotation position is picked first.
+2. The picked tenant goes to the back of the rotation immediately after its
+   claim. A tenant therefore cannot take a second turn before every other
+   active tenant got one, no matter how many tasks it enqueues or how high
+   their priorities are.
+3. Inside a tenant the ordering is unchanged: higher priority first, then
+   FIFO among equal priorities.
+4. A tenant whose queue drains is removed from the rotation state entirely.
+   If it enqueues work again later it re-registers at the back, so an empty
+   tenant never burns a turn and a tenant cannot preserve an advantageous
+   position across idle periods.
+
+The rotation state is stored **in the storage backend** (a ``tenant_state``
+table for SQLite, shared in-memory state guarded by a lock for the memory
+backend). The selection, the task claim and the rotation update happen inside
+one database transaction, so multiple consumer processes and threads obey the
+same state; nobody keeps a private round-robin list. If a claim fails or the
+transaction rolls back, the rotation is not advanced.
+
+Scheduled (ETA / delay) tasks only enter the rotation when the scheduler
+promotes them into the executable queue; while they sit in the schedule table
+they are invisible to the fair dequeue logic.
+
+The guarantee covers **task dispatch only** -- the order in which tasks are
+handed to workers. It does not equalize task *execution time* or wall-clock
+throughput: a tenant with slow tasks still occupies workers while those tasks
+run, and fairness does not preempt running work.
+
+Retry, task chains and chords
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Tenant ownership travels inside the serialized task; there is no
+thread-local or request-local tenant context, so the tenant from one request
+can never leak into another task.
+
+* A **retry** re-enqueues the same task object, which keeps its tenant.
+* A task created with :py:meth:`~Task.then` (an ``on_complete`` pipeline) or
+  :py:meth:`~Task.error` inherits the origin task's tenant unless it was
+  published with its own explicit tenant. Each hop keeps the rule when it is
+  later enqueued.
+* **Chord** members keep whatever tenant each member was published with. The
+  chord callback is an independent task and uses its own published tenant
+  (the default bucket if unspecified).
+
+Persistence and restarts
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+For SQLite backends the rotation lives in the same database file as the
+queue, so restarting consumer processes loses no state and cannot corrupt or
+bias the rotation. Databases created by an earlier Huey version are migrated
+on open: the missing ``task.tenant`` column is added with a default value,
+and previously enqueued messages become members of the default bucket.
+
+Offline reproduction
+~~~~~~~~~~~~~~~~~~~~
+
+The repository ships two scripts that exercise these properties without any
+external service:
+
+.. code-block:: shell
+
+    # Flooding, priority crossing, restarts, delayed tasks, lineage.
+    python scripts/offline_tenant_fair_repro.py
+
+    # Independent OS processes sharing one database file.
+    python scripts/offline_tenant_fair_multiprocess.py
+
 Canceling or pausing tasks
 --------------------------
 
