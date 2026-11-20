@@ -5,6 +5,16 @@ Changelog
 
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
+* Added explicit publish context (`huey.context.PublishContext`) for carrying
+  a request correlation id and tenant identifier through task serialization and
+  the queue. Context is bound for the full execution lifecycle and restored via
+  a ContextVar token on every path (success, exception, retry); pipelines,
+  error successors and retries inherit explicitly, chord callbacks do not
+  inherit member context, and overrides only affect their own branch via
+  copy-on-stamp. Inputs are validated to bounded, controlled structures before
+  enqueue, sensitive keys and raw Authorization headers are rejected, and a
+  failure-proof `ContextLogFilter` is provided for log attribution.
+
 ## 3.5.4
 
 * Fix possible hang if worker holding the stop flag was killed while holding

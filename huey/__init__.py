@@ -16,6 +16,11 @@ from huey.api import SqliteHuey
 from huey.api import chord
 from huey.api import crontab
 from huey.api import group
+from huey.context import ContextLogFilter
+from huey.context import ContextValidationError
+from huey.context import PublishContext
+from huey.context import get_current_context
+from huey.context import publish_context
 from huey.exceptions import CancelExecution
 from huey.exceptions import RetryTask
 from huey.utils import Error

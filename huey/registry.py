@@ -1,5 +1,6 @@
 from collections import namedtuple
 
+from huey.context import PublishContext
 from huey.exceptions import HueyException
 from huey.utils import ChordConfig
 
@@ -7,7 +8,8 @@ from huey.utils import ChordConfig
 Message = namedtuple('Message', ('id', 'name', 'eta', 'retries', 'retry_delay',
                                  'priority', 'args', 'kwargs', 'on_complete',
                                  'on_error', 'expires', 'expires_resolved',
-                                 'timeout', 'chord_config', 'retry_backoff'))
+                                 'timeout', 'chord_config', 'retry_backoff',
+                                 'task_context'))
 
 # Automatically set missing parameters to None. This is kind-of a hack, but it
 # allows us to add new parameters while continuing to be able to handle
@@ -76,6 +78,13 @@ class Registry(object):
                 task.chord_config.idx,
                 self.create_message(task.chord_config.callback))
 
+        # The publish context is stored on the task as a PublishContext value
+        # object and travels over the wire as a plain (correlation_id, tenant,
+        # fields) tuple so that custom serializers only have to handle
+        # built-in types.
+        task_context = (task.task_context.to_wire()
+                        if task.task_context is not None else None)
+
         return Message(
             task.id,
             task_str,
@@ -91,7 +100,8 @@ class Registry(object):
             task.expires_resolved,
             task.timeout,
             chord_config,
-            task.retry_backoff)
+            task.retry_backoff,
+            task_context)
 
     def create_task(self, message):
         TaskClass = self.string_to_task(message.name)
@@ -110,6 +120,12 @@ class Registry(object):
             callback = self.create_task(cb_ser)
             chord_config = ChordConfig(cid, size, idx, callback)
 
+        # Re-validate on the consumer side: data coming back from the queue
+        # cannot be assumed to satisfy the publish-time constraints.
+        task_context = None
+        if message.task_context is not None:
+            task_context = PublishContext.from_wire(message.task_context)
+
         return TaskClass(
             message.args,
             message.kwargs,
@@ -124,7 +140,8 @@ class Registry(object):
             message.expires_resolved,
             message.timeout,
             chord_config,
-            message.retry_backoff)
+            message.retry_backoff,
+            task_context=task_context)
 
     @property
     def periodic_tasks(self):

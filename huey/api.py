@@ -1,4 +1,5 @@
 import copy
+import contextlib
 import datetime
 import inspect
 import itertools
@@ -16,6 +17,9 @@ from functools import wraps
 from huey import signals as S
 from huey.constants import EmptyData
 from huey.consumer import Consumer
+from huey.context import ContextValidationError
+from huey.context import PublishContext
+from huey.context import current_context
 from huey.exceptions import CancelExecution
 from huey.exceptions import ConfigurationError
 from huey.exceptions import RateLimitExceeded
@@ -307,6 +311,17 @@ class Huey(object):
         elif isinstance(task, chord):
             return self._enqueue_chord(task)
 
+        # Resolve the publish context *before* anything touches the queue.
+        # Precedence, highest first:
+        #   1. an explicit context attached to this task instance;
+        #   2. the ambient context set with ``publish_context()`` (e.g. the
+        #      context of the task currently executing, which gives automatic
+        #      inheritance for dynamically-enqueued child tasks);
+        #   3. no context (None).
+        # An explicit context is applied to a shallow copy, so a shared task
+        # template / sibling is never mutated.
+        task = self._resolve_enqueue_context(task)
+
         # Resolve the expiration time when the task is enqueued.
         if task.expires:
             task.resolve_expires(self.utc)
@@ -324,6 +339,21 @@ class Huey(object):
         results = self._pipeline_results(task)
         return ResultGroup(results) if len(results) > 1 else results[0]
 
+    def _resolve_enqueue_context(self, task):
+        if task.task_context is not None:
+            # Explicit context on the instance: nothing to inherit, nothing to
+            # stamp. Validation already ran in Task.__init__.
+            return task
+
+        ambient = current_context.get()
+        if ambient is None:
+            return task
+
+        # Stamp a *copy* so shared templates and sibling tasks are untouched.
+        task = copy.copy(task)
+        task.task_context = ambient
+        return task
+
     def _enqueue_chord(self, chord_obj):
         cid = str(uuid.uuid4())
         size = len(chord_obj.tasks)
@@ -339,11 +369,21 @@ class Huey(object):
         if not size:
             callback = copy.copy(chord_obj.callback)
             callback.extend_data(([],))
-            self.enqueue(callback)
+            # The callback is not part of any member's execution branch: do not
+            # let the publisher's ambient context leak onto it. An explicitly
+            # attached context (on the callback instance itself) is preserved.
+            self._enqueue_without_ambient_context(callback)
 
         pipeline = self._pipeline_results(chord_obj.callback)
         return ChordResult(results, pipeline[0],
                            ResultGroup(pipeline) if len(pipeline) > 1 else None)
+
+    def _enqueue_without_ambient_context(self, task):
+        token = current_context.set(None)
+        try:
+            return self.enqueue(task)
+        finally:
+            current_context.reset(token)
 
     def _enqueue_chord_member(self, task, config):
         if isinstance(task, chord):
@@ -406,6 +446,20 @@ class Huey(object):
 
         return self._timeout_handler(task.timeout)
 
+    @contextlib.contextmanager
+    def _task_context(self, task):
+        # Bind this task's publish context for the duration of its execution
+        # lifecycle (user function + framework bookkeeping/logging). The
+        # token restores the previous value (often None) even when the task
+        # raises, so a worker thread/greenlet never carries one tenant's
+        # context into the next task. Nested immediate-mode executions
+        # restore the outer task's context on exit.
+        token = current_context.set(task.task_context)
+        try:
+            yield
+        finally:
+            current_context.reset(token)
+
     def _get_timestamp(self):
         return (utcnow() if self.utc else
                 datetime.datetime.now())
@@ -414,22 +468,32 @@ class Huey(object):
         if timestamp is None:
             timestamp = self._get_timestamp()
 
-        if not self.ready_to_run(task, timestamp):
-            self.add_schedule(task)
-        elif self.is_revoked(task, timestamp, False):
-            logger.warning('Task %s was revoked, not executing', task)
-            self._emit(S.SIGNAL_REVOKED, task)
-            self._abort_chord_member(task, SKIPPED)
-        elif task.expires_resolved and task.expires_resolved < timestamp:
-            logger.info('Task %s expired, not executing.', task)
-            self._emit(S.SIGNAL_EXPIRED, task)
-            self._abort_chord_member(task, SKIPPED)
-        else:
-            logger.info('Executing %s', task)
-            self._emit(S.SIGNAL_EXECUTING, task)
-            return self._execute(task, timestamp)
+        # Bind before any logging or signal so every record emitted while this
+        # task is being processed carries its correlation id / tenant. The
+        # token reset in _execute's wrapper guarantees the previous context is
+        # restored on every path (including revoked / expired / re-scheduled).
+        with self._task_context(task):
+            if not self.ready_to_run(task, timestamp):
+                self.add_schedule(task)
+            elif self.is_revoked(task, timestamp, False):
+                logger.warning('Task %s was revoked, not executing', task)
+                self._emit(S.SIGNAL_REVOKED, task)
+                self._abort_chord_member(task, SKIPPED)
+            elif task.expires_resolved and task.expires_resolved < timestamp:
+                logger.info('Task %s expired, not executing.', task)
+                self._emit(S.SIGNAL_EXPIRED, task)
+                self._abort_chord_member(task, SKIPPED)
+            else:
+                logger.info('Executing %s', task)
+                self._emit(S.SIGNAL_EXECUTING, task)
+                return self._execute(task, timestamp)
 
     def _execute(self, task, timestamp):
+        # Kept as the execution entry point for custom Huey subclasses that
+        # override it; context binding happens in execute() around this call.
+        return self._execute_inner(task, timestamp)
+
+    def _execute_inner(self, task, timestamp):
         if self._pre_execute:
             try:
                 self._run_pre_execute(task)
@@ -516,7 +580,11 @@ class Huey(object):
             self._emit(S.SIGNAL_COMPLETE, task)
             if task.on_complete:
                 task.on_complete.extend_data(task_value)
-                self.enqueue(task.on_complete)
+                # The pipeline is this task's continuation branch: inherit the
+                # parent context explicitly unless the successor already has
+                # its own context. We do not rely on the ambient binding, so
+                # the successor's message carries the context itself.
+                self._enqueue_successor(task, task.on_complete)
             if task.chord_config is not None:
                 self._check_chord(task.chord_config, task_value)
         else:
@@ -534,7 +602,9 @@ class Huey(object):
                 # Copy, as on_error is shared across retries.
                 handler = copy.copy(task.on_error)
                 handler.extend_data(exception)
-                self.enqueue(handler)
+                # Error successors belong to this task's branch and inherit its
+                # context unless they carry an explicit override.
+                self._enqueue_successor(task, handler)
             if final:
                 self._abort_chord_member(task, error)
             else:
@@ -542,6 +612,12 @@ class Huey(object):
                 self._requeue_task(task, self._get_timestamp(), retry_eta)
 
         return task_value
+
+    def _enqueue_successor(self, parent_task, successor):
+        if successor.task_context is None and parent_task.task_context is not None:
+            successor = copy.copy(successor)
+            successor.task_context = parent_task.task_context
+        return self.enqueue(successor)
 
     def _abort_chord_member(self, task, value):
         # The rest of the pipeline won't run, so report to its chord here.
@@ -567,7 +643,10 @@ class Huey(object):
 
             callback = cc.callback
             callback.extend_data((results,))
-            self.enqueue(callback)
+            # The chord callback aggregates all members and must not inherit
+            # the executing member's context. Explicitly-attached contexts are
+            # still honored.
+            self._enqueue_without_ambient_context(callback)
 
     def _requeue_task(self, task, timestamp, retry_eta=None):
         task.retries -= 1
@@ -803,7 +882,8 @@ class Task(object):
     def __init__(self, args=None, kwargs=None, id=None, eta=None, retries=None,
                  retry_delay=None, priority=None, expires=None,
                  on_complete=None, on_error=None, expires_resolved=None,
-                 timeout=None, chord_config=None, retry_backoff=None):
+                 timeout=None, chord_config=None, retry_backoff=None,
+                 task_context=None):
         self.name = type(self).__name__
         self.args = () if args is None else args
         self.kwargs = {} if kwargs is None else kwargs
@@ -825,6 +905,21 @@ class Task(object):
 
         self.on_complete = on_complete
         self.on_error = on_error
+
+        # Explicit publish context (correlation id / tenant / ...). Stored as
+        # an immutable PublishContext value object; ``None`` means this task
+        # was published without a context. Validation happens here (or earlier
+        # in PublishContext.__init__) so malformed input is rejected before the
+        # task ever reaches the queue.
+        self.task_context = self._validate_task_context(task_context)
+
+    @staticmethod
+    def _validate_task_context(task_context):
+        if task_context is None or isinstance(task_context, PublishContext):
+            return task_context
+        raise ContextValidationError(
+            'task_context must be a PublishContext instance or None, got %r' %
+            type(task_context).__name__)
 
     @property
     def data(self):
@@ -851,6 +946,9 @@ class Task(object):
             rep += ', on error %s' % self.on_error
         if self.chord_config:
             rep += ', chord %s' % self.chord_config.cid
+        if self.task_context is not None:
+            rep += ' ctx=%s/%s' % (self.task_context.tenant,
+                                   self.task_context.correlation_id)
         return rep
 
     def __hash__(self):
@@ -998,7 +1096,8 @@ class TaskWrapper(object):
 
     def schedule(self, args=None, kwargs=None, eta=None, delay=None,
                  priority=None, retries=None, retry_delay=None,
-                 retry_backoff=None, expires=None, timeout=None, id=None):
+                 retry_backoff=None, expires=None, timeout=None, id=None,
+                 task_context=None):
         if eta is None and delay is None:
             if isinstance(args, (int, float)):
                 delay = args
@@ -1024,7 +1123,8 @@ class TaskWrapper(object):
             retry_backoff=retry_backoff,
             priority=priority,
             expires=expires,
-            timeout=timeout)
+            timeout=timeout,
+            task_context=task_context)
         return self.huey.enqueue(task)
 
     def _apply(self, it):
@@ -1049,6 +1149,10 @@ class TaskWrapper(object):
         if eta is not None or delay is not None:
             eta = normalize_time(eta, delay, self.huey.utc)
 
+        # Publish context is a framework-level keyword, so it never collides
+        # with keyword arguments declared on the task function.
+        task_context = kwargs.pop('task_context', None)
+
         return self.task_class(args, kwargs,
                                id=kwargs.pop('id', None),
                                eta=eta,
@@ -1057,7 +1161,8 @@ class TaskWrapper(object):
                                retry_backoff=kwargs.pop('retry_backoff', None),
                                priority=kwargs.pop('priority', None),
                                expires=kwargs.pop('expires', None),
-                               timeout=kwargs.pop('timeout', None))
+                               timeout=kwargs.pop('timeout', None),
+                               task_context=task_context)
 
 
 class TaskLock(object):
@@ -1298,7 +1403,8 @@ class Result(object):
             timeout=self.task.timeout,
             chord_config=self.task.chord_config,
             on_complete=on_complete,
-            on_error=on_error)
+            on_error=on_error,
+            task_context=self.task.task_context)
         return self.huey.enqueue(task)
 
     def reset(self):

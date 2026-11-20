@@ -127,6 +127,7 @@ Table of contents
    imports
    shared_resources
    signals
+   publish_context
    api
    contrib
    troubleshooting
