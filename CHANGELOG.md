@@ -5,6 +5,14 @@ Changelog
 
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
+* Add an optional persistent, multi-process fixed-window rate limiter
+  (`Huey.rate_limit(..., persistent=True)`). The window roll-over and counter
+  increment run atomically in a storage transaction (SQLite), so several
+  consumer processes sharing one database enforce one shared quota. Default
+  in-process rate limiting is unchanged. A window hold parks the task until
+  the window opens without spending its failure-retry attempts, and revoked
+  or expired tasks are never re-queued indefinitely.
+
 ## 3.5.4
 
 * Fix possible hang if worker holding the stop flag was killed while holding

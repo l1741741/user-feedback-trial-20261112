@@ -962,6 +962,133 @@ Equivalent example using a context-manager instead of a decorator:
 
 See :py:meth:`Huey.rate_limit` for API documentation.
 
+.. _persistent-rate-limiting:
+
+Persistent, multi-process rate-limiting
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The default rate limiter described above keeps its window and counter in
+ordinary storage keys and coordinates them with separate read / reset /
+increment steps. That is fine for a single consumer process, but when several
+consumer processes share one database, two processes crossing a window
+boundary at the same moment can each observe an expired window, each create a
+fresh one, and the aggregate number of grants in that window can exceed
+``limit``.
+
+For that deployment, Huey provides an opt-in **persistent** rate limiter. The
+whole "read the window, roll it over if needed, then increment" operation is
+executed atomically inside one database transaction by the storage backend,
+so every process sharing the database agrees on a single window and a single
+count. No in-process lock and no external coordination service are required:
+on SQLite the transaction is a ``BEGIN EXCLUSIVE`` (or ``BEGIN IMMEDIATE`` for
+the peewee backend), which serializes the writers at the database level.
+
+Enable it by passing ``persistent=True``. The default behavior is unchanged,
+and existing decorators continue to use the original in-process limiter:
+
+.. code-block:: python
+
+    @huey.task()
+    @huey.rate_limit('data-sync', limit=10, per=60, persistent=True)
+    def data_sync(data):
+        service.apply_updates(data)
+
+Guarantees
+++++++++++
+
+* One logical name is granted at most ``limit`` acquisitions per window. Two
+  processes cannot each open the same window and receive extra slots, because
+  the roll-over and the increment are one atomic transaction.
+* Window roll-over is driven by the highest window start timestamp the store
+  has observed. A request that arrives carrying an **older** window (a late
+  straggler, or a process whose clock moved backwards) is rejected and can
+  never reset or decrement the newer window's count.
+* Rejected requests do not mutate the stored count. A non-positive ``limit``
+  rejects without even writing a row, so the limiter's table cannot grow
+  without bound from denials. One row per limiter is retained (bounded by the
+  number of distinct limiter names), not one row per request.
+* State is partitioned by queue name. Two Huey queues that point at the same
+  database file keep fully independent quotas even if they reuse a limiter
+  name.
+
+How a rate-limited task is retried
+++++++++++++++++++++++++++++++++++
+
+When a task is blocked by a persistent limiter, Huey parks it in the schedule
+with an ETA equal to the moment the current window opens. It is therefore not
+sitting in the queue being repeatedly dequeued, and it becomes executable
+only once the window is actually open.
+
+This hold is distinct from an ordinary failure retry:
+
+* With the default ``retry=True`` the hold does **not** consume any of the
+  task's failure-retry attempts. A task declared with ``retries=2`` that is
+  parked several times by the limiter still has both failure retries available
+  when it eventually runs and then raises an error. The limiter's own delay
+  always wins over the task's ``retry_delay`` while it is parked.
+* With ``retry=False`` the limiter never schedules a retry itself; only the
+  task's own retry budget applies, and each such attempt is spent normally.
+  Once the budget is exhausted the rate-limit error is surfaced as the final
+  result, rather than looping forever.
+
+A task that is revoked, or that has expired, while it is parked is dropped when
+the scheduler returns it to the queue; it never re-enters the limiter and is
+not re-scheduled indefinitely.
+
+Clock roll-back
++++++++++++++++
+
+Windows are fixed to the unix epoch (``floor(now / per) * per``). The store
+monotonically keeps the newest window it has seen. If the wall clock moves
+backwards, requests that would fall in an older window are denied until the
+stored (newer) window reaches its end; the reported ``retry_after`` is the
+time remaining on that stored window. Time then advances normally and the next
+real boundary is accepted. If a host's clock is badly wrong and the limiter is
+effectively stuck, an operator can call ``rate_limit(...).reset()`` (or the
+storage's ``rate_limit_reset(name)``) to clear the guard and start a fresh
+window.
+
+Changing ``limit`` or ``per``
++++++++++++++++++++++++++++++
+
+* Changing ``limit`` takes effect in the current window: raising it admits
+  further requests up to the new value, lowering it only affects subsequent
+  acquisitions and never rewrites an already-stored count.
+* Changing ``per`` immediately opens a fresh window. Because the stored row
+  remembers its window length, a ``per`` change is detected on the next
+  request and resets the count to one, so there is no ambiguity about which
+  window length an in-flight row belongs to.
+
+Supported backends
+++++++++++++++++++
+
+The persistent limiter requires the storage API methods ``rate_limit_add``,
+``rate_limit_reset``, ``rate_limit_peek`` and ``flush_rate_limits``. These are
+implemented by the SQLite backends (``SqliteHuey`` and the peewee-based
+``SqlHuey``) and by the in-memory backend (for tests). Asking for
+``persistent=True`` against a backend that does not implement the API raises a
+:py:class:`~huey.exceptions.ConfigurationError` at construction time.
+
+Migration
++++++++++
+
+No migration is needed to keep existing behavior: omit ``persistent`` (or pass
+``False``) and the original in-process limiter is used exactly as before.
+
+To adopt the persistent limiter with an existing SQLite database, deploy the
+new code once. The ``rate_limit`` table is created automatically by the
+storage's normal schema initialization (``CREATE TABLE IF NOT EXISTS``), so an
+existing database file is upgraded in place; no downtime step or data
+conversion is required. Old ``*.rl.*`` counter/window keys written by the
+in-process limiter are simply left unused. If you initialize the schema ahead
+of time (for example with the Django management command), run that command once
+after deploying so the new table exists before the first persistent limiter is
+used.
+
+A terminal, multi-process reproduction is provided in
+``examples/rate_limit_persistent/repro.py``.
+
+
 Task pipelines
 --------------
 

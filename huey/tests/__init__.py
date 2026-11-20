@@ -16,6 +16,9 @@ from huey.tests.test_immediate import *
 from huey.tests.test_mini import *
 from huey.tests.test_postgres import *
 from huey.tests.test_priority import *
+from huey.tests.test_rate_limit import *
+from huey.tests.test_rate_limit_multiprocess import *
+from huey.tests.test_rate_limit_tasks import *
 from huey.tests.test_registry import *
 from huey.tests.test_serializer import *
 from huey.tests.test_signals import *

@@ -26,6 +26,8 @@ from huey.exceptions import TaskException
 from huey.exceptions import TaskLockedException
 from huey.exceptions import TaskTimeout
 from huey.registry import Registry
+from huey.rate_limit import PersistentRateLimit
+from huey.rate_limit import use_time as rate_limit_use_time
 from huey.serializer import Serializer
 from huey.storage import BlackHoleStorage
 from huey.storage import CySqliteStorage
@@ -441,6 +443,12 @@ class Huey(object):
         start = time.monotonic()
         exception = None
         retry_eta = None
+        # When True, the retry is a rate-limit window hold and must not spend
+        # one of the task's ordinary failure-retry attempts.
+        preserve_retries = False
+        # Set when a persistent limiter parked the task until a window opens.
+        # Such a hold requeues the task even when it has no retries declared.
+        window_hold = False
         task_value = None
 
         if task.timeout:
@@ -450,7 +458,10 @@ class Huey(object):
             self._tasks_in_flight.add(task)
             try:
                 with self._timeout_context(task):
-                    task_value = task.execute()
+                    # Bind the execution timestamp so persistent rate limiters
+                    # honor an injected clock (and real time in production).
+                    with rate_limit_use_time(timestamp.timestamp()):
+                        task_value = task.execute()
             finally:
                 # notify_interrupted_tasks() may have already popped it.
                 self._tasks_in_flight.discard(task)
@@ -461,15 +472,42 @@ class Huey(object):
             exception = exc
             self._emit(S.SIGNAL_TIMEOUT, task)
         except RateLimitExceeded as exc:
-            delay = task.retry_delay or exc.delay
-            if exc.retry or task.retries:
-                logger.info('Task %s rate-limited on "%s", retrying in %s',
-                            task.id, exc.key, delay)
-                retry_eta = normalize_time(None, delay, self.utc)
+            if exc.window_boundary:
+                # Persistent limiter. The storage backend tells us exactly
+                # when the window opens, so the task is held until then even
+                # if it declares its own retry_delay, and the hold does not
+                # spend any of its failure-retry attempts.
+                preserve_retries = exc.retry
                 if exc.retry:
-                    task.retries += 1
+                    # The limiter owns this retry: park until the window
+                    # boundary, regardless of the task's own retry budget.
+                    window_hold = True
+                    # Nudge the ETA just past the boundary so clock/float
+                    # rounding cannot park the task back into the old window.
+                    delay = exc.delay + 0.001
+                    logger.info('Task %s rate-limited on "%s", held until '
+                                'window opens in %ss', task.id, exc.key, delay)
+                    retry_eta = normalize_time(None, delay, self.utc)
+                elif task.retries:
+                    # retry=False: only the task's ordinary budget retries.
+                    delay = task.retry_delay or exc.delay
+                    logger.info('Task %s rate-limited on "%s", retrying in %s',
+                                task.id, exc.key, delay)
+                    retry_eta = normalize_time(None, delay, self.utc)
+                else:
+                    logger.info('Task %s rate-limited on "%s"', task.id,
+                                exc.key)
             else:
-                logger.info('Task %s rate-limited on "%s"', task.id, exc.key)
+                delay = task.retry_delay or exc.delay
+                preserve_retries = False
+                if exc.retry or task.retries:
+                    logger.info('Task %s rate-limited on "%s", retrying in %s',
+                                task.id, exc.key, delay)
+                    retry_eta = normalize_time(None, delay, self.utc)
+                    if exc.retry:
+                        task.retries += 1
+                else:
+                    logger.info('Task %s rate-limited on "%s"', task.id, exc.key)
             exception = exc
             self._emit(S.SIGNAL_RATE_LIMITED, task)
         except TaskLockedException as exc:
@@ -520,7 +558,7 @@ class Huey(object):
             if task.chord_config is not None:
                 self._check_chord(task.chord_config, task_value)
         else:
-            final = not task.retries
+            final = not task.retries and not window_hold
             surface = final or (self.store_intermediate_errors and
                                 not isinstance(exception, RETRYING_EXCEPTIONS))
             if surface:
@@ -539,7 +577,8 @@ class Huey(object):
                 self._abort_chord_member(task, error)
             else:
                 self._emit(S.SIGNAL_RETRYING, task)
-                self._requeue_task(task, self._get_timestamp(), retry_eta)
+                self._requeue_task(task, self._get_timestamp(), retry_eta,
+                                   preserve_retries=preserve_retries)
 
         return task_value
 
@@ -569,8 +608,10 @@ class Huey(object):
             callback.extend_data((results,))
             self.enqueue(callback)
 
-    def _requeue_task(self, task, timestamp, retry_eta=None):
-        task.retries -= 1
+    def _requeue_task(self, task, timestamp, retry_eta=None,
+                      preserve_retries=False):
+        if not preserve_retries:
+            task.retries -= 1
         logger.info('Requeueing %s, %s retries', task.id, task.retries)
         if retry_eta is not None:
             task.eta = retry_eta
@@ -774,7 +815,18 @@ class Huey(object):
 
         return flushed
 
-    def rate_limit(self, name, limit, per, retry=True):
+    def rate_limit(self, name, limit, per, retry=True, persistent=False):
+        """
+        Return a fixed-window rate limiter.
+
+        By default the original, in-process :class:`RateLimit` is returned and
+        behavior is unchanged. Pass ``persistent=True`` to get a
+        :class:`~huey.rate_limit.PersistentRateLimit`, whose window state lives
+        in the storage backend (SQLite) and is coordinated atomically across
+        every consumer process sharing the database.
+        """
+        if persistent:
+            return PersistentRateLimit(self, name, limit, per, retry=retry)
         return RateLimit(self, name, limit, per, retry=retry)
 
     def _result_handle(self, task):

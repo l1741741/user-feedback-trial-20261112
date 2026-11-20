@@ -989,15 +989,20 @@ Huey object
             # Flush discovered locks AND the context-manager lock:
             huey.flush_locks('db-backup')  # Clears both.
 
-    .. py:method:: rate_limit(name, limit, per, retry=True)
+    .. py:method:: rate_limit(name, limit, per, retry=True, persistent=False)
 
         :param str name: Name to use for the rate-limiter.
         :param int limit: Maximum invocations in the given window.
         :param int per: Size of rate-limiting window in seconds.
         :param bool retry: Automatically reschedule rate-limited tasks to run
             at beginning of next rate-limit window.
-        :returns: :py:class:`RateLimit` instance, which can be used as a
-            decorator or context-manager.
+        :param bool persistent: When ``True``, return a
+            :py:class:`PersistentRateLimit` whose window state is held in the
+            storage backend and coordinated atomically across consumer
+            processes sharing one database (SQLite). Defaults to ``False``,
+            which keeps the original in-process :py:class:`RateLimit`.
+        :returns: A rate-limiter instance, which can be used as a decorator or
+            context-manager.
 
         Simple fixed-window rate-limiting for tasks.
 
@@ -1070,6 +1075,18 @@ Huey object
 
         In the above code, if the task fails due to being rate-limited, it will
         be retried up to 2 times after a delay of 120s between retries.
+
+        When several consumer processes share one database, the default
+        limiter can over-grant because each process rolls the window over
+        independently. Pass ``persistent=True`` to coordinate the window
+        atomically in storage instead; see :ref:`persistent-rate-limiting`.
+
+        .. code-block:: python
+
+            @huey.task()
+            @huey.rate_limit('data_sync', limit=10, per=60, persistent=True)
+            def data_sync(data):
+                service.apply_updates(data)
 
     .. py:method:: put(key, data)
 
@@ -1667,6 +1684,38 @@ Huey object
         :py:meth:`~RateLimit.current_usage`. This is called automatically when
         the rate-limiter is used as a decorator or context-manager.
 
+
+.. py:class:: PersistentRateLimit(huey, name, limit, per, retry=True)
+
+    Returned by :py:meth:`Huey.rate_limit` when ``persistent=True``. Like
+    :py:class:`RateLimit` it is a decorator and context-manager, but its window
+    state lives in the storage backend and the read-window / roll-over /
+    increment sequence runs in a single database transaction, so multiple
+    consumer processes sharing one database enforce one shared quota. Only the
+    SQLite storage backends (and the in-memory backend, for testing) implement
+    the required storage API; constructing one against any other backend
+    raises :py:class:`~huey.exceptions.ConfigurationError`.
+
+    See :ref:`persistent-rate-limiting` for the full semantics, including the
+    window-hold retry behavior, clock roll-back, and changing ``limit`` /
+    ``per``.
+
+    .. py:method:: acquire(now=None)
+
+        Reserve one slot in the current window. Raises
+        :py:class:`RateLimitExceeded` (with its ``window_boundary`` flag set)
+        when no slot is available; rejected attempts do not change the stored
+        count. ``now`` is an injectable unix timestamp used by the tests.
+
+    .. py:method:: reset()
+
+        Remove all persisted state for this limiter, including a clock
+        roll-back guard.
+
+    .. py:method:: current_usage(now=None)
+
+        :returns: the count stored for the current window, or ``0`` if the
+            persisted row belongs to a closed window or does not exist.
 
 
 .. py:class:: group(tasks)

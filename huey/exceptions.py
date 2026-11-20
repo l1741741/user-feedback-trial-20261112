@@ -5,8 +5,14 @@ class ResultTimeout(HueyException): pass
 class TaskTimeout(HueyException): pass
 
 class RateLimitExceeded(HueyException):
-    def __init__(self, key, delay, retry=True):
-        self.key, self.delay, self.retry = key, delay, retry
+    def __init__(self, key, delay, retry=True, window_boundary=False):
+        self.key = key
+        self.delay = delay
+        self.retry = retry
+        # When set, the task must be held out of the queue until the limiting
+        # window actually opens (delay), and the reservation does not consume
+        # one of the task's ordinary failure-retry attempts.
+        self.window_boundary = window_boundary
         super(RateLimitExceeded, self).__init__(key, delay, retry)
 
     def __str__(self):

@@ -1,5 +1,6 @@
 from functools import partial
 import operator
+import time
 
 from peewee import *
 from playhouse.db_url import connect as db_url_connect
@@ -8,6 +9,7 @@ from huey.api import Huey
 from huey.constants import EmptyData
 from huey.exceptions import ConfigurationError
 from huey.storage import BaseStorage
+from huey.storage import RateLimitResult
 
 
 class BytesBlobField(BlobField):
@@ -37,7 +39,8 @@ class SqlStorage(BaseStorage):
         else:
             self.atomic = self.database.atomic
 
-        self.KV, self.Schedule, self.Task, self.Counter = self.create_models()
+        self.KV, self.Schedule, self.Task, self.Counter, self.RateLimit = (
+            self.create_models())
         if create_tables:
             self.create_tables()
 
@@ -91,12 +94,21 @@ class SqlStorage(BaseStorage):
             class Meta:
                 primary_key = CompositeKey('queue', 'key')
 
-        return (KV, Schedule, Task, Counter)
+        class RateLimit(Base):
+            queue = CharField()
+            key = CharField()
+            window = FloatField()
+            per = FloatField()
+            count = IntegerField()
+            class Meta:
+                primary_key = CompositeKey('queue', 'key')
+
+        return (KV, Schedule, Task, Counter, RateLimit)
 
     def create_tables(self):
         with self.database:
             self.database.create_tables([self.KV, self.Schedule, self.Task,
-                                         self.Counter])
+                                         self.Counter, self.RateLimit])
 
     def initialize_schema(self):
         # Shared entrypoint for the create_huey_tables management command.
@@ -105,7 +117,7 @@ class SqlStorage(BaseStorage):
     def drop_tables(self):
         with self.database:
             self.database.drop_tables([self.KV, self.Schedule, self.Task,
-                                       self.Counter])
+                                       self.Counter, self.RateLimit])
 
     def close(self):
         closed = self.database.close()
@@ -311,6 +323,72 @@ class SqlStorage(BaseStorage):
 
     def flush_counters(self):
         self.Counter.delete().where(self.Counter.queue == self.name).execute()
+
+    def rate_limit_add(self, key, window, limit, per, now=None):
+        if now is None:
+            now = time.time()
+        self.check_conn()
+        RL = self.RateLimit
+        # BEGIN IMMEDIATE for SQLite: the read-modify-write is atomic across
+        # separate processes without any in-process lock or external service.
+        with self.atomic():
+            try:
+                row = (RL.select(RL.window, RL.per, RL.count)
+                       .where((RL.queue == self.name) & (RL.key == key))
+                       .get())
+            except RL.DoesNotExist:
+                row = None
+
+            if row is None or window > row.window or per != row.per:
+                if limit <= 0:
+                    # Reject without writing state.
+                    return RateLimitResult(False, 0, float(per))
+                (RL.replace(queue=self.name, key=key, window=window, per=per,
+                            count=1)
+                 .execute())
+                return RateLimitResult(True, 1, 0.0)
+            elif window < row.window:
+                # Clock moved backwards: never reset a newer window from a
+                # late, older-window request.
+                retry_after = max(0.0, row.window + row.per - now)
+                return RateLimitResult(False, row.count, retry_after)
+
+            if row.count >= limit:
+                retry_after = max(0.0, window + per - now)
+                return RateLimitResult(False, row.count, retry_after)
+
+            count = row.count + 1
+            (RL.update(count=count)
+             .where((RL.queue == self.name) & (RL.key == key))
+             .execute())
+            return RateLimitResult(True, count, 0.0)
+
+    def rate_limit_reset(self, key):
+        self.check_conn()
+        (self.RateLimit
+         .delete()
+         .where((self.RateLimit.queue == self.name) &
+                (self.RateLimit.key == key))
+         .execute())
+
+    def rate_limit_peek(self, key):
+        self.check_conn()
+        try:
+            row = (self.RateLimit
+                   .select(self.RateLimit.window, self.RateLimit.per,
+                           self.RateLimit.count)
+                   .where((self.RateLimit.queue == self.name) &
+                          (self.RateLimit.key == key))
+                   .get())
+        except self.RateLimit.DoesNotExist:
+            return None
+        return {'window': row.window, 'per': row.per, 'count': row.count}
+
+    def flush_rate_limits(self):
+        (self.RateLimit
+         .delete()
+         .where(self.RateLimit.queue == self.name)
+         .execute())
 
 
 SqlHuey = partial(Huey, storage_class=SqlStorage)

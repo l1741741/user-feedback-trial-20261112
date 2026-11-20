@@ -1,0 +1,36 @@
+# Persistent multi-process rate limiting
+
+This example reproduces the behavior of the optional persistent rate limiter
+backed by SQLite. See `docs/guide.rst`, section *Persistent rate-limiting*,
+for the full narrative and migration notes.
+
+## Run
+
+From the repository root, with the project virtualenv active:
+
+```bash
+python examples/rate_limit_persistent/repro.py
+```
+
+Useful flags:
+
+```bash
+python examples/rate_limit_persistent/repro.py --workers 8 --limit 5 --per 30
+python examples/rate_limit_persistent/repro.py --keep   # leave the .db in place
+```
+
+The script spawns real operating-system processes (the `spawn` start method),
+each opening the same SQLite database independently. It asserts that:
+
+1. A window grants at most `limit` slots even when many processes cross the
+   boundary at the same instant.
+2. A fresh window restores the quota.
+3. A late request carrying the previous window (a clock roll-back or a
+   straggler) is rejected and can never reset a newer window's count.
+4. Rejected requests never grow the stored row without bound.
+5. Different Huey queues that share one database keep isolated quotas.
+
+The automated equivalents live in
+`huey/tests/test_rate_limit_multiprocess.py`; single-process semantics are
+covered by `test_rate_limit.py` and task/retry interactions by
+`test_rate_limit_tasks.py`.

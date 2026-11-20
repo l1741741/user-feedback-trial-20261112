@@ -37,6 +37,38 @@ from huey.exceptions import ConfigurationError
 from huey.utils import FileLock
 
 
+class RateLimitResult(tuple):
+    """
+    Outcome of an atomic fixed-window rate-limit reservation.
+
+    A 3-tuple of ``(allowed, count, retry_after)``:
+
+    * ``allowed`` - whether one slot was granted for the requested window.
+    * ``count`` - number of slots consumed in the requested window (a rejected
+      request does not change this value).
+    * ``retry_after`` - seconds until the current window opens again. When the
+      request was rejected because the local clock moved backwards, this is the
+      time remaining on the window that was already observed by the store.
+    """
+    __slots__ = ()
+
+    def __new__(cls, allowed, count, retry_after=0.0):
+        return super(RateLimitResult, cls).__new__(
+            cls, (bool(allowed), int(count), float(retry_after)))
+
+    @property
+    def allowed(self):
+        return self[0]
+
+    @property
+    def count(self):
+        return self[1]
+
+    @property
+    def retry_after(self):
+        return self[2]
+
+
 class BaseStorage(object):
     """
     Base storage-layer interface. Subclasses should implement all methods.
@@ -265,6 +297,44 @@ class BaseStorage(object):
         """
         raise NotImplementedError
 
+    def rate_limit_add(self, key, window, limit, per, now=None):
+        """
+        Atomically reserve one slot in a fixed window.
+
+        The store keeps at most one row per (queue, key): the window with the
+        highest start timestamp ever observed for that limiter. All work for a
+        single call happens inside one transaction, so concurrent processes
+        crossing a window boundary together cannot each create a fresh window
+        and receive more than ``limit`` slots in aggregate.
+
+        :param key: limiter name (the queue name is applied automatically, so
+            different queues sharing one database are isolated).
+        :param window: start timestamp of the caller's current window.
+        :param limit: maximum number of allowed reservations per window.
+        :param per: window length in seconds; a changed value starts a fresh
+            window immediately.
+        :param now: current unix timestamp, injectable for testing.
+        :returns: :class:`RateLimitResult`. Rejected requests do not mutate
+            the stored count, so the row cannot grow without bound. Requests
+            belonging to a stale window (e.g. after the clock moved backwards)
+            are rejected until that window would have ended.
+        """
+        raise NotImplementedError
+
+    def rate_limit_reset(self, key):
+        """
+        Forget all persisted state for the given rate-limiter, including any
+        clock-rollback guard. The next request starts a fresh window.
+        """
+        raise NotImplementedError
+
+    def rate_limit_peek(self, key):
+        """
+        Return the persisted limiter row as a dict
+        (``window``, ``per``, ``count``) or ``None`` when no row exists.
+        """
+        raise NotImplementedError
+
     def result_store_size(self):
         """
         :return: Number of key/value pairs in the result store.
@@ -296,6 +366,12 @@ class BaseStorage(object):
         """
         raise NotImplementedError
 
+    def flush_rate_limits(self):
+        """
+        Clear all persisted rate-limit windows. Backends without a persistent
+        rate-limit store have nothing to clear.
+        """
+
     def flush_all(self):
         """
         Remove all persistent or semi-persistent data.
@@ -306,6 +382,7 @@ class BaseStorage(object):
         self.flush_schedule()
         self.flush_results()
         self.flush_counters()
+        self.flush_rate_limits()
 
 
 class BlackHoleStorage(BaseStorage):
@@ -326,6 +403,10 @@ class BlackHoleStorage(BaseStorage):
     def put_if_empty(self, key, value, ttl=None): return True
     def incr(self, key, amount=1): return amount
     def delete_counter(self, key): pass
+    def rate_limit_reset(self, key): pass
+    def rate_limit_peek(self, key): return None
+    def rate_limit_add(self, key, window, limit, per, now=None):
+        return RateLimitResult(True, 1, 0.0)
     def result_store_size(self): return 0
     def result_items(self): return {}
     def flush_results(self): pass
@@ -340,6 +421,7 @@ class MemoryStorage(BaseStorage):
         self._results = {}
         self._schedule = []
         self._counters = {}
+        self._rate_limits = {}
         self._lock = threading.RLock()
 
     def enqueue(self, data, priority=None):
@@ -426,6 +508,41 @@ class MemoryStorage(BaseStorage):
         with self._lock:
             self._counters.pop(key, None)
 
+    def rate_limit_add(self, key, window, limit, per, now=None):
+        if now is None:
+            now = time.time()
+        with self._lock:
+            row = self._rate_limits.get(key)
+            if row is None or window > row['window'] or row['per'] != per:
+                # First call, a newer window, or a changed window length: open
+                # a fresh window. limit <= 0 rejects without storing anything.
+                if limit <= 0:
+                    return RateLimitResult(False, 0, per)
+                self._rate_limits[key] = {'window': window, 'per': per,
+                                          'count': 1}
+                return RateLimitResult(True, 1, 0.0)
+            elif window < row['window']:
+                # Clock moved backwards: never overwrite a newer window.
+                retry_after = max(0.0, row['window'] + row['per'] - now)
+                return RateLimitResult(False, row['count'], retry_after)
+
+            count = row['count']
+            if count < limit:
+                count += 1
+                row['count'] = count
+                return RateLimitResult(True, count, 0.0)
+            retry_after = max(0.0, window + per - now)
+            return RateLimitResult(False, count, retry_after)
+
+    def rate_limit_reset(self, key):
+        with self._lock:
+            self._rate_limits.pop(key, None)
+
+    def rate_limit_peek(self, key):
+        with self._lock:
+            row = self._rate_limits.get(key)
+            return dict(row) if row is not None else None
+
     def result_store_size(self):
         return len(self._results)
 
@@ -437,6 +554,10 @@ class MemoryStorage(BaseStorage):
 
     def flush_counters(self):
         self._counters = {}
+
+    def flush_rate_limits(self):
+        with self._lock:
+            self._rate_limits = {}
 
 
 # A custom lua script to pass to redis that will read tasks from the schedule
@@ -870,8 +991,13 @@ class SqliteStorage(BaseSqlStorage):
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
+    table_rate_limit = ('create table if not exists rate_limit ('
+                        'queue text not null, key text not null, '
+                        'window real not null, per real not null, '
+                        'count integer not null, '
+                        'primary key(queue, key))')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           table_counter, table_rate_limit, drop_index_task]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
@@ -1075,6 +1201,59 @@ class SqliteStorage(BaseSqlStorage):
 
     def flush_counters(self):
         self.sql('delete from counter where queue=?', (self.name,), True)
+
+    def rate_limit_add(self, key, window, limit, per, now=None):
+        if now is None:
+            now = time.time()
+        # "begin exclusive" serializes every writer on the database, so the
+        # read-modify-write below is atomic across separate processes - no
+        # in-process lock or external coordination service is required.
+        with self.db(commit=True) as curs:
+            curs.execute('select window, per, count from rate_limit '
+                         'where queue = ? and key = ?', (self.name, key))
+            row = curs.fetchone()
+            if row is None or window > row[0] or per != row[1]:
+                # First call, a newer window, or a changed window length opens
+                # a fresh window. A non-positive limit rejects without writing
+                # a row, so denied requests never create unbounded state.
+                if limit <= 0:
+                    return RateLimitResult(False, 0, float(per))
+                curs.execute('insert or replace into rate_limit '
+                             '(queue, key, window, per, count) '
+                             'values (?, ?, ?, ?, 1)',
+                             (self.name, key, window, per))
+                return RateLimitResult(True, 1, 0.0)
+            elif window < row[0]:
+                # Stale window (clock moved backwards): the newer window is
+                # never reset or overwritten by a late, older-window request.
+                retry_after = max(0.0, row[0] + row[1] - now)
+                return RateLimitResult(False, row[2], retry_after)
+
+            # Same window. Rejection leaves the stored count untouched.
+            if row[2] >= limit:
+                retry_after = max(0.0, window + per - now)
+                return RateLimitResult(False, row[2], retry_after)
+            count = row[2] + 1
+            curs.execute('update rate_limit set count = ? '
+                         'where queue = ? and key = ?',
+                         (count, self.name, key))
+            return RateLimitResult(True, count, 0.0)
+
+    def rate_limit_reset(self, key):
+        self.sql('delete from rate_limit where queue = ? and key = ?',
+                 (self.name, key), commit=True)
+
+    def rate_limit_peek(self, key):
+        res = self.sql('select window, per, count from rate_limit '
+                       'where queue = ? and key = ?', (self.name, key),
+                       results=True)
+        if not res:
+            return None
+        window, per, count = res[0]
+        return {'window': window, 'per': per, 'count': count}
+
+    def flush_rate_limits(self):
+        self.sql('delete from rate_limit where queue=?', (self.name,), True)
 
 
 class CySqliteStorage(SqliteStorage):
