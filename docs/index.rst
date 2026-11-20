@@ -130,6 +130,7 @@ Table of contents
    api
    contrib
    troubleshooting
+   quarantine
    recipes
    changes
 

@@ -253,6 +253,11 @@ Huey object
     :param bool use_zlib: use zlib for compression instead of gzip.
     :param bool immediate_use_memory: automatically switch to a local in-memory
         storage backend whenever immediate-mode is enabled.
+    :param bool quarantine: when true, task messages that cannot be decoded or
+        that reference an unregistered task are moved to a persistent
+        quarantine table instead of being logged and dropped. Only supported
+        by the SQLite storage. Default is false. See
+        :ref:`poison-messages`.
     :param storage_class: storage implementation to use, e.g.
         :py:class:`SqliteStorage`. Overrides the class's default.
     :param storage_kwargs: arbitrary keyword arguments that will be passed to
@@ -1154,7 +1159,48 @@ Huey object
     .. py:method:: flush()
 
         Remove all data from the queue, schedule, and result store. This is
-        a destructive operation. Primarily useful for testing.
+        a destructive operation. Primarily useful for testing. When
+        :ref:`quarantine <poison-messages>` is enabled, quarantine records are
+        removed as well.
+
+    .. py:method:: quarantined(limit=None)
+
+        :param int limit: optionally limit the number of records returned.
+        :returns: a list of :py:class:`~huey.quarantine.QuarantineRecord`
+            objects, most recent first.
+
+        Only available when ``quarantine=True``. Raw message bytes are omitted
+        from the records; use :py:meth:`get_quarantined` for a single record.
+        See :ref:`poison-messages`.
+
+    .. py:method:: get_quarantined(record_id)
+
+        :param int record_id: quarantine record id.
+        :returns: the record (including raw ``data``), or ``None``.
+
+    .. py:method:: quarantine_count()
+
+        :returns: the number of quarantined messages for this queue.
+
+    .. py:method:: replay_quarantined(record_id)
+
+        :param int record_id: quarantine record id.
+        :returns: a :py:class:`~huey.quarantine.ReplayResult`, whose truthiness
+            indicates success.
+
+        Validate and re-enqueue a quarantined message. The record is only
+        removed when the message is successfully re-enqueued. If the message
+        still cannot be decoded, the record is left in place and a failed
+        result is returned, so a replay can never create a quarantine loop.
+        The original queue, task id, eta and priority are preserved where they
+        can be determined reliably; a future eta is restored to the schedule.
+
+    .. py:method:: discard_quarantined(record_id)
+
+        :param int record_id: quarantine record id.
+        :returns: ``True`` if the record was deleted.
+
+        Permanently delete a quarantine record without replaying it.
 
     .. py:method:: __len__()
 

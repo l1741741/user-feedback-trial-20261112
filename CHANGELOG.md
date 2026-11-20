@@ -3,6 +3,19 @@ Changelog
 
 ## Master
 
+* Add opt-in bad-message quarantine for the SQLite storage
+  (`SqliteHuey(..., quarantine=True)`, `CySqliteHuey`). Messages that cannot
+  be decoded, reference an unregistered task, or have an invalid structure are
+  moved atomically into a persistent quarantine table, preserving the raw
+  bytes, source, queue and safely-derived metadata (task id/name, eta,
+  priority). The consumer continues with the remaining messages, including
+  within a batch of due scheduled tasks. Multi-consumer safe; a storage
+  failure or crash leaves the original message in place. New read-only,
+  replay and discard APIs (`Huey.quarantined()`, `get_quarantined()`,
+  `replay_quarantined()`, `discard_quarantined()`, `quarantine_count()`) and a
+  `python -m huey.quarantine` CLI. Disabled by default; existing behavior is
+  unchanged.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4

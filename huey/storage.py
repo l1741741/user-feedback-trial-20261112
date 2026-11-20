@@ -43,6 +43,7 @@ class BaseStorage(object):
     """
     blocking = False  # Does dequeue() block until ready, or should we poll?
     priority = True
+    supports_quarantine = False
 
     def __init__(self, name='huey', **storage_kwargs):
         self.name = name
@@ -306,6 +307,87 @@ class BaseStorage(object):
         self.flush_schedule()
         self.flush_results()
         self.flush_counters()
+        self.flush_quarantine()
+
+    # Quarantine API. Implemented by the SQLite storage backends. The Huey
+    # level helpers probe for these methods, so backends without support
+    # simply keep their previous behavior.
+
+    def peek_message(self):
+        """
+        Non-destructively read the next ``(row_id, data)`` from the queue.
+        Implemented by storage that supports quarantine.
+        """
+        raise NotImplementedError
+
+    def peek_schedule(self, ts):
+        """
+        Non-destructively read the soonest due ``(row_id, data)`` from the
+        schedule. Implemented by storage that supports quarantine.
+        """
+        raise NotImplementedError
+
+    def claim_message(self, row_id, data):
+        """
+        Atomically delete a peeked queue message, returning True if this caller
+        won. Implemented by storage that supports quarantine.
+        """
+        raise NotImplementedError
+
+    def claim_schedule(self, row_id, data):
+        """
+        Atomically delete a peeked scheduled message. See ``claim_message``.
+        """
+        raise NotImplementedError
+
+    def quarantine_message(self, source, row_id, data, error_class, error,
+                           metadata=None):
+        """
+        Atomically move a peeked message into quarantine.
+
+        :return: True if this caller moved the message, False if another
+            consumer already claimed it.
+        """
+        raise NotImplementedError
+
+    def quarantined_items(self, queue=None, limit=None):
+        """
+        Return quarantine records, most recent first, without their raw data.
+        """
+        raise NotImplementedError
+
+    def get_quarantined(self, record_id):
+        """
+        Return a single quarantine record including its raw data, or None.
+        """
+        raise NotImplementedError
+
+    def replay_quarantined(self, record_id, message=None, eta=None,
+                           priority=None):
+        """
+        Move a quarantined message back to its original queue. The quarantine
+        record is only removed if the message is stored successfully.
+        """
+        raise NotImplementedError
+
+    def discard_quarantined(self, record_id):
+        """
+        Permanently delete a quarantine record.
+        """
+        raise NotImplementedError
+
+    def quarantine_size(self, queue=None):
+        """
+        Return the number of quarantine records.
+        """
+        raise NotImplementedError
+
+    def flush_quarantine(self):
+        """
+        Delete all quarantine records. No-op for storages without quarantine
+        support, so that ``flush_all()`` works uniformly.
+        """
+        pass
 
 
 class BlackHoleStorage(BaseStorage):
@@ -850,6 +932,7 @@ class BaseSqlStorage(BaseStorage):
 
 class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
+    supports_quarantine = True
     integrity_error = getattr(sqlite3, 'IntegrityError', None)
     operational_error = getattr(sqlite3, 'OperationalError', None)
     table_kv = ('create table if not exists kv ('
@@ -870,8 +953,26 @@ class SqliteStorage(BaseSqlStorage):
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
+
+    # Bad-message quarantine. "source" records whether the message was read
+    # from the task queue or from the schedule. Metadata fields (task_id,
+    # task_name, eta, priority) are only set when they could be recovered
+    # without executing the untrusted pickle.
+    table_quarantine = (
+        'create table if not exists quarantine ('
+        'id integer not null primary key, queue text not null, '
+        'source text not null, '
+        'error_class text not null, error text not null, '
+        'task_id text, task_name text, eta text, priority real, '
+        'data blob not null, size integer not null, '
+        'created_ts real not null)')
+    index_quarantine = (
+        'create index if not exists quarantine_queue_id '
+        'on quarantine (queue, id desc)')
+
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           table_counter, drop_index_task, table_quarantine,
+           index_quarantine]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
@@ -932,6 +1033,207 @@ class SqliteStorage(BaseSqlStorage):
     def enqueue(self, data, priority=None):
         self.sql('insert into task (queue, data, priority) values (?, ?, ?)',
                  (self.name, self.to_blob(data), priority or 0), commit=True)
+
+    def _peek(self, table, cutoff=None):
+        if table == 'task':
+            sql = ('select id, data from task where queue = ? '
+                   'order by priority desc, id limit 1')
+            params = (self.name,)
+        else:
+            sql = ('select id, data from schedule where queue = ? '
+                   'and timestamp <= ? order by timestamp, id limit 1')
+            params = (self.name, cutoff.timestamp())
+        row = self.sql(sql, params, results=True)
+        return row[0] if row else None
+
+    def peek_message(self):
+        """
+        Non-destructively read the next message from the queue.
+
+        :return: ``(row_id, data)`` tuple, or None if the queue is empty.
+        """
+        return self._peek('task')
+
+    def peek_schedule(self, ts):
+        """
+        Non-destructively read the soonest due message from the schedule.
+
+        :param datetime ts: cutoff timestamp.
+        :return: ``(row_id, data)`` tuple, or None.
+        """
+        return self._peek('schedule', ts)
+
+    def _take(self, table, row_id, data):
+        """
+        Delete a previously peeked row, verifying it has not already been
+        claimed by another consumer. Returns True if this caller won the race.
+
+        The comparison on ``data`` guards against a rowid being reused between
+        the peek and the delete.
+        """
+        with self.db(commit=True) as curs:
+            curs.execute('delete from %s where id = ? and queue = ? and data = ?'
+                         % table, (row_id, self.name, self.to_blob(data)))
+            return curs.rowcount == 1
+
+    def claim_message(self, row_id, data):
+        """Atomically claim a peeked queue message. See :py:meth:`_take`."""
+        return self._take('task', row_id, data)
+
+    def claim_schedule(self, row_id, data):
+        """Atomically claim a peeked scheduled message."""
+        return self._take('schedule', row_id, data)
+
+    def quarantine_message(self, source, row_id, data, error_class, error,
+                           metadata=None):
+        """
+        Atomically move a peeked message into the quarantine table.
+
+        The insert and delete occur in a single transaction, so a failure (or a
+        crash mid-move) leaves the message in place and writes no record, while
+        a successful commit writes the record and removes the message together.
+        Only one consumer can win the move, so concurrent consumers produce a
+        single quarantine record.
+
+        :return: True if the message was quarantined, False if another consumer
+            already claimed it.
+        """
+        table = 'task' if source == 'queue' else 'schedule'
+        with self.db(commit=True) as curs:
+            curs.execute('delete from %s where id = ? and queue = ? and data = ?'
+                         % table, (row_id, self.name, self.to_blob(data)))
+            if curs.rowcount != 1:
+                return False  # Lost the race; transaction is a no-op.
+            self._insert_quarantine(curs, source, data, error_class, error,
+                                    metadata)
+            return True
+
+    def _insert_quarantine(self, curs, source, data, error_class, error,
+                           metadata):
+        meta = metadata or {}
+        if isinstance(data, memoryview):
+            data = data.tobytes()
+        curs.execute(
+            'insert into quarantine (queue, source, error_class, error, '
+            'task_id, task_name, eta, priority, data, size, created_ts) '
+            'values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (self.name, source, error_class, error, meta.get('task_id'),
+             meta.get('task_name'), meta.get('eta'), meta.get('priority'),
+             data, len(data), time.time()))
+
+    _quarantine_columns = ('id', 'queue', 'source', 'error_class', 'error',
+                           'task_id', 'task_name', 'eta', 'priority', 'size',
+                           'created_ts')
+
+    def quarantined_items(self, queue=None, limit=None):
+        sql = ('select %s from quarantine%s order by id desc' % (
+            ', '.join(self._quarantine_columns),
+            ' where queue = ?' if queue is not None else ''))
+        params = ()
+        if queue is not None:
+            params = (queue,)
+        if limit is not None:
+            sql += ' limit ?'
+            params += (limit,)
+        return [self._quarantine_record(row) for row in
+                self.sql(sql, params, results=True)]
+
+    def get_quarantined(self, record_id):
+        sql = ('select %s, data from quarantine where id = ?' %
+               ', '.join(self._quarantine_columns))
+        rows = self.sql(sql, (record_id,), results=True)
+        if not rows:
+            return None
+        row = rows[0]
+        data = row[-1]
+        if isinstance(data, memoryview):
+            data = data.tobytes()
+        return self._quarantine_record(row[:-1], data=data)
+
+    def _quarantine_record(self, row, data=None):
+        from huey.quarantine import QuarantineRecord
+        (rid, queue, source, error_class, error, task_id, task_name, eta,
+         priority, size, created_ts) = row
+        return QuarantineRecord(
+            rid, queue, source, error_class, error, task_id, task_name, eta,
+            priority, created_ts, data=data, size=size)
+
+    def replay_quarantined(self, record_id, message=None, eta=None,
+                           priority=None):
+        """
+        Move a quarantined message back onto its original queue.
+
+        The decoded ``message`` (when provided) supplies the task id and
+        priority, so the callers must have validated it first -- this method
+        never deserializes anything. If ``message`` is None the record's
+        stored id/priority are used.
+
+        The record is deleted and the message is re-enqueued in one
+        transaction: if either step fails, the record remains and no duplicate
+        message is created.
+
+        :param int record_id: quarantine record id.
+        :param message: optional decoded task message.
+        :param datetime eta: optional eta; when in the future the message is
+            written to the schedule instead of the queue.
+        :param priority: optional priority override.
+        :return: The ``ReplayResult``.
+        """
+        from huey.quarantine import ReplayResult
+        row = self.sql('select queue, data, task_id, priority from quarantine '
+                       'where id = ?', (record_id,), results=True)
+        if not row:
+            return ReplayResult(record_id, False, error='record not found')
+        queue, data, task_id, stored_priority = row[0]
+        if isinstance(data, memoryview):
+            data = data.tobytes()
+
+        if priority is None:
+            priority = stored_priority
+        if message is not None:
+            task_id = getattr(message, 'id', None) or task_id
+            if message.priority is not None:
+                priority = message.priority
+        destination = 'schedule' if eta is not None else 'queue'
+
+        try:
+            with self.db(commit=True) as curs:
+                if eta is not None:
+                    curs.execute(
+                        'insert into schedule (queue, data, timestamp) '
+                        'values (?, ?, ?)',
+                        (queue, self.to_blob(data), eta.timestamp()))
+                else:
+                    curs.execute(
+                        'insert into task (queue, data, priority) '
+                        'values (?, ?, ?)',
+                        (queue, self.to_blob(data), priority or 0))
+                curs.execute('delete from quarantine where id = ?',
+                             (record_id,))
+                if curs.rowcount != 1:  # pragma: no cover
+                    raise self.operational_error('replay claim failed')
+        except Exception as exc:
+            return ReplayResult(record_id, False,
+                                error='%s: %s' % (type(exc).__name__, exc))
+        return ReplayResult(record_id, True, destination=destination,
+                            task_id=task_id,
+                            priority=None if eta is not None else priority)
+
+    def discard_quarantined(self, record_id):
+        with self.db(commit=True) as curs:
+            curs.execute('delete from quarantine where id = ?', (record_id,))
+            return curs.rowcount == 1
+
+    def quarantine_size(self, queue=None):
+        if queue is None:
+            row = self.sql('select count(id) from quarantine', results=True)
+        else:
+            row = self.sql('select count(id) from quarantine where queue = ?',
+                           (queue,), results=True)
+        return row[0][0]
+
+    def flush_quarantine(self):
+        self.sql('delete from quarantine', commit=True)
 
     def dequeue(self):
         # Quick check without the full exclusive lock.

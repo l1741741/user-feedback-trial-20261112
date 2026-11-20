@@ -1,6 +1,6 @@
 from collections import namedtuple
 
-from huey.exceptions import HueyException
+from huey.exceptions import TaskNotRegistered
 from huey.utils import ChordConfig
 
 
@@ -48,13 +48,13 @@ class Registry(object):
 
     def string_to_task(self, task_str):
         if task_str not in self._registry:
-            raise HueyException('%s not found in TaskRegistry' % task_str)
+            raise TaskNotRegistered(task_str)
         return self._registry[task_str]
 
     def create_message(self, task):
         task_str = self.task_to_string(type(task))
         if task_str not in self._registry:
-            raise HueyException('%s not found in TaskRegistry' % task_str)
+            raise TaskNotRegistered(task_str)
 
         # Remove an injected context-task instance before serializing.
         if task.kwargs and task.kwargs.get('task') is task:

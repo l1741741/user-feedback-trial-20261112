@@ -24,7 +24,15 @@ from huey.exceptions import ResultTimeout
 from huey.exceptions import RetryTask
 from huey.exceptions import TaskException
 from huey.exceptions import TaskLockedException
+from huey.exceptions import TaskNotRegistered
 from huey.exceptions import TaskTimeout
+from huey.quarantine import classify_deserialize_error
+from huey.quarantine import describe_replay_error
+from huey.quarantine import ERROR_INVALID
+from huey.quarantine import ERROR_UNREGISTERED
+from huey.quarantine import message_metadata
+from huey.quarantine import scan_message_metadata
+from huey.quarantine import validate_message
 from huey.registry import Registry
 from huey.serializer import Serializer
 from huey.storage import BlackHoleStorage
@@ -72,6 +80,11 @@ class Huey(object):
     :param bool use_zlib: use zlib for compression instead of gzip.
     :param bool immediate_use_memory: automatically switch to a local in-memory
         storage backend when immediate-mode is enabled.
+    :param bool quarantine: when true, messages that cannot be decoded (or
+        that reference an unregistered task) are moved to a persistent
+        quarantine table rather than being lost. Only supported by the SQLite
+        storage (``SqliteHuey``/``CySqliteHuey``). Default is false, in which
+        case unreadable messages are logged and dropped as before.
     :param storage_kwargs: arbitrary keyword arguments that will be passed to
         the storage backend for additional configuration.
 
@@ -112,10 +125,24 @@ class Huey(object):
         self.storage_kwargs = storage_kwargs
         if storage_class is not None:
             self.storage_class = storage_class
+
+        # Bad-message quarantine (opt-in, SQLite only). The flag is consumed
+        # here rather than forwarded to the storage constructor. Storage-level
+        # support is detected at runtime so unsupported backends keep their
+        # previous behavior. Enabling quarantine without a capable storage is a
+        # configuration error, since silently dropping messages would be worse
+        # than failing loudly.
+        self.quarantine_enabled = bool(storage_kwargs.pop('quarantine', False))
+
         self.storage = self.create_storage()
 
         # Allow overriding the default TaskWrapper implementation.
         self.task_wrapper_class = self.get_task_wrapper_class()
+
+        if self.quarantine_enabled and not self._storage_supports_quarantine():
+            self.storage.close()
+            raise ConfigurationError(
+                'quarantine is only supported by the sqlite storage backend.')
 
         self._locks = set()
         self._pre_execute = {}
@@ -297,9 +324,93 @@ class Huey(object):
         message = self._registry.create_message(task)
         return self.serializer.serialize(message)
 
+    def deserialize_message(self, data):
+        """
+        Deserialize and structurally validate a message without building the
+        task instance. Raises on decode errors, unregistered tasks and invalid
+        message structure.
+        """
+        message = self.serializer.deserialize(data)
+        validate_message(message)
+        # Raises TaskNotRegistered when the named task is not available.
+        self._registry.string_to_task(message.name)
+        return message
+
     def deserialize_task(self, data):
         message = self.serializer.deserialize(data)
         return self._registry.create_task(message)
+
+    def _storage_supports_quarantine(self):
+        return getattr(self.storage, 'supports_quarantine', False)
+
+    def _decode_or_quarantine(self, data, source, row_id):
+        """
+        Decode a message that was peeked from the queue or schedule.
+
+        On success the decoded message is returned and the caller is
+        responsible for atomically claiming the row. On failure the raw message
+        is atomically moved into quarantine (when enabled) and ``None`` is
+        returned so the caller can continue with the remaining messages.
+
+        Without quarantine enabled this is a plain ``deserialize_task()`` and
+        exceptions propagate exactly as before.
+        """
+        if not self.quarantine_enabled:
+            return self.deserialize_task(data)
+
+        try:
+            message = self.serializer.deserialize(data)
+        except Exception as exc:
+            error_class, error = classify_deserialize_error(exc)
+            # Recover id/name/eta/priority by inspecting pickle opcodes only --
+            # the payload is untrusted, so it is never executed.
+            self._quarantine_record(source, row_id, data, error_class,
+                                    '%s: %s' % (error_class, error),
+                                    scan_message_metadata(data))
+            return None
+
+        metadata = message_metadata(message)
+
+        try:
+            validate_message(message)
+        except ValueError as exc:
+            self._quarantine_record(source, row_id, data, ERROR_INVALID,
+                                    '%s: %s' % (ERROR_INVALID, exc), metadata)
+            return None
+
+        try:
+            self._registry.string_to_task(message.name)
+        except TaskNotRegistered as exc:
+            self._quarantine_record(
+                source, row_id, data, ERROR_UNREGISTERED,
+                '%s: %s' % (ERROR_UNREGISTERED, exc.task_name), metadata)
+            return None
+
+        try:
+            return self._registry.create_task(message)
+        except Exception as exc:
+            # e.g. a nested callback refers to an unregistered task, or the
+            # message cannot be turned into a task instance.
+            if isinstance(exc, TaskNotRegistered):
+                error_class = ERROR_UNREGISTERED
+                error = '%s: %s' % (ERROR_UNREGISTERED, exc.task_name)
+            else:
+                error_class = ERROR_INVALID
+                error = '%s: %s' % (ERROR_INVALID, type(exc).__name__)
+            self._quarantine_record(source, row_id, data, error_class, error,
+                                    metadata)
+            return None
+
+    def _quarantine_record(self, source, row_id, data, error_class, error,
+                           metadata):
+        moved = self.storage.quarantine_message(
+            source, row_id, data, error_class, error, metadata)
+        if moved:
+            logger.warning('Quarantined unreadable message (source=%s, '
+                           'class=%s, task=%s, id=%s).', source, error_class,
+                           metadata.get('task_name') or '-',
+                           metadata.get('task_id') or '-')
+        return moved
 
     def enqueue(self, task):
         if isinstance(task, group):
@@ -371,9 +482,32 @@ class Huey(object):
         return results
 
     def dequeue(self):
-        data = self.storage.dequeue()
-        if data is not None:
-            return self.deserialize_task(data)
+        """
+        Return the next ready task, or None.
+
+        With quarantine enabled, an unreadable message is moved to the
+        quarantine table and the next message is tried, so a single bad message
+        does not stall the queue.
+        """
+        if not self.quarantine_enabled:
+            data = self.storage.dequeue()
+            if data is not None:
+                return self.deserialize_task(data)
+            return
+
+        # Peek first so the bad message can be moved to quarantine atomically
+        # and the loop can continue with the following message.
+        while True:
+            row = self.storage.peek_message()
+            if row is None:
+                return
+            row_id, data = row
+            task = self._decode_or_quarantine(data, 'queue', row_id)
+            if task is None:
+                continue  # Bad message quarantined; try the next one.
+            if self.storage.claim_message(row_id, data):
+                return task
+            # Another consumer claimed this message concurrently; try again.
 
     def put(self, key, data):
         return self.storage.put_data(key, self.serializer.serialize(data))
@@ -703,9 +837,32 @@ class Huey(object):
         self._emit(S.SIGNAL_SCHEDULED, task)
 
     def read_schedule(self, timestamp=None):
+        """
+        Read all tasks from the schedule that are due at or before the given
+        timestamp, removing them from the schedule.
+
+        With quarantine enabled, each due message is claimed individually so
+        that an unreadable message can be moved into quarantine atomically,
+        without preventing the remaining due messages from being returned.
+        """
         if timestamp is None:
             timestamp = self._get_timestamp()
-        return self._deserialize_all(self.storage.read_schedule(timestamp))
+        if not self.quarantine_enabled:
+            return self._deserialize_all(self.storage.read_schedule(timestamp))
+
+        accum = []
+        while True:
+            row = self.storage.peek_schedule(timestamp)
+            if row is None:
+                break
+            row_id, data = row
+            task = self._decode_or_quarantine(data, 'schedule', row_id)
+            if task is None:
+                continue  # Bad message quarantined; continue with the batch.
+            if self.storage.claim_schedule(row_id, data):
+                accum.append(task)
+            # Otherwise another consumer claimed it; loop to the next message.
+        return accum
 
     def _deserialize_all(self, messages):
         accum = []
@@ -744,6 +901,93 @@ class Huey(object):
 
     def result_count(self):
         return self.storage.result_store_size()
+
+    # Quarantine inspection / replay / discard. These are read-only or
+    # explicit operations; nothing here is invoked by the consumer loop.
+
+    def _check_quarantine(self):
+        if not self.quarantine_enabled:
+            raise ConfigurationError(
+                'quarantine is not enabled for this Huey instance.')
+
+    def quarantined(self, limit=None):
+        """
+        Return quarantine records for this queue, most recent first.
+
+        Raw message bytes are not included; use :py:meth:`get_quarantined`
+        for a single record.
+        """
+        self._check_quarantine()
+        return self.storage.quarantined_items(queue=self.name, limit=limit)
+
+    def get_quarantined(self, record_id):
+        """
+        Return a single quarantine record (including its raw data), or None.
+        """
+        self._check_quarantine()
+        record = self.storage.get_quarantined(record_id)
+        if record is not None and record.queue != self.name:
+            return None
+        return record
+
+    def quarantine_count(self):
+        """Return the number of quarantined messages for this queue."""
+        self._check_quarantine()
+        return self.storage.quarantine_size(queue=self.name)
+
+    def replay_quarantined(self, record_id):
+        """
+        Explicitly replay a quarantined message.
+
+        The message is validated and re-enqueued first; only if that succeeds
+        is the quarantine record removed. If the message still cannot be
+        decoded it is left in quarantine and a failed ``ReplayResult`` is
+        returned -- it is never re-quarantined, so replays cannot loop.
+
+        Original queue, task id, eta and priority are preserved when they can
+        be determined reliably. The future-eta case is restored to the
+        schedule; otherwise it is placed back on the queue.
+        """
+        self._check_quarantine()
+        record = self.storage.get_quarantined(record_id)
+        if record is None or record.queue != self.name:
+            from huey.quarantine import ReplayResult
+            return ReplayResult(record_id, False, error='record not found')
+
+        data = record.data
+        try:
+            message = self.deserialize_message(data)
+            self._registry.create_task(message)
+        except Exception as exc:
+            from huey.quarantine import ReplayResult
+            return ReplayResult(record_id, False,
+                                error=describe_replay_error(exc))
+
+        eta = message.eta
+        try:
+            now = self._get_timestamp()
+        except Exception:  # pragma: no cover
+            now = None
+        if eta is not None and now is not None and eta > now:
+            destination_eta = eta
+        else:
+            destination_eta = None
+
+        return self.storage.replay_quarantined(
+            record_id, message=message, eta=destination_eta,
+            priority=getattr(message, 'priority', None))
+
+    def discard_quarantined(self, record_id):
+        """
+        Explicitly discard a quarantined message.
+
+        :return: True if a record was deleted.
+        """
+        self._check_quarantine()
+        record = self.storage.get_quarantined(record_id)
+        if record is None or record.queue != self.name:
+            return False
+        return self.storage.discard_quarantined(record_id)
 
     def __bool__(self):
         return True

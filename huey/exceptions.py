@@ -1,5 +1,14 @@
 class HueyException(Exception): pass
 class ConfigurationError(HueyException): pass
+class TaskNotRegistered(HueyException):
+    """
+    Raised when reading a task message whose task class is not present in the
+    registry, e.g. after a rolling deploy removed or renamed a task.
+    """
+    def __init__(self, task_name):
+        self.task_name = task_name
+        super(TaskNotRegistered, self).__init__(
+            '%s not found in TaskRegistry' % task_name)
 class TaskLockedException(HueyException): pass
 class ResultTimeout(HueyException): pass
 class TaskTimeout(HueyException): pass

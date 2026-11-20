@@ -19,6 +19,7 @@ classifiers = [
 
 [project.scripts]
 huey_consumer = "huey.bin.huey_consumer:consumer_main"
+huey_quarantine = "huey.quarantine:main"
 
 [project.urls]
 Repository = "https://github.com/coleifer/huey"
