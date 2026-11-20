@@ -3064,6 +3064,358 @@ class TestStoreIntermediateErrors(BaseTestCase):
         self.assertEqual(len(self.huey), 0)
 
 
+class TestErrorCallbackPolicy(BaseTestCase):
+    def alert(self, state):
+        @self.huey.task()
+        def task_e(err):
+            state.append(repr(err))
+        return task_e
+
+    def test_policy_validation(self):
+        self.assertRaises(ConfigurationError, MemoryHuey, error_policy='x')
+
+        @self.huey.task(error_policy='final')
+        def task_a():
+            pass
+
+        self.assertEqual(task_a.task_class.default_error_policy, 'final')
+        self.assertRaises(ConfigurationError, task_a.s, error_policy='nope')
+
+    def test_policy_serialization_roundtrip(self):
+        @self.huey.task(error_policy='final')
+        def task_a():
+            pass
+
+        task = task_a.s()
+        self.assertEqual(task.error_policy, 'final')
+        clone = self.huey.deserialize_task(self.huey.serialize_task(task))
+        self.assertEqual(clone.error_policy, 'final')
+
+        # Per-invocation override is also serialized.
+        clone = self.huey.deserialize_task(self.huey.serialize_task(
+            task_a.s(error_policy='always')))
+        self.assertEqual(clone.error_policy, 'always')
+
+        # Old messages lacking the field still deserialize.
+        from huey.registry import Message
+        @self.huey.task()
+        def task_b():
+            pass
+
+        msg = self.huey._registry.create_message(task_b.s())
+        legacy = Message(*msg[:15])  # No error_policy field.
+        self.assertTrue(legacy.error_policy is None)
+        clone = self.huey._registry.create_task(legacy)
+        self.assertTrue(clone.error_policy is None)
+
+    def test_default_policy_is_compatible(self):
+        # With no explicit policy, the trigger policy derives from
+        # store_intermediate_errors: True -> always, False -> final.
+        @self.huey.task()
+        def task_a():
+            pass
+
+        task = task_a.s()
+        self.assertTrue(task.error_policy is None)
+        self.assertEqual(self.huey._error_policy(task), 'always')
+
+        huey = MemoryHuey(utc=False, store_intermediate_errors=False)
+        self.assertEqual(huey._error_policy(task), 'final')
+
+        # An explicit Huey-level default applies to tasks without one.
+        huey = MemoryHuey(utc=False, error_policy='final')
+        self.assertEqual(huey._error_policy(task), 'final')
+        # ...but a task-level policy always wins.
+        self.assertEqual(huey._error_policy(task_a.s(error_policy='always')),
+                         'always')
+
+    def test_final_policy_fires_once_with_final_error(self):
+        state = []
+        attempts = []
+
+        @self.huey.task(retries=2, error_policy='final')
+        def task_a():
+            attempts.append(1)
+            raise TestError('boom%d' % len(attempts))
+
+        task_e = self.alert(state)
+        r = self.huey.enqueue(task_a.s().error(task_e))
+
+        # Intermediate failures: task is re-enqueued, no alert is sent.
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(state, [])
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(state, [])
+
+        # Final failure: exactly one alert, carrying the final exception.
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 1)
+        self.execute_next()
+        self.assertEqual(state, ['TestError(boom3)'])
+        self.assertEqual(len(self.huey), 0)
+
+        # The stored error belongs to the original task ID, retries exhausted.
+        exc = self.trap_exception(r.get)
+        self.assertEqual(exc.metadata['task_id'], r.id)
+        self.assertEqual(exc.metadata['retries'], 0)
+        self.assertEqual(exc.metadata['error'], 'TestError(boom3)')
+
+    def test_final_policy_retry_then_success(self):
+        state = []
+        attempts = []
+
+        @self.huey.task(retries=1, error_policy='final')
+        def task_a():
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise TestError('boom')
+            return 'ok'
+
+        task_e = self.alert(state)
+        r = self.huey.enqueue(task_a.s().error(task_e))
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(self.execute_next(), 'ok')
+        self.assertEqual(state, [])  # No alert after a recovery.
+        r.reset()
+        self.assertEqual(r.get(), 'ok')
+        self.assertEqual(len(self.huey), 0)
+
+    def test_always_policy_overrides_deferred_errors(self):
+        # error_policy is decoupled from the result-store flag: an explicit
+        # 'always' fires on every surfaced failure even when intermediate
+        # errors are not stored.
+        huey = MemoryHuey(utc=False, store_intermediate_errors=False)
+        self.huey = huey
+        state = []
+
+        @huey.task(retries=1, error_policy='always')
+        def task_a():
+            raise TestError('boom')
+
+        task_e = self.alert(state)
+        r = self.huey.enqueue(task_a.s().error(task_e))
+
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(self.huey.result_count(), 0)  # Nothing stored.
+        self.assertEqual(len(self.huey), 2)  # Alert + retry.
+        self.execute_next()  # First alert.
+        self.assertTrue(self.execute_next() is None)  # Final failure.
+        self.assertEqual(len(self.huey), 1)
+        self.execute_next()  # Second alert.
+        self.assertEqual(state, ['TestError(boom)', 'TestError(boom)'])
+
+    def test_final_policy_cancel_execution(self):
+        state = []
+
+        @self.huey.task(retries=2, error_policy='final')
+        def task_a(retry):
+            raise CancelExecution(retry=retry)
+
+        task_e = self.alert(state)
+
+        # CancelExecution(retry=False) is final even with retries remaining.
+        r = self.huey.enqueue(task_a.s(False).error(task_e))
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 1)
+        self.execute_next()
+        self.assertEqual(state, ['CancelExecution()'])
+        self.assertRaises(TaskException, r.get)
+
+        # CancelExecution(retry=True) is not final: no alert.
+        r = self.huey.enqueue(task_a.s(True).error(task_e))
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 1)  # The retry, no alert.
+        self.assertEqual(state, ['CancelExecution()'])
+
+    def test_final_policy_retry_task_never_final(self):
+        state = []
+
+        @self.huey.task(error_policy='final')
+        def task_a():
+            raise RetryTask(delay=300)
+
+        task_e = self.alert(state)
+        self.huey.enqueue(task_a.s().error(task_e))
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(state, [])
+        self.assertEqual(len(self.huey), 0)
+        self.assertEqual(self.huey.scheduled_count(), 1)  # Awaits its eta.
+
+    def test_final_policy_timeout_and_lock(self):
+        state = []
+
+        @self.huey.task(retries=1, error_policy='final')
+        def task_a():
+            raise TaskTimeout('timeout 10s')
+
+        @self.huey.task(retries=1, error_policy='final')
+        def locked():
+            with self.huey.lock_task('lk'):
+                return 'ran'
+
+        task_e = self.alert(state)
+
+        # Timeout with a retry remaining is not final; the exhausted one is.
+        self.huey.enqueue(task_a.s().error(task_e))
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(state, [])
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 1)
+        self.execute_next()
+        self.assertEqual(state, ["TaskTimeout('timeout 10s')"])
+
+        # A lock conflict with a retry remaining is not final.
+        r = self.huey.enqueue(locked.s().error(task_e))
+        with self.huey.lock_task('lk'):
+            self.assertTrue(self.execute_next() is None)
+        self.assertEqual(state, ["TaskTimeout('timeout 10s')"])
+        self.assertEqual(self.execute_next(), 'ran')
+        self.assertEqual(r.get(), 'ran')
+
+    def test_final_policy_rate_limit(self):
+        state = []
+
+        @self.huey.task(error_policy='final')
+        @self.huey.rate_limit('rl', limit=0, per=60, retry=False)
+        def limited():
+            return 'ran'
+
+        @self.huey.task(error_policy='final')
+        @self.huey.rate_limit('rl2', limit=0, per=60, retry=True)
+        def limited_retry():
+            return 'ran'
+
+        task_e = self.alert(state)
+
+        # retry=True always re-queues: never final, no alert.
+        self.huey.enqueue(limited_retry.s().error(task_e))
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(state, [])
+        self.assertEqual(self.huey.scheduled_count(), 1)
+        self.huey.flush()
+
+        # retry=False with no task retries is a final rejection: alert fires.
+        self.huey.enqueue(limited.s().error(task_e))
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 1)
+        self.execute_next()
+        self.assertEqual(len(state), 1)
+        self.assertTrue(state[0].startswith('RateLimitExceeded('))
+
+    def test_error_handler_chain_cycle_stops(self):
+        # A cycle in the on_error chain must not produce an unbounded alert
+        # chain: the failure is stored, but no handler is enqueued. Immediate
+        # mode executes handlers synchronously, so a cycle would recurse
+        # forever without the guard.
+        huey = MemoryHuey(utc=False, immediate=True)
+        state = []
+
+        @huey.task()
+        def task_a():
+            raise TestError('boom')
+
+        @huey.task()
+        def task_b(err):
+            state.append(repr(err))
+            raise TestError('b-fail')
+
+        a = task_a.s()
+        b = task_b.s()
+        a.error(b)
+        b.error(a)  # Cycle: a -> b -> a.
+
+        r = huey.enqueue(a)  # Executes synchronously.
+        self.assertEqual(state, [])  # Handler never enqueued.
+        self.assertRaises(TaskException, r.get)
+
+    def test_error_handler_chain_runs(self):
+        # A finite chain of error handlers still runs link by link.
+        state = []
+
+        @self.huey.task()
+        def task_a():
+            raise TestError('boom')
+
+        @self.huey.task()
+        def task_b(err):
+            state.append(('b', repr(err)))
+            raise TestError('b-fail')
+
+        @self.huey.task()
+        def task_c(err):
+            state.append(('c', repr(err)))
+
+        a = task_a.s()
+        a.error(task_b).on_error.error(task_c)
+
+        r = self.huey.enqueue(a)
+        self.assertTrue(self.execute_next() is None)  # a fails.
+        self.assertTrue(self.execute_next() is None)  # b runs, fails.
+        self.execute_next()  # c runs.
+        self.assertEqual(state, [('b', 'TestError(boom)'),
+                                 ('c', 'TestError(b-fail)')])
+        self.assertRaises(TaskException, r.get)
+        self.assertEqual(len(self.huey), 0)
+
+    def test_error_handler_enqueue_failure_preserves_outcome(self):
+        # If the alert cannot be enqueued, the original task's error result
+        # and retry state must be left intact.
+        state = []
+
+        @self.huey.task(retries=1)
+        def task_a():
+            raise TestError('boom')
+
+        task_e = self.alert(state)
+        r = self.huey.enqueue(task_a.s().error(task_e))
+
+        real_enqueue = self.huey.enqueue
+        def flaky_enqueue(task):
+            if isinstance(task, type(task_e.task_class())) or \
+                    task.id != r.id:
+                if task.id != r.id:
+                    raise IOError('broker down')
+            return real_enqueue(task)
+
+        self.huey.enqueue = flaky_enqueue
+        try:
+            self.assertTrue(self.execute_next() is None)
+        finally:
+            self.huey.enqueue = real_enqueue
+
+        # The intermediate error was stored and the task was still requeued.
+        self.assertRaises(TaskException, r.get)
+        self.assertEqual(len(self.huey), 1)
+        self.assertEqual(state, [])
+
+        # The retry runs and its alert enqueues normally.
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 1)
+        self.execute_next()
+        self.assertEqual(state, ['TestError(boom)'])
+
+    def test_success_chain_only_on_success(self):
+        state = []
+
+        @self.huey.task(error_policy='final')
+        def task_a():
+            return 41
+
+        @self.huey.task()
+        def task_b(n):
+            return n + 1
+
+        task_e = self.alert(state)
+        pipe = task_a.s().then(task_b)
+        pipe.error(task_e)
+        r1, r2 = self.huey.enqueue(pipe)
+        self.assertEqual(self.execute_next(), 41)
+        self.assertEqual(self.execute_next(), 42)
+        self.assertEqual([r1.get(), r2.get()], [41, 42])
+        self.assertEqual(state, [])
+        self.assertEqual(len(self.huey), 0)
+
+
 class TestStorageWrappers(BaseTestCase):
     def test_storage_wrappers(self):
         @self.huey.task()

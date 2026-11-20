@@ -231,7 +231,7 @@ Huey types
 Huey object
 -----------
 
-.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, storage_class=None, store_intermediate_errors=True, **storage_kwargs)
+.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, storage_class=None, store_intermediate_errors=True, error_policy=None, **storage_kwargs)
 
     :param str name: the name of the task queue, e.g. your application's name.
     :param bool results: whether to store task results.
@@ -243,6 +243,12 @@ Huey object
         lock rejection with a retry pending is not a failure and is never
         stored. Defaults to ``True`` for backwards
         compatibility. See :ref:`store-intermediate-errors`.
+    :param str error_policy: default trigger policy for ``on_error`` error
+        callbacks: ``'always'`` runs the callback on every surfaced failure,
+        ``'final'`` runs it only once the task will not be retried. Individual
+        tasks may override this (see :py:meth:`~Huey.task`). When unspecified,
+        the policy is derived from ``store_intermediate_errors`` for backwards
+        compatibility. See :ref:`error-callback-policy`.
     :param bool utc: use UTC internally, convert naive datetimes from local
         time to UTC (if local time is other than UTC).
     :param bool immediate: useful for debugging, causes tasks to be executed
@@ -363,7 +369,7 @@ Huey object
             # ... later ...
             consumer.stop(graceful=True)
 
-    .. py:method:: task(retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
+    .. py:method:: task(retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, error_policy=None, **kwargs)
 
         :param int retries: number of times to retry the function if an
             unhandled exception occurs when it is executed.
@@ -394,6 +400,10 @@ Huey object
             ``gevent.Timeout``. When using with threads it is necessary to use
             cooperative timeout checking. See :ref:`cooperative-timeout` for
             example.
+        :param str error_policy: when this task's ``on_error`` callback runs:
+            ``'always'`` on every surfaced failure, or ``'final'`` only once
+            the task will not be retried. Overrides the Huey instance's
+            ``error_policy``. See :ref:`error-callback-policy`.
         :param kwargs: arbitrary key/value arguments that are passed to the
             :py:class:`TaskWrapper` instance.
         :returns: a :py:class:`TaskWrapper` that wraps the decorated function
@@ -453,7 +463,7 @@ Huey object
         revocation, etc.), see :py:class:`TaskWrapper`, :py:class:`Task`,
         and :py:class:`Result`.
 
-    .. py:method:: periodic_task(validate_datetime, retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
+    .. py:method:: periodic_task(validate_datetime, retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, error_policy=None, **kwargs)
 
         :param function validate_datetime: function which accepts a
             ``datetime`` instance and returns whether the task should be
@@ -483,6 +493,10 @@ Huey object
             ``gevent.Timeout``. When using with threads it is necessary to use
             cooperative timeout checking. See :ref:`cooperative-timeout` for
             example.
+        :param str error_policy: when this task's ``on_error`` callback runs:
+            ``'always'`` on every surfaced failure, or ``'final'`` only once
+            the task will not be retried. Overrides the Huey instance's
+            ``error_policy``. See :ref:`error-callback-policy`.
         :param kwargs: arbitrary key/value arguments that are passed to the
             :py:class:`TaskWrapper` instance.
         :returns: a :py:class:`TaskWrapper` that wraps the decorated function
@@ -1393,7 +1407,7 @@ Huey object
 
 
 
-.. py:class:: Task(args=None, kwargs=None, id=None, eta=None, retries=None, retry_delay=None, priority=None, expires=None, on_complete=None, on_error=None, expires_resolved=None, timeout=None, chord_config=None, retry_backoff=None)
+.. py:class:: Task(args=None, kwargs=None, id=None, eta=None, retries=None, retry_delay=None, priority=None, expires=None, on_complete=None, on_error=None, expires_resolved=None, timeout=None, chord_config=None, retry_backoff=None, error_policy=None)
 
     :param tuple args: arguments for the function call.
     :param dict kwargs: keyword arguments for the function call.
@@ -1418,6 +1432,9 @@ Huey object
         example.
     :param Task on_complete: Task to execute upon completion of this task.
     :param Task on_error: Task to execute upon failure / error.
+    :param str error_policy: when the ``on_error`` callback runs: ``'always'``
+        on every surfaced failure, or ``'final'`` only once the task will not
+        be retried. See :ref:`error-callback-policy`.
     :param datetime expires_resolved: absolute expiration time, set by huey
         from ``expires`` when the task is enqueued.
     :param chord_config: set by huey on members of a :py:class:`chord`.
@@ -1539,7 +1556,9 @@ Huey object
         of an unhandled exception in the parent task. With the default
         ``store_intermediate_errors=True`` it also runs for failed attempts that
         will be retried. A :py:class:`RetryTask`, rate-limit or lock rejection
-        with a retry pending does not count as a failure.
+        with a retry pending does not count as a failure. See
+        :ref:`error-callback-policy` for controlling exactly when the error
+        callback fires.
 
 
 .. py:function:: crontab(minute='*', hour='*', day='*', month='*', day_of_week='*'[, strict=False])

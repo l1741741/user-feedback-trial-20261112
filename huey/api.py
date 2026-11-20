@@ -15,6 +15,9 @@ from functools import wraps
 
 from huey import signals as S
 from huey.constants import EmptyData
+from huey.constants import ERROR_POLICIES
+from huey.constants import ERROR_POLICY_ALWAYS
+from huey.constants import ERROR_POLICY_FINAL
 from huey.consumer import Consumer
 from huey.exceptions import CancelExecution
 from huey.exceptions import ConfigurationError
@@ -63,6 +66,11 @@ class Huey(object):
         any ``on_error`` handler. When ``False``, the error is withheld until
         the task's retries are exhausted. Defaults to ``True`` for backwards
         compatibility.
+    :param str error_policy: default trigger policy for ``on_error`` error
+        callbacks: ``'always'`` runs the callback on every surfaced failure,
+        ``'final'`` runs it only once the task will not be retried. Individual
+        tasks may override this. When unspecified, the policy is derived from
+        ``store_intermediate_errors`` for backwards compatibility.
     :param bool utc: use UTC internally by converting from local time.
     :param bool immediate: useful for debugging; causes tasks to be executed
         synchronously in the application.
@@ -95,12 +103,18 @@ class Huey(object):
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
                  use_zlib=False, immediate_use_memory=True, storage_class=None,
-                 store_intermediate_errors=True, **storage_kwargs):
+                 store_intermediate_errors=True, error_policy=None,
+                 **storage_kwargs):
+
+        if error_policy is not None and error_policy not in ERROR_POLICIES:
+            raise ConfigurationError('error_policy must be one of %s, got %r'
+                                     % (ERROR_POLICIES, error_policy))
 
         self.name = name
         self.results = results
         self.store_none = store_none
         self.store_intermediate_errors = store_intermediate_errors
+        self.error_policy = error_policy
         self.utc = utc
         self._immediate = immediate
         self.immediate_use_memory = immediate_use_memory
@@ -169,7 +183,8 @@ class Huey(object):
         return Consumer(self, **options)
 
     def task(self, retries=0, retry_delay=0, retry_backoff=0, priority=None,
-             context=False, name=None, expires=None, timeout=None, **kwargs):
+             context=False, name=None, expires=None, timeout=None,
+             error_policy=None, **kwargs):
         TaskWrapper = self.task_wrapper_class
         def decorator(func):
             return TaskWrapper(
@@ -183,12 +198,13 @@ class Huey(object):
                 default_priority=priority,
                 default_expires=expires,
                 default_timeout=timeout,
+                default_error_policy=error_policy,
                 **kwargs)
         return decorator
 
     def periodic_task(self, validate_datetime, retries=0, retry_delay=0,
                       retry_backoff=0, priority=None, context=False, name=None,
-                      expires=None, timeout=None, **kwargs):
+                      expires=None, timeout=None, error_policy=None, **kwargs):
         TaskWrapper = self.task_wrapper_class
         def decorator(func):
             def method_validate(self, timestamp):
@@ -205,6 +221,7 @@ class Huey(object):
                 default_priority=priority,
                 default_expires=expires,
                 default_timeout=timeout,
+                default_error_policy=error_policy,
                 validate_datetime=method_validate,
                 task_base=PeriodicTask,
                 **kwargs)
@@ -442,6 +459,7 @@ class Huey(object):
         exception = None
         retry_eta = None
         task_value = None
+        will_retry = False  # Set by the exception handlers below.
 
         if task.timeout:
             task._deadline = start + task.timeout
@@ -459,6 +477,7 @@ class Huey(object):
             logger.warning('Task %s timed out after %ss.', task.id,
                            task.timeout)
             exception = exc
+            will_retry = task.retries > 0
             self._emit(S.SIGNAL_TIMEOUT, task)
         except RateLimitExceeded as exc:
             delay = task.retry_delay or exc.delay
@@ -466,6 +485,7 @@ class Huey(object):
                 logger.info('Task %s rate-limited on "%s", retrying in %s',
                             task.id, exc.key, delay)
                 retry_eta = normalize_time(None, delay, self.utc)
+                will_retry = True
                 if exc.retry:
                     task.retries += 1
             else:
@@ -475,16 +495,19 @@ class Huey(object):
         except TaskLockedException as exc:
             logger.warning('Task %s not run, %s.', task.id, exc)
             exception = exc
+            will_retry = task.retries > 0
             self._emit(S.SIGNAL_LOCKED, task)
         except RetryTask as exc:
             logger.info('Task %s raised RetryTask, retrying.', task.id)
             task.retries += 1
+            will_retry = True
             if exc.eta or exc.delay is not None:
                 retry_eta = normalize_time(exc.eta, exc.delay, self.utc)
             exception = exc
         except CancelExecution as exc:
             if exc.retry or (exc.retry is None and task.retries):
                 task.retries = max(task.retries, 1)
+                will_retry = True
                 msg = '(task will be retried)'
             else:
                 task.retries = 0
@@ -499,6 +522,7 @@ class Huey(object):
         except Exception as exc:
             logger.exception('Unhandled exception in task %s.', task.id)
             exception = exc
+            will_retry = task.retries > 0
             self._emit(S.SIGNAL_ERROR, task, exc)
         else:
             logger.info('%s executed in %0.3fs', task, duration)
@@ -520,7 +544,10 @@ class Huey(object):
             if task.chord_config is not None:
                 self._check_chord(task.chord_config, task_value)
         else:
-            final = not task.retries
+            # Whether this failure is final is decided by whether the task
+            # will actually be retried (computed per exception-type above),
+            # not by inspecting a retries counter in isolation.
+            final = not will_retry
             surface = final or (self.store_intermediate_errors and
                                 not isinstance(exception, RETRYING_EXCEPTIONS))
             if surface:
@@ -530,11 +557,19 @@ class Huey(object):
                     self.put_result(next_task.id, error)
                     next_task = next_task.on_complete if final else None
             self._run_post_execute(task, task_value, exception)
-            if surface and task.on_error:
-                # Copy, as on_error is shared across retries.
-                handler = copy.copy(task.on_error)
-                handler.extend_data(exception)
-                self.enqueue(handler)
+            if task.on_error is not None:
+                policy = self._error_policy(task)
+                if policy == ERROR_POLICY_FINAL:
+                    fire = final
+                else:
+                    # "always" fires on every failure that is surfaced as
+                    # such -- i.e. not on rejections that will be retried
+                    # (RetryTask, rate-limit, lock) -- independently of
+                    # whether the error was written to the result store.
+                    fire = final or not isinstance(exception,
+                                                   RETRYING_EXCEPTIONS)
+                if fire:
+                    self._enqueue_error_handler(task, exception)
             if final:
                 self._abort_chord_member(task, error)
             else:
@@ -542,6 +577,41 @@ class Huey(object):
                 self._requeue_task(task, self._get_timestamp(), retry_eta)
 
         return task_value
+
+    def _error_policy(self, task):
+        policy = task.error_policy or self.error_policy
+        if policy is None:
+            # Backwards-compatible default derived from the
+            # store_intermediate_errors flag.
+            policy = (ERROR_POLICY_ALWAYS if self.store_intermediate_errors
+                      else ERROR_POLICY_FINAL)
+        return policy
+
+    def _enqueue_error_handler(self, task, exception):
+        # Walk the error-handler chain, refusing to follow cycles: a failing
+        # error callback must not recursively start an unbounded alert chain
+        # (e.g. "a.error(b)" combined with "b.error(a)").
+        seen = {id(task)}
+        link = task.on_error
+        while link is not None:
+            if id(link) in seen:
+                logger.error('Cycle detected in on_error chain for %s, '
+                             'error handler will not be enqueued.', task)
+                return
+            seen.add(id(link))
+            link = link.on_error
+
+        # Copy, as on_error is shared across retries.
+        handler = copy.copy(task.on_error)
+        handler.extend_data(exception)
+        try:
+            self.enqueue(handler)
+        except Exception:
+            # A failure to enqueue the error handler must not rewrite the
+            # outcome of the original task: its error result (already stored)
+            # and any pending retry are left untouched.
+            logger.exception('Error enqueueing on_error handler for %s.',
+                             task)
 
     def _abort_chord_member(self, task, value):
         # The rest of the pipeline won't run, so report to its chord here.
@@ -799,11 +869,13 @@ class Task(object):
     default_retry_delay = 0
     default_retry_backoff = 0
     default_timeout = None
+    default_error_policy = None
 
     def __init__(self, args=None, kwargs=None, id=None, eta=None, retries=None,
                  retry_delay=None, priority=None, expires=None,
                  on_complete=None, on_error=None, expires_resolved=None,
-                 timeout=None, chord_config=None, retry_backoff=None):
+                 timeout=None, chord_config=None, retry_backoff=None,
+                 error_policy=None):
         self.name = type(self).__name__
         self.args = () if args is None else args
         self.kwargs = {} if kwargs is None else kwargs
@@ -823,6 +895,14 @@ class Task(object):
         self.chord_config = chord_config
         self._deadline = None
 
+        self.error_policy = error_policy if error_policy is not None else \
+                self.default_error_policy
+        if self.error_policy is not None and \
+                self.error_policy not in ERROR_POLICIES:
+            raise ConfigurationError(
+                'error_policy must be one of %s, got %r'
+                % (ERROR_POLICIES, self.error_policy))
+
         self.on_complete = on_complete
         self.on_error = on_error
 
@@ -831,7 +911,13 @@ class Task(object):
         return (self.args, self.kwargs)
 
     def __repr__(self):
+        return self._repr(frozenset())
+
+    def _repr(self, seen):
         rep = '%s.%s: %s' % (self.__module__, self.name, self.id)
+        if id(self) in seen:
+            return rep + ' (cycle)'
+        seen = seen | set((id(self),))
         if self.eta:
             rep += ' @%s' % self.eta
         if self.expires:
@@ -846,9 +932,11 @@ class Task(object):
         if self.timeout:
             rep += ' timeout=%s' % self.timeout
         if self.on_complete:
-            rep += ' -> %s' % self.on_complete
+            rep += ' -> %s' % self.on_complete._repr(seen)
         if self.on_error:
-            rep += ', on error %s' % self.on_error
+            rep += ', on error %s' % self.on_error._repr(seen)
+        if self.error_policy:
+            rep += ' (error_policy=%s)' % self.error_policy
         if self.chord_config:
             rep += ', chord %s' % self.chord_config.cid
         return rep
@@ -998,7 +1086,8 @@ class TaskWrapper(object):
 
     def schedule(self, args=None, kwargs=None, eta=None, delay=None,
                  priority=None, retries=None, retry_delay=None,
-                 retry_backoff=None, expires=None, timeout=None, id=None):
+                 retry_backoff=None, expires=None, timeout=None, id=None,
+                 error_policy=None):
         if eta is None and delay is None:
             if isinstance(args, (int, float)):
                 delay = args
@@ -1024,7 +1113,8 @@ class TaskWrapper(object):
             retry_backoff=retry_backoff,
             priority=priority,
             expires=expires,
-            timeout=timeout)
+            timeout=timeout,
+            error_policy=error_policy)
         return self.huey.enqueue(task)
 
     def _apply(self, it):
@@ -1057,7 +1147,8 @@ class TaskWrapper(object):
                                retry_backoff=kwargs.pop('retry_backoff', None),
                                priority=kwargs.pop('priority', None),
                                expires=kwargs.pop('expires', None),
-                               timeout=kwargs.pop('timeout', None))
+                               timeout=kwargs.pop('timeout', None),
+                               error_policy=kwargs.pop('error_policy', None))
 
 
 class TaskLock(object):
@@ -1298,7 +1389,8 @@ class Result(object):
             timeout=self.task.timeout,
             chord_config=self.task.chord_config,
             on_complete=on_complete,
-            on_error=on_error)
+            on_error=on_error,
+            error_policy=self.task.error_policy)
         return self.huey.enqueue(task)
 
     def reset(self):

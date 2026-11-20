@@ -253,7 +253,9 @@ When a task raises an unhandled exception, Huey performs several actions:
    ``SIGNAL_RETRYING`` is emitted).
 
 Steps 3 and 4 run on every failed attempt by default. To defer them until a
-task's retries are exhausted, see :ref:`store-intermediate-errors`.
+task's retries are exhausted, see :ref:`store-intermediate-errors`. For
+independent control over when the ``on_error`` handler runs (e.g. alert only
+on the final failure), see :ref:`error-callback-policy`.
 
 Reading error results
 ^^^^^^^^^^^^^^^^^^^^^
@@ -347,6 +349,103 @@ on every attempt.
     ``False`` is recommended, and it may become the default in a future
     release. It matches :py:class:`chord`, which already waits for retries to
     run out before reporting an error.
+
+For more information, see:
+
+* :py:class:`Result`
+* :py:class:`TaskException`
+
+.. _error-callback-policy:
+
+Error callback trigger policy
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``store_intermediate_errors`` couples two things: what is written to the
+result store, and when the ``on_error`` callback runs. The **error callback
+trigger policy** controls the second one directly. It accepts two values:
+
+* ``'always'`` -- the ``on_error`` callback runs on every surfaced failure,
+  including attempts that still have retries remaining.
+* ``'final'`` -- the ``on_error`` callback runs exactly once, when the task
+  will not be retried again. Use this for things like alerting, where a
+  notification per attempt would be noise.
+
+The policy can be set per-task, per-invocation, or as a Huey-wide default:
+
+.. code-block:: python
+
+    # Huey-wide default for all tasks:
+    huey = RedisHuey('my-app', error_policy='final')
+
+    # Per-task, overriding the Huey default:
+    @huey.task(retries=3, retry_delay=10, error_policy='final')
+    def process_file(path):
+        convert(path)
+
+    @huey.task()
+    def alert_on_failure(exc, path=None):
+        send_alert('processing %s failed for good: %r' % (path, exc))
+
+    # Attach the error callback; optionally override the policy per call:
+    task = process_file.s('/tmp/report.csv', error_policy='final')
+    task.error(alert_on_failure, path='/tmp/report.csv')
+    huey.enqueue(task)
+
+"Final" is decided by whether the task **will actually be retried**, not by
+looking at a single ``retries`` counter:
+
+* An unhandled exception (including :py:class:`TaskTimeout`) is final when no
+  retries remain.
+* :py:class:`RetryTask` always retries (optionally at a given ``eta`` /
+  ``delay``), so it is never final and never triggers the callback.
+* :py:class:`CancelExecution` is final when raised with ``retry=False`` (or
+  ``retry=None`` with no retries remaining) -- even if the task declared
+  retries -- and is not final when raised with ``retry=True``.
+* A rate-limit rejection is final only when raised with ``retry=False`` and
+  no task retries remain.
+* A lock conflict (:py:class:`TaskLockedException`) is final only when no
+  retries remain.
+
+When the policy is ``'final'``, the callback receives the *final* exception,
+and the stored error metadata (``task_id``, ``retries``, ``traceback``)
+describes the original task's last attempt. A task that fails and then
+succeeds on retry runs only its ``on_complete`` pipeline -- no error callback
+fires.
+
+When no policy is specified anywhere, the behavior is derived from
+``store_intermediate_errors`` (``True`` -> ``'always'``, ``False`` ->
+``'final'``), so existing applications are unaffected.
+
+Error callback robustness
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* The exception is appended to a **copy** of the error-handler task, so a
+  handler attached to a retried task receives exactly one exception argument
+  per invocation -- arguments do not accumulate across retries.
+* Error handlers may themselves be chained (``task.error(a)`` and
+  ``a.error(b)``). Cycles in this chain are detected and refused: a failing
+  error callback will not start an unbounded alert chain.
+* If enqueueing the error handler itself fails (e.g. the broker is
+  unreachable), the error is logged and the original task's outcome is left
+  untouched: its stored error result is not rewritten and a pending retry is
+  still re-enqueued.
+
+Canceled, revoked and expired tasks
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+These outcomes are **not** reported as successes:
+
+* A task that raises :py:class:`CancelExecution` and will not be retried is
+  stored as an *error* result (``CancelExecution()``), and the ``on_error``
+  callback fires according to the policy above. ``SIGNAL_CANCELED`` is
+  emitted.
+* A task that is revoked before running, or whose ``expires`` time has
+  passed, is discarded without executing: no result is stored (neither
+  success nor error) and neither ``on_complete`` nor ``on_error`` runs.
+  ``SIGNAL_REVOKED`` / ``SIGNAL_EXPIRED`` is emitted, so monitoring code can
+  distinguish these from completions. A :py:class:`Result` for such a task
+  stays unready; use ``blocking=True`` with a ``timeout`` when waiting on
+  tasks that may be revoked or expire.
 
 For more information, see:
 
