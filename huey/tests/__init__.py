@@ -17,6 +17,8 @@ from huey.tests.test_mini import *
 from huey.tests.test_postgres import *
 from huey.tests.test_priority import *
 from huey.tests.test_registry import *
+from huey.tests.test_rolling_schema import *
+from huey.tests.test_schema import *
 from huey.tests.test_serializer import *
 from huey.tests.test_signals import *
 from huey.tests.test_sql_huey import *

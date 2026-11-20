@@ -19,6 +19,19 @@ Tasks not running
 
     For more information on how tasks are imported, see the :ref:`import documentation <imports>`.
 
+"MessageVersionError: unsupported future message version" in log file
+    A consumer read a message stamped with a message-schema version newer than
+    the one it understands. This happens during a rolling deployment if a new
+    producer writes version-2 messages while an old consumer is still running.
+    The message was refused, not executed. Upgrade the consumer, or drain the
+    queue before switching producers. See :ref:`rolling-upgrades`.
+
+"MessageVersionError: ... no migration path" in log file
+    A consumer read a message at an older version, but no migration was
+    registered for that task. Register ``add_migration`` for the task, or set
+    ``legacy_version`` to the version that matches the current payload. The
+    task was not executed.
+
 "Error importing XXX" when starting consumer
     This error message occurs when the module containing the configuration
     specified cannot be loaded (not on the pythonpath, mistyped, etc). One

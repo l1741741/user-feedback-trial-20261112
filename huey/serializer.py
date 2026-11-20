@@ -17,6 +17,12 @@ def is_compressed(data):
 
 
 class Serializer(object):
+    # Signals that this serializer can round-trip the versioned message
+    # wrappers used by Huey's optional message contract. Custom serializers
+    # must set this to True once updated, otherwise enabling
+    # ``Huey(message_schema=...)`` is rejected up front.
+    supports_message_schema = True
+
     def __init__(self, compression=False, compression_level=6, use_zlib=False,
                  pickle_protocol=pickle.HIGHEST_PROTOCOL):
         self.comp = compression

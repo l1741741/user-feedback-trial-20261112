@@ -25,7 +25,10 @@ from huey.exceptions import RetryTask
 from huey.exceptions import TaskException
 from huey.exceptions import TaskLockedException
 from huey.exceptions import TaskTimeout
+from huey.registry import Message
 from huey.registry import Registry
+from huey.registry import VersionedMessage
+from huey.schema import ensure_schema_object
 from huey.serializer import Serializer
 from huey.storage import BlackHoleStorage
 from huey.storage import CySqliteStorage
@@ -72,6 +75,9 @@ class Huey(object):
     :param bool use_zlib: use zlib for compression instead of gzip.
     :param bool immediate_use_memory: automatically switch to a local in-memory
         storage backend when immediate-mode is enabled.
+    :param MessageSchema message_schema: optional versioned message contract,
+        used to read messages written by an older or newer release during a
+        rolling deployment. See :ref:`rolling-upgrades`.
     :param storage_kwargs: arbitrary keyword arguments that will be passed to
         the storage backend for additional configuration.
 
@@ -95,7 +101,8 @@ class Huey(object):
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
                  use_zlib=False, immediate_use_memory=True, storage_class=None,
-                 store_intermediate_errors=True, **storage_kwargs):
+                 store_intermediate_errors=True, message_schema=None,
+                 **storage_kwargs):
 
         self.name = name
         self.results = results
@@ -107,6 +114,10 @@ class Huey(object):
         if serializer is None:
             serializer = Serializer(compression, use_zlib=use_zlib)
         self.serializer = serializer
+        self.message_schema = ensure_schema_object(message_schema)
+        self._schema_validation_cache = None
+        if self.message_schema is not None:
+            self._check_schema_compatibility()
 
         # Initialize storage.
         self.storage_kwargs = storage_kwargs
@@ -122,13 +133,57 @@ class Huey(object):
         self._post_execute = {}
         self._startup = {}
         self._shutdown = {}
-        self._registry = Registry()
+        self._registry = (Registry(self.message_schema)
+                          if self.message_schema is not None else Registry())
+        if self.message_schema is not None:
+            # Reject a registry implementation that cannot participate in the
+            # versioned contract, rather than failing later mid-consumption.
+            self.message_schema.validate_registry_object(self._registry)
         self._signal = S.Signal()
         self._tasks_in_flight = set()
         self._timeout_handler = None  # This is consumer-specific.
 
     def get_task_wrapper_class(self):
         return TaskWrapper
+
+    def _check_schema_compatibility(self):
+        """
+        Reject, at configuration time, a serializer that cannot round-trip the
+        message objects the versioned contract relies on.
+
+        The default pickle serializer supports both plain and versioned
+        messages. A custom serializer must advertise
+        ``supports_message_schema = True`` once it has been updated to handle
+        :py:class:`~huey.registry.VersionedMessage`; otherwise enabling a
+        schema would fail later, on a live queue.
+        """
+        if getattr(self.serializer, 'supports_message_schema', True) is False:
+            raise ConfigurationError(
+                'The configured serializer %r does not declare support for '
+                'versioned messages (supports_message_schema=True). Use the '
+                'default serializer or update the custom serializer before '
+                'enabling message_schema.' % (type(self.serializer).__name__,))
+
+        # Also prove it, rather than trusting the flag alone. A serializer
+        # that cannot round-trip an empty versioned message would corrupt a
+        # live queue, so reject it now, at configuration time.
+        probe = VersionedMessage(self.message_schema.version,
+                                 Message('probe', 'app.probe', None, 0, 0, 0,
+                                         (), {}, None, None, None, None,
+                                         None, None, None))
+        try:
+            restored = self.serializer.deserialize(
+                self.serializer.serialize(probe))
+        except Exception as exc:
+            raise ConfigurationError(
+                'The configured serializer %r cannot round-trip versioned '
+                'messages and cannot be used with message_schema: %s' % (
+                    type(self.serializer).__name__, type(exc).__name__))
+        if restored != probe:
+            raise ConfigurationError(
+                'The configured serializer %r altered a versioned message '
+                'during round-trip and cannot be used with message_schema.' %
+                (type(self.serializer).__name__,))
 
     def create_storage(self):
         # When using immediate mode, the default behavior is to use an
@@ -298,8 +353,31 @@ class Huey(object):
         return self.serializer.serialize(message)
 
     def deserialize_task(self, data):
+        self.validate_message_schema()
         message = self.serializer.deserialize(data)
+        # ``create_task`` performs version checks, alias resolution and
+        # argument migrations for this message and every nested message.
         return self._registry.create_task(message)
+
+    def validate_message_schema(self):
+        """
+        Validate aliases and migrations against the tasks registered with this
+        Huey instance. Raises before any message is executed if an alias is
+        ambiguous/cyclic or a migration refers to an unknown task.
+
+        Without a ``message_schema`` this is a no-op, preserving the legacy
+        behavior for existing registries and custom serializers.
+        """
+        if self.message_schema is None:
+            return True
+        registry = self._registry
+        generation = getattr(registry, 'generation', None)
+        cache_key = (generation, getattr(self.message_schema, 'revision', None))
+        if cache_key == self._schema_validation_cache:
+            return True
+        self.message_schema.validate_registry(registry)
+        self._schema_validation_cache = cache_key
+        return True
 
     def enqueue(self, task):
         if isinstance(task, group):

@@ -533,6 +533,11 @@ class Consumer(object):
                 'is enabled. Please check your configuration and ensure that '
                 '"huey.immediate = False".')
 
+        # Validate the message schema against the registered tasks before any
+        # queued message is read, so alias conflicts, cycles and migrations
+        # targeting unknown tasks fail loudly at startup.
+        self.huey.validate_message_schema()
+
         # Log startup message.
         self._logger.info('Huey consumer started with %s %s, PID %s at %s',
                           self.workers, self.worker_type, os.getpid(),

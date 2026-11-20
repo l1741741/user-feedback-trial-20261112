@@ -231,7 +231,7 @@ Huey types
 Huey object
 -----------
 
-.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, storage_class=None, store_intermediate_errors=True, **storage_kwargs)
+.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, storage_class=None, store_intermediate_errors=True, message_schema=None, **storage_kwargs)
 
     :param str name: the name of the task queue, e.g. your application's name.
     :param bool results: whether to store task results.
@@ -255,6 +255,10 @@ Huey object
         storage backend whenever immediate-mode is enabled.
     :param storage_class: storage implementation to use, e.g.
         :py:class:`SqliteStorage`. Overrides the class's default.
+    :param MessageSchema message_schema: optional versioned message contract
+        used to read messages written by an older or newer release during a
+        rolling deployment, and to migrate renamed tasks and changed
+        arguments. See :ref:`rolling-upgrades`.
     :param storage_kwargs: arbitrary keyword arguments that will be passed to
         the storage backend for additional configuration.
 
@@ -2267,6 +2271,71 @@ Serializer
     Both the application and the consumer must use the same ``secret`` and
     ``salt``.
 
+.. _message-schema-api:
+
+Message schemas
+---------------
+
+.. py:class:: huey.schema.MessageSchema(version=1, legacy_version=None, aliases=None, migrations=None)
+
+    :param int version: message version written and read without conversion.
+        ``1`` is the format used before versioning was introduced.
+    :param int legacy_version: version assumed for messages that carry no
+        version. Defaults to ``version``; set it lower when the payload shape
+        changed and old messages must be migrated.
+    :param dict aliases: mapping of old fully-qualified task name to new name.
+    :param dict migrations: mapping of canonical task name to a list of
+        ``(from_version, to_version, function)`` tuples.
+
+    Optional versioned message contract for rolling deployments. See
+    :ref:`rolling-upgrades` for usage and deployment ordering.
+
+    .. py:method:: add_alias(old_name, new_name)
+
+        Register an alias. Names must be fully-qualified ``module.Class``
+        names; short names are never matched. Conflicting targets raise
+        :py:class:`TaskAliasError`; self-aliases and cycles are rejected.
+
+    .. py:method:: add_migration(task_name, from_version, to_version, func)
+
+        Register a migration step. ``func(args, kwargs)`` returns
+        ``(args, kwargs)`` and receives deep copies. Only registered migrations
+        are ever run. Conflicting registrations raise
+        :py:class:`ConfigurationError`.
+
+    .. py:method:: resolve_name(name)
+
+        Return the canonical task name, following explicit aliases.
+
+    .. py:method:: migrate(task_name, version, args, kwargs, task_id=None, path=())
+
+        Convert ``args`` / ``kwargs`` to the current version using registered
+        migrations. Never mutates the inputs. Raises
+        :py:class:`MessageVersionError` when there is no migration path, and
+        :py:class:`MessageMigrationError` when a migration fails or returns an
+        invalid value.
+
+    .. py:method:: validate()
+
+        Validate the alias graph and migration chains.
+
+    .. py:method:: validate_registry(registry)
+
+        Validate the schema against the tasks a consumer registered. Called
+        automatically before consuming begins.
+
+.. py:class:: huey.registry.Message
+
+    A plain message namedtuple. Retains the 15-field wire format used before
+    versioning, so old messages remain readable and messages written at
+    version 1 stay compatible with un-upgraded consumers.
+
+.. py:class:: huey.registry.VersionedMessage(schema_version, message)
+
+    Wraps a :py:class:`Message` (and nested pipeline messages) once the schema
+    version advances past 1. Consumers that do not understand it refuse the
+    message rather than running it with defaults.
+
 .. _exceptions:
 
 Exceptions
@@ -2279,6 +2348,28 @@ Exceptions
 .. py:class:: ConfigurationError
 
     Raised when Huey encounters a configuration problem.
+
+.. py:class:: MessageSchemaError
+
+    Base class for errors raised while interpreting a versioned task message.
+
+.. py:class:: MessageVersionError
+
+    Raised when a message advertises a version the consumer cannot read, or
+    when no migration path exists from an old version. The message identifies
+    ``version``, ``task_name``, ``task_id``, nested ``path`` and
+    ``supported`` versions, but never includes task arguments.
+
+.. py:class:: MessageMigrationError
+
+    Raised when a registered argument migration fails or returns an invalid
+    value. No task is constructed, so a partially converted task never runs.
+    The original exception is chained as ``__cause__``.
+
+.. py:class:: TaskAliasError
+
+    Raised for conflicting or cyclic task-name aliases, or when an alias
+    target does not resolve to a registered task.
 
 .. py:class:: TaskLockedException
 

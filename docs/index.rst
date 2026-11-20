@@ -123,6 +123,7 @@ Table of contents
    guide
    consumer
    deployment
+   rolling_upgrades
    monitoring
    imports
    shared_resources

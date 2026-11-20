@@ -3,6 +3,13 @@ Changelog
 
 ## Master
 
+* Add an optional versioned message contract (`MessageSchema`) for rolling
+  deployments. Explicit task-name aliases and caller-registered argument
+  migrations convert old messages; unsupported versions are rejected with a
+  locatable, payload-free error. Applies to task chains, error handlers and
+  chord callbacks, and keeps task id, retries, priority and ETA. Off by
+  default; the legacy wire format is unchanged at version 1.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4
