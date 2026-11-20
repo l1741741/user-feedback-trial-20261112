@@ -198,6 +198,8 @@ class Scheduler(BaseProcess):
 
     def enqueue_periodic_tasks(self, now):
         self._logger.debug('Checking periodic tasks')
+        # Legacy crontab periodic tasks: minute-match enqueue (unchanged
+        # upstream behavior, including per-minute stall skip logic).
         for task in self.huey.read_periodic(now):
             self._logger.info('Enqueueing periodic task %s.', task)
             try:
@@ -205,6 +207,16 @@ class Scheduler(BaseProcess):
             except Exception:
                 self._logger.exception('Error enqueueing periodic task %s.',
                                        task)
+        # IANA-timezone periodic tasks: occurrence-based enqueue with an
+        # explicit catch-up window and storage-level dedup. Repeated ticks on
+        # the same minute cannot duplicate a delivery, and a short pause is
+        # caught up deterministically.
+        if self.huey.local_periodic_tasks():
+            try:
+                self.huey.enqueue_due_periodic(now)
+            except Exception:
+                self._logger.exception(
+                    'Error enqueueing timezone-aware periodic tasks.')
 
 
 class ForkSafeFlag(object):
@@ -402,6 +414,9 @@ class Consumer(object):
                                  'that has "immediate" mode enabled. This '
                                  'must be disabled before the consumer can '
                                  'be run.')
+        # Fail fast on invalid timezone schedules or conflicting
+        # configuration instead of dying on the first scheduler tick.
+        huey.validate_periodic_configuration()
         self.huey = huey
         self.workers = workers  # Number of workers.
         self.periodic = periodic  # Enable periodic task scheduler?

@@ -174,6 +174,76 @@ For more information see the following API documentation:
 * :py:meth:`~Huey.periodic_task`
 * :py:func:`crontab`
 
+Timezone-aware periodic tasks and DST
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:py:func:`crontab` evaluates against the Huey instance's clock (UTC by
+default). For a job that must run at a fixed *local* wall-clock time in a
+specific region -- for example an operations report that runs every day at
+02:30 New York time while the deployment machine and every other queue stay
+on UTC -- use :py:func:`tzcrontab` with an explicit IANA timezone. No
+process-level ``TZ`` variable is involved, so UTC-based tasks are unaffected.
+
+.. code-block:: python
+
+    from huey import SqliteHuey
+    from huey import tzcrontab
+    from huey import GAP_NEXT_VALID
+    from huey import FOLD_TWICE
+
+    huey = SqliteHuey(filename='/tmp/demo.db')  # utc=True by default
+
+    @huey.periodic_task(tzcrontab(
+        minute='30', hour='2',
+        timezone='America/New_York',
+        gap_policy=GAP_NEXT_VALID,  # or GAP_SKIP (default)
+        fold_policy=FOLD_TWICE))    # or FOLD_ONCE (default)
+    def ops_report(task=None):
+        # With context=True the task exposes the planned occurrence id,
+        # which distinguishes the two runs of a DST repeated hour.
+        print('running occurrence', task.occurrence_id)
+
+Daylight-saving boundaries are handled explicitly instead of relying on
+platform defaults:
+
+* **Non-existent local time (spring-forward gap).** When the wall time the
+  schedule names never happens, ``GAP_SKIP`` (the default) drops that
+  occurrence while ``GAP_NEXT_VALID`` runs it at the first valid instant at
+  or after the requested time.
+* **Repeated local time (fall-back fold).** ``FOLD_ONCE`` (the default) runs
+  the pre-transition occurrence only; ``FOLD_TWICE`` runs both the
+  pre-transition (``fold=0``) and post-transition (``fold=1``) instants. The
+  two executions carry different ``occurrence_id`` values, available on the
+  task when the periodic task is registered with ``context=True``.
+
+Each planned occurrence has a deterministic identity built from the task
+name, a fingerprint of the schedule (cron fields, zone and DST policies) and
+the occurrence's UTC instant. Before enqueueing, the scheduler atomically
+claims that identity in storage. Consequently:
+
+* re-checking the same minute never produces a duplicate delivery;
+* two schedulers sharing one SQLite database enqueue a given occurrence at
+  most once (the claim is a primary-key-guarded row);
+* a consumer that pauses or restarts still delivers occurrences whose
+  scheduled instant falls within the explicit ``catchup`` window (default
+  900 seconds; older occurrences are dropped rather than replayed). The
+  window can be overridden per task with the ``catchup`` parameter of
+  :py:func:`tzcrontab` or the ``catchup`` argument of
+  :py:meth:`~Huey.periodic_task`.
+
+Changing any cron field, the timezone, or a DST policy changes the
+fingerprint, and renaming a task changes its identity -- in both cases the
+new plan starts with a fresh dedup namespace and can never be suppressed by
+state left by the old plan.
+
+Invalid timezone names and conflicting policies raise
+:class:`~huey.exceptions.ConfigurationError` while the schedule object is
+being constructed, and incompatible runtime configuration (such as attaching
+a timezone-aware task to a non-UTC Huey instance) is rejected when the
+:class:`~huey.consumer.Consumer` is created, before startup.
+
+See also :py:class:`huey.crontab_tz.LocalCronSchedule`.
+
 Retrying tasks that fail
 ------------------------
 

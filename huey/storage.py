@@ -265,6 +265,41 @@ class BaseStorage(object):
         """
         raise NotImplementedError
 
+    def claim_periodic(self, key, data, ttl=None):
+        """
+        Atomically create a periodic-task dedup claim, only if no claim with
+        the given key exists. This is the primitive that guarantees two
+        schedulers sharing one backend enqueue a given planned occurrence at
+        most once.
+
+        :param bytes/str key: deterministic identity of the occurrence.
+        :param bytes data: opaque payload stored alongside the claim.
+        :param int ttl: optional retention in seconds. Backends without TTL
+            support ignore it; stale claims are reaped via
+            :meth:`prune_periodic_claims`.
+        :return: True if this caller won the claim (and should enqueue),
+                 False if another scheduler claimed it first.
+        """
+        if ttl is not None:
+            raise NotImplementedError('ttl is not supported by this storage.')
+        if self.has_data_for_key(key):
+            return False
+        self.put_data(key, data)
+        return True
+
+    def prune_periodic_claims(self, cutoff):
+        """
+        Delete dedup claims recorded before the given UTC epoch timestamp.
+        Backends with native key TTL may leave this as a no-op.
+        """
+        pass
+
+    def flush_periodic_claims(self):
+        """
+        Remove all periodic-task dedup claims (e.g. on ``flush_all()``).
+        """
+        pass
+
     def result_store_size(self):
         """
         :return: Number of key/value pairs in the result store.
@@ -306,6 +341,7 @@ class BaseStorage(object):
         self.flush_schedule()
         self.flush_results()
         self.flush_counters()
+        self.flush_periodic_claims()
 
 
 class BlackHoleStorage(BaseStorage):
@@ -326,6 +362,9 @@ class BlackHoleStorage(BaseStorage):
     def put_if_empty(self, key, value, ttl=None): return True
     def incr(self, key, amount=1): return amount
     def delete_counter(self, key): pass
+    def claim_periodic(self, key, data, ttl=None): return True
+    def prune_periodic_claims(self, cutoff): pass
+    def flush_periodic_claims(self): pass
     def result_store_size(self): return 0
     def result_items(self): return {}
     def flush_results(self): pass
@@ -340,6 +379,7 @@ class MemoryStorage(BaseStorage):
         self._results = {}
         self._schedule = []
         self._counters = {}
+        self._periodic_claims = {}  # key -> (data, created_epoch)
         self._lock = threading.RLock()
 
     def enqueue(self, data, priority=None):
@@ -425,6 +465,25 @@ class MemoryStorage(BaseStorage):
     def delete_counter(self, key):
         with self._lock:
             self._counters.pop(key, None)
+
+    def claim_periodic(self, key, data, ttl=None):
+        with self._lock:
+            if key in self._periodic_claims:
+                return False
+            self._periodic_claims[key] = (data, time.time())
+            return True
+
+    def prune_periodic_claims(self, cutoff):
+        with self._lock:
+            stale = [k for k, (_, created) in self._periodic_claims.items()
+                     if created < cutoff]
+            for key in stale:
+                self._periodic_claims.pop(key, None)
+            return len(stale)
+
+    def flush_periodic_claims(self):
+        with self._lock:
+            self._periodic_claims = {}
 
     def result_store_size(self):
         return len(self._results)
@@ -870,8 +929,20 @@ class SqliteStorage(BaseSqlStorage):
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
+    # Dedup ledger for timezone-aware periodic task occurrences. The primary
+    # key makes claiming atomic across processes/connections: a second
+    # scheduler hitting the same (queue, key) gets an IntegrityError and must
+    # not enqueue.
+    table_periodic_claim = (
+        'create table if not exists periodic_claim ('
+        'queue text not null, key text not null, data blob not null, '
+        'created real not null, primary key(queue, key))')
+    index_periodic_claim = ('create index if not exists '
+                            'periodic_claim_queue_created on '
+                            'periodic_claim (queue, created)')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           table_counter, drop_index_task, table_periodic_claim,
+           index_periodic_claim]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
@@ -1060,6 +1131,30 @@ class SqliteStorage(BaseSqlStorage):
     def delete_counter(self, key):
         self.sql('delete from counter where queue = ? and key = ?',
                  (self.name, key), commit=True)
+
+    def claim_periodic(self, key, data, ttl=None):
+        # The primary-key conflict makes this an atomic test-and-set even with
+        # several consumer processes (or separate Huey instances) sharing the
+        # database file.
+        try:
+            with self.db(commit=True) as curs:
+                curs.execute('insert or abort into periodic_claim '
+                             '(queue, key, data, created) values (?, ?, ?, ?)',
+                             (self.name, key, self.to_blob(data),
+                              time.time()))
+        except self.integrity_error:
+            return False
+        else:
+            return True
+
+    def prune_periodic_claims(self, cutoff):
+        return self.sql('delete from periodic_claim where queue = ? and '
+                        'created < ?', (self.name, cutoff), commit=True,
+                        results=False) or 0
+
+    def flush_periodic_claims(self):
+        self.sql('delete from periodic_claim where queue = ?',
+                 (self.name,), commit=True)
 
     def result_store_size(self):
         return self.sql('select count(*) from kv where queue=?', (self.name,),

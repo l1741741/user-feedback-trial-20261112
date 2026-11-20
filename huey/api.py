@@ -40,6 +40,8 @@ from huey.storage import SqliteStorage
 from huey.utils import ChordConfig
 from huey.utils import Error
 from huey.utils import SKIPPED
+from huey.utils import aware_to_utc
+from huey.utils import is_naive
 from huey.utils import noop_context
 from huey.utils import normalize_expire_time
 from huey.utils import normalize_time
@@ -188,15 +190,28 @@ class Huey(object):
 
     def periodic_task(self, validate_datetime, retries=0, retry_delay=0,
                       retry_backoff=0, priority=None, context=False, name=None,
-                      expires=None, timeout=None, **kwargs):
+                      expires=None, timeout=None, catchup=None, **kwargs):
         TaskWrapper = self.task_wrapper_class
+
+        # Import locally to avoid a circular import (crontab_tz imports
+        # crontab from this module).
+        from huey.crontab_tz import LocalCronSchedule
+        local_schedule = (validate_datetime
+                          if isinstance(validate_datetime, LocalCronSchedule)
+                          else None)
+        if local_schedule is not None and catchup is not None:
+            if not isinstance(catchup, (int, float)) or catchup < 60:
+                raise ConfigurationError(
+                    'periodic_task catchup must be a number of seconds >= 60.')
+            # Copy so per-task overrides never mutate a shared schedule.
+            local_schedule = copy.copy(local_schedule)
+            local_schedule.catchup = int(catchup)
+
         def decorator(func):
             def method_validate(self, timestamp):
                 return validate_datetime(timestamp)
 
-            return TaskWrapper(
-                self,
-                func.func if isinstance(func, TaskWrapper) else func,
+            settings = dict(
                 context=context,
                 name=name,
                 default_retries=retries,
@@ -206,8 +221,17 @@ class Huey(object):
                 default_expires=expires,
                 default_timeout=timeout,
                 validate_datetime=method_validate,
-                task_base=PeriodicTask,
-                **kwargs)
+                task_base=PeriodicTask)
+            settings.update(kwargs)
+            if local_schedule is not None:
+                # The scheduler routes classes carrying a local_schedule
+                # through the timezone-aware, dedup-checked enqueue path.
+                settings['local_schedule'] = local_schedule
+
+            return TaskWrapper(
+                self,
+                func.func if isinstance(func, TaskWrapper) else func,
+                **settings)
 
         return decorator
 
@@ -719,8 +743,99 @@ class Huey(object):
     def read_periodic(self, timestamp):
         if timestamp is None:
             timestamp = self._get_timestamp()
+        # Timezone-aware schedules are enqueued separately via
+        # enqueue_due_periodic() with occurrence dedup and DST handling.
         return [task for task in self._registry.periodic_tasks
-                if task.validate_datetime(timestamp)]
+                if task.local_schedule is None
+                and task.validate_datetime(timestamp)]
+
+    def local_periodic_tasks(self):
+        """Periodic task classes driven by an IANA timezone schedule."""
+        return [task for task in self._registry.periodic_tasks
+                if task.local_schedule is not None]
+
+    def validate_periodic_configuration(self):
+        """
+        Verify every timezone-aware periodic task is usable before the
+        consumer starts. Invalid zones/policies already raise at
+        tzcrontab() construction; this additionally rejects conflicting
+        runtime configuration.
+        """
+        for task_instance in self.local_periodic_tasks():
+            task_class = type(task_instance)
+            schedule = task_class.local_schedule
+            if not self.utc:
+                raise ConfigurationError(
+                    'Timezone-aware periodic task %r requires a UTC-based '
+                    'Huey instance (utc=True, the default). Mixing local '
+                    'wall-clock scheduling with a non-UTC Huey is ambiguous.'
+                    % task_class.__name__)
+            if schedule.catchup < 60:
+                raise ConfigurationError(
+                    'Periodic task %r catchup window must be >= 60 seconds.'
+                    % task_class.__name__)
+
+    def enqueue_due_periodic(self, timestamp=None):
+        """
+        Enqueue timezone-aware periodic occurrences due within the explicit
+        catch-up window ending at ``timestamp`` (naive UTC, defaults to now).
+
+        Each planned occurrence has a deterministic identity. A storage-level
+        atomic claim ensures the occurrence is enqueued at most once, even
+        when two schedulers share one SQLite database or when the same
+        scheduler tick runs repeatedly while paused -- re-checking the same
+        minute never produces duplicate deliveries.
+
+        Returns the list of enqueued task instances.
+        """
+        from huey.crontab_tz import CLAIM_RETENTION_SECONDS
+        from huey.crontab_tz import utc_epoch_seconds
+
+        if timestamp is None:
+            timestamp = self._get_timestamp()
+        # Internal timestamps are naive UTC; normalize an aware one rather
+        # than mixing aware/naive values in comparisons and storage.
+        if not is_naive(timestamp):
+            timestamp = aware_to_utc(timestamp)
+
+        enqueued = []
+        for task_instance in self.local_periodic_tasks():
+            task_class = type(task_instance)
+            schedule = task_class.local_schedule
+            window_start = timestamp - datetime.timedelta(
+                seconds=schedule.catchup)
+            for utc_dt, occurrence_id, fold in schedule.occurrences(
+                    window_start, timestamp):
+                claim_key = self._periodic_claim_key(
+                    task_class, schedule, occurrence_id)
+                if not self.storage.claim_periodic(
+                        claim_key, b'1', ttl=CLAIM_RETENTION_SECONDS):
+                    # Another scheduler (or an earlier tick) already delivered
+                    # this exact planned occurrence.
+                    logger.debug('Periodic occurrence %s already claimed.',
+                                 claim_key)
+                    continue
+                task = task_class(occurrence_id=occurrence_id)
+                logger.info('Enqueueing tz periodic task %s occurrence %s '
+                            '(fold=%s).', task.name, occurrence_id, fold)
+                self.enqueue(task)
+                enqueued.append(task)
+
+        # Reap stale claims so the ledger does not grow without bound.
+        try:
+            self.storage.prune_periodic_claims(
+                utc_epoch_seconds(timestamp) - CLAIM_RETENTION_SECONDS)
+        except Exception:
+            logger.exception('Error pruning periodic claims.')
+        return enqueued
+
+    def _periodic_claim_key(self, task_class, schedule, occurrence_id):
+        # The key binds the task identity, the plan fingerprint and the
+        # occurrence. Renaming the task or changing the schedule therefore
+        # starts a fresh dedup namespace and can never reuse old state.
+        task_str = self._registry.task_to_string(task_class)
+        return 'pc:%s:%s:%s' % (task_str, schedule.fingerprint,
+                                occurrence_id)
 
     def ready_to_run(self, task, timestamp=None):
         if timestamp is None:
@@ -803,7 +918,8 @@ class Task(object):
     def __init__(self, args=None, kwargs=None, id=None, eta=None, retries=None,
                  retry_delay=None, priority=None, expires=None,
                  on_complete=None, on_error=None, expires_resolved=None,
-                 timeout=None, chord_config=None, retry_backoff=None):
+                 timeout=None, chord_config=None, retry_backoff=None,
+                 occurrence_id=None):
         self.name = type(self).__name__
         self.args = () if args is None else args
         self.kwargs = {} if kwargs is None else kwargs
@@ -822,6 +938,10 @@ class Task(object):
         self.timeout = timeout if timeout is not None else self.default_timeout
         self.chord_config = chord_config
         self._deadline = None
+        # Identity of the planned periodic occurrence (None for ordinary
+        # tasks). Distinguishes the two halves of a DST repeated hour and is
+        # available inside context tasks as task.occurrence_id.
+        self.occurrence_id = occurrence_id
 
         self.on_complete = on_complete
         self.on_error = on_error
@@ -929,7 +1049,13 @@ def _signature(task, args=(), kwargs=None):
 
 
 class PeriodicTask(Task):
+    # Set on task classes driven by a LocalCronSchedule (IANA timezone).
+    # None means a legacy crontab()-style validator.
+    local_schedule = None
+
     def validate_datetime(self, timestamp):
+        if self.local_schedule is not None:
+            return self.local_schedule(timestamp)
         return False
 
 
