@@ -29,6 +29,7 @@ from huey.registry import Registry
 from huey.serializer import Serializer
 from huey.storage import BlackHoleStorage
 from huey.storage import CySqliteStorage
+from huey.storage import decode_lease
 from huey.storage import FileStorage
 from huey.storage import MemoryStorage
 from huey.storage import PostgresStorage
@@ -754,7 +755,11 @@ class Huey(object):
     def flush(self):
         self.storage.flush_all()
 
-    def lock_task(self, lock_name, ttl=None):
+    def lock_task(self, lock_name, ttl=None, lease=None):
+        if lease is not None:
+            if ttl is not None:
+                raise ValueError('pass either "ttl" or "lease", not both.')
+            return TaskLease(self, lock_name, lease)
         return TaskLock(self, lock_name, ttl)
 
     def is_locked(self, lock_name):
@@ -1060,6 +1065,19 @@ class TaskWrapper(object):
                                timeout=kwargs.pop('timeout', None))
 
 
+def _is_lock_key_held(storage, key):
+    # Shared "is this lock name held?" query. A legacy lock value counts as
+    # held; a lease value counts only while unexpired.
+    value = storage.peek_data(key)
+    if value is EmptyData:
+        return False
+    current = decode_lease(value)
+    if current is None:
+        return True
+    clock = getattr(storage, 'clock', time.time)
+    return current[1] > clock()
+
+
 class TaskLock(object):
     """
     Utilize the Storage key/value APIs to implement simple locking. For more
@@ -1073,7 +1091,7 @@ class TaskLock(object):
         self._huey._locks.add(self._key)
 
     def is_locked(self):
-        return self._huey.storage.has_data_for_key(self._key)
+        return _is_lock_key_held(self._huey.storage, self._key)
     locked = is_locked
 
     def __call__(self, fn):
@@ -1098,6 +1116,97 @@ class TaskLock(object):
     def clear(self):
         return self._huey.delete(self._key)
     release = clear
+
+
+class TaskLease(object):
+    """
+    Owned lease lock: a task lock that expires on its own and can only be
+    renewed or released by the holder that acquired it. For more details see
+    :py:meth:`Huey.lock_task`.
+
+    Behavior notes:
+
+    * Each successful :py:meth:`acquire` generates a fresh owner token, so a
+      holder whose lease expired and was taken over can neither release nor
+      renew the new holder's lease.
+    * Not re-entrant: acquiring again while the lease is held (including a
+      nested ``with`` block on the same instance) raises
+      :py:class:`TaskLockedException`, matching :py:class:`TaskLock`.
+    * Renewal is explicit via :py:meth:`renew`; no background threads or
+      timers are started.
+    * A failed acquire raises and records nothing, so a later context-manager
+      exit cannot delete another holder's lock.
+    """
+    def __init__(self, huey, name, ttl):
+        if ttl is None or ttl <= 0:
+            raise ValueError('lease must be a positive number of seconds.')
+        self._huey = huey
+        self._name = name
+        self._ttl = ttl
+        self._key = '%s.lock.%s' % (self._huey.name, self._name)
+        # Owner tokens of this instance's successful acquisitions. Normally
+        # holds zero or one token, since the lock is not re-entrant.
+        self._held = []
+        self._huey._locks.add(self._key)
+
+    @property
+    def owner(self):
+        """
+        The owner token of this instance's current acquisition, or ``None``
+        if this instance does not hold the lease.
+        """
+        return self._held[-1] if self._held else None
+
+    def is_locked(self):
+        return _is_lock_key_held(self._huey.storage, self._key)
+    locked = is_locked
+
+    def __call__(self, fn):
+        @wraps(fn)
+        def inner(*args, **kwargs):
+            with self:
+                return fn(*args, **kwargs)
+        return inner
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
+    def acquire(self):
+        owner = uuid.uuid4().hex
+        if not self._huey.storage.acquire_lease(self._key, owner, self._ttl):
+            raise TaskLockedException('unable to acquire lock %s' % self._name)
+        self._held.append(owner)
+        return True
+
+    def renew(self, ttl=None):
+        """
+        Extend this instance's lease by ``ttl`` seconds (defaults to the
+        original lease). Returns ``False`` without changing anything if this
+        instance does not hold an unexpired lease.
+        """
+        if not self._held:
+            return False
+        return self._huey.storage.renew_lease(
+            self._key, self._held[-1], ttl if ttl is not None else self._ttl)
+
+    def release(self):
+        """
+        Release the lease if (and only if) this instance currently holds it.
+        Returns whether a lease was released. Never removes another owner's
+        lease or a legacy lock.
+        """
+        if not self._held:
+            return False
+        owner = self._held.pop()
+        return self._huey.storage.release_lease(self._key, owner)
+
+    # Unlike TaskLock.clear(), clearing a lease is ownership-checked. Use
+    # Huey.flush_locks() for administrative removal of a stuck lease.
+    clear = release
 
 
 class RateLimit(object):

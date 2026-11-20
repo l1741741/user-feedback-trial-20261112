@@ -37,6 +37,38 @@ from huey.exceptions import ConfigurationError
 from huey.utils import FileLock
 
 
+# Lease locks are stored in the same key/value space as regular (legacy)
+# locks, but the value encodes an owner token and an expiry timestamp so that
+# a lock left behind by a dead consumer can be taken over once it expires.
+LEASE_PREFIX = b'\x00huey-lease\x00'
+LEASE_EXPIRY_FMT = '>d'  # 8-byte big-endian double, seconds since epoch.
+LEASE_EXPIRY_LEN = 8
+
+
+def encode_lease(owner, expires):
+    if isinstance(owner, str):
+        owner = owner.encode('utf-8')
+    return LEASE_PREFIX + struct.pack(LEASE_EXPIRY_FMT, expires) + owner
+
+
+def decode_lease(value):
+    """
+    Decode a lease value, returning an ``(owner, expires)`` 2-tuple, or
+    ``None`` if the value is not a lease (e.g. a legacy lock or result data).
+    """
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if not isinstance(value, (bytes, bytearray)):
+        return None
+    if not value.startswith(LEASE_PREFIX):
+        return None
+    payload = bytes(value[len(LEASE_PREFIX):])
+    if len(payload) < LEASE_EXPIRY_LEN:
+        return None
+    expires, = struct.unpack(LEASE_EXPIRY_FMT, payload[:LEASE_EXPIRY_LEN])
+    return payload[LEASE_EXPIRY_LEN:].decode('utf-8'), expires
+
+
 class BaseStorage(object):
     """
     Base storage-layer interface. Subclasses should implement all methods.
@@ -46,6 +78,9 @@ class BaseStorage(object):
 
     def __init__(self, name='huey', **storage_kwargs):
         self.name = name
+        # Clock used for lease expiry comparisons. A callable returning
+        # seconds since the epoch; tests may inject a controllable clock.
+        self.clock = storage_kwargs.pop('clock', None) or time.time
 
     def close(self):
         """
@@ -252,6 +287,45 @@ class BaseStorage(object):
         self.put_data(key, value)
         return True
 
+    def acquire_lease(self, key, owner, ttl):
+        """
+        Atomically take the lease at the given key for ``owner``, expiring
+        ``ttl`` seconds from now (per this storage's ``clock``). Succeeds only
+        if no unexpired lease and no legacy (non-lease) lock exists at the
+        key. An expired lease may be taken over by any owner.
+
+        :param bytes key: Lock key.
+        :param str owner: Opaque token identifying the would-be holder.
+        :param float ttl: Seconds until the lease expires.
+        :return: Boolean whether the lease was acquired.
+        """
+        raise NotImplementedError('lease locks are not supported by this '
+                                  'storage backend.')
+
+    def renew_lease(self, key, owner, ttl):
+        """
+        Atomically extend the lease at the given key to expire ``ttl``
+        seconds from now. Succeeds only if the key currently holds an
+        unexpired lease owned by ``owner``. A holder whose lease has already
+        expired cannot renew it, even if nobody else has taken it over.
+
+        :return: Boolean whether the lease was renewed.
+        """
+        raise NotImplementedError('lease locks are not supported by this '
+                                  'storage backend.')
+
+    def release_lease(self, key, owner):
+        """
+        Atomically delete the lease at the given key, but only if it is a
+        lease currently owned by ``owner``. Never removes a legacy lock or
+        another owner's lease, so a stale holder cannot delete a lock that
+        has since been taken over.
+
+        :return: Boolean whether a lease was deleted.
+        """
+        raise NotImplementedError('lease locks are not supported by this '
+                                  'storage backend.')
+
     def incr(self, key, amount=1):
         """
         Atomically increment a counter, returning the new value. If the key
@@ -324,6 +398,9 @@ class BlackHoleStorage(BaseStorage):
     def pop_data(self, key): return EmptyData
     def has_data_for_key(self, key): return False
     def put_if_empty(self, key, value, ttl=None): return True
+    def acquire_lease(self, key, owner, ttl): return True
+    def renew_lease(self, key, owner, ttl): return True
+    def release_lease(self, key, owner): return True
     def incr(self, key, amount=1): return amount
     def delete_counter(self, key): pass
     def result_store_size(self): return 0
@@ -415,6 +492,35 @@ class MemoryStorage(BaseStorage):
             if key in self._results:
                 return False
             self._results[key] = value
+            return True
+
+    def acquire_lease(self, key, owner, ttl):
+        now = self.clock()
+        with self._lock:
+            value = self._results.get(key, EmptyData)
+            if value is not EmptyData:
+                current = decode_lease(value)
+                if current is None or current[1] > now:
+                    # Legacy lock or unexpired lease held by someone.
+                    return False
+            self._results[key] = encode_lease(owner, now + ttl)
+            return True
+
+    def renew_lease(self, key, owner, ttl):
+        now = self.clock()
+        with self._lock:
+            current = decode_lease(self._results.get(key, EmptyData))
+            if current is None or current[0] != owner or current[1] <= now:
+                return False
+            self._results[key] = encode_lease(owner, now + ttl)
+            return True
+
+    def release_lease(self, key, owner):
+        with self._lock:
+            current = decode_lease(self._results.get(key, EmptyData))
+            if current is None or current[0] != owner:
+                return False
+            del self._results[key]
             return True
 
     def incr(self, key, amount=1):
@@ -875,7 +981,7 @@ class SqliteStorage(BaseSqlStorage):
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
-                 create_tables=True, **kwargs):
+                 create_tables=True, clock=None, **kwargs):
         self.filename = filename
         self._cache_mb = cache_mb
         self._fsync = fsync
@@ -899,6 +1005,8 @@ class SqliteStorage(BaseSqlStorage):
         self.to_blob = memoryview
 
         super(SqliteStorage, self).__init__(name, create_tables=create_tables)
+        if clock is not None:
+            self.clock = clock
 
     def _create_connection(self):
         conn = sqlite3.connect(self.filename, timeout=self._timeout,
@@ -1045,6 +1153,53 @@ class SqliteStorage(BaseSqlStorage):
         except self.integrity_error:
             return False
         else:
+            return True
+
+    # The lease operations run inside a single "begin exclusive" transaction
+    # (see db()), so the check-and-set is atomic across threads and processes
+    # sharing the database file.
+    def acquire_lease(self, key, owner, ttl):
+        now = self.clock()
+        with self.db(commit=True) as curs:
+            curs.execute('select value from kv where queue = ? and key = ?',
+                         (self.name, key))
+            row = curs.fetchone()
+            if row is not None:
+                current = decode_lease(row[0])
+                if current is None or current[1] > now:
+                    # Legacy lock or unexpired lease held by someone.
+                    return False
+            curs.execute('insert or replace into kv (queue, key, value) '
+                         'values (?, ?, ?)',
+                         (self.name, key,
+                          self.to_blob(encode_lease(owner, now + ttl))))
+            return True
+
+    def renew_lease(self, key, owner, ttl):
+        now = self.clock()
+        with self.db(commit=True) as curs:
+            curs.execute('select value from kv where queue = ? and key = ?',
+                         (self.name, key))
+            row = curs.fetchone()
+            current = decode_lease(row[0]) if row is not None else None
+            if current is None or current[0] != owner or current[1] <= now:
+                return False
+            curs.execute('insert or replace into kv (queue, key, value) '
+                         'values (?, ?, ?)',
+                         (self.name, key,
+                          self.to_blob(encode_lease(owner, now + ttl))))
+            return True
+
+    def release_lease(self, key, owner):
+        with self.db(commit=True) as curs:
+            curs.execute('select value from kv where queue = ? and key = ?',
+                         (self.name, key))
+            row = curs.fetchone()
+            current = decode_lease(row[0]) if row is not None else None
+            if current is None or current[0] != owner:
+                return False
+            curs.execute('delete from kv where queue = ? and key = ?',
+                         (self.name, key))
             return True
 
     def incr(self, key, amount=1):

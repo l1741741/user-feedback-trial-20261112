@@ -873,7 +873,9 @@ If the task is configured to be retried, then it will be retried normally.
 Pass ``ttl`` (seconds) so a lock left behind by a killed worker expires on its
 own. The memory and redis storages support it, others raise
 ``NotImplementedError``. With :py:class:`RedisHuey` the server must support
-hash-field TTL (redis 7.4+ or valkey 9+).
+hash-field TTL (redis 7.4+ or valkey 9+). For :py:class:`MemoryHuey` and
+:py:class:`SqliteHuey`, see :ref:`lease-locks` below for an owned lease lock
+with safe takeover semantics.
 
 Examples:
 
@@ -899,6 +901,60 @@ Examples:
             do_db_backup()
 
 See :py:meth:`Huey.lock_task` for API documentation.
+
+.. _lease-locks:
+
+Lease locks with ownership
+--------------------------
+
+The plain lock described above is held until the holder explicitly releases
+it (or it is flushed). If a consumer is killed while holding it, the lock
+stays held until an administrator flushes it. As an explicit opt-in,
+:py:class:`MemoryHuey` and :py:class:`SqliteHuey` support *lease locks*:
+locks bound to an owner token that expire after a fixed number of seconds.
+
+.. code-block:: python
+
+    @huey.periodic_task(crontab(minute='*/5'))
+    @huey.lock_task('reports-lock', lease=300)  # Expires after 5 minutes.
+    def generate_report():
+        run_report()
+
+The lease differs from the plain lock in the following ways:
+
+* **Expiry and takeover.** If the holder disappears (consumer killed,
+  process crashed), the lease expires on its own and any would-be executor
+  may then acquire it. There is no need to flush locks manually.
+* **Ownership.** Every acquisition generates a fresh owner token. Renewing
+  and releasing are checked against that token: a stale holder that comes
+  back to life after its lease expired (and was taken over) can neither
+  release nor renew the new holder's lease. A failed acquire records
+  nothing, so the losing caller's context-manager exit cannot delete the
+  winner's lock either.
+* **Explicit renewal.** If a task may legitimately run longer than the
+  lease, it must call ``lock.renew()`` itself, periodically, while it still
+  holds the lease. Huey never starts background renewal threads, and plain
+  ``lock_task()`` calls are never silently upgraded to leases.
+* **Not re-entrant.** Like the plain lock, acquiring twice (even a nested
+  ``with`` block on the same instance) raises ``TaskLockedException``.
+* **Interaction with other APIs.** ``lease.clear()``/``release()`` only
+  affect a lease this instance actually holds.
+  :py:meth:`Huey.flush_locks` remains the administrative escape hatch and
+  removes leases regardless of ownership. Leases and plain locks on the
+  same name mutually exclude each other, and two huey instances sharing
+  one sqlite database file still have independent lock namespaces.
+
+.. warning::
+
+    A lease is **not** a strict mutual-exclusion guarantee for business
+    side-effects. If the holder is paused (GC stop-the-world, SIGSTOP, VM
+    suspend, scheduling delay) or its clock diverges, its lease can expire
+    while it is still running, and a second executor will then take the
+    lock over - both may run concurrently for a while. The old holder
+    cannot *delete or extend* the new lock, but it cannot be stopped from
+    finishing whatever it was doing. Choose a lease comfortably longer than
+    the expected task runtime (renewing explicitly for long tasks), and
+    make side-effects idempotent where double execution would be harmful.
 
 .. _rate-limiting:
 

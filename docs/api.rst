@@ -902,7 +902,7 @@ Huey object
             methods). If you intend to access the task result multiple times,
             you must specify ``preserve=True`` when calling these methods.
 
-    .. py:method:: lock_task(lock_name, ttl=None)
+    .. py:method:: lock_task(lock_name, ttl=None, lease=None)
 
         :param str lock_name: Name to use for the lock.
         :param int ttl: Seconds after which the lock expires on its own, so a
@@ -912,8 +912,14 @@ Huey object
             :py:class:`RedisStorage` the server must support hash-field TTL
             (redis 7.4+ or valkey 9+). :py:class:`RedisExpireStorage` works
             on any version.
-        :returns: :py:class:`TaskLock` instance, which can be used as a
-            decorator or context-manager.
+        :param float lease: Explicitly opt-in to an *owned lease lock* that
+            expires after this many seconds. Supported by
+            :py:class:`MemoryHuey` and :py:class:`SqliteHuey`; other backends
+            raise ``NotImplementedError`` on acquire. Cannot be combined with
+            ``ttl``. See :py:class:`TaskLease`.
+        :returns: :py:class:`TaskLock` instance (or :py:class:`TaskLease`
+            when ``lease`` is given), which can be used as a decorator or
+            context-manager.
 
         Utilize the Storage key/value APIs to implement simple locking.
 
@@ -1616,6 +1622,63 @@ Huey object
     .. py:method:: locked()
 
         :returns: boolean whether lock is currently being held.
+
+.. py:class:: TaskLease(huey, name, ttl)
+
+    This class should not be instantiated directly, but is instead returned
+    by :py:meth:`Huey.lock_task` when the ``lease`` parameter is given. Like
+    :py:class:`TaskLock`, it implements a context-manager or decorator
+    ensuring only one invocation of the wrapped task runs at a time, but the
+    lock is a *lease* that expires on its own and is bound to an owner token.
+
+    Supported by :py:class:`MemoryHuey` and :py:class:`SqliteHuey`.
+
+    Behavior notes:
+
+    * Each successful :py:meth:`acquire` generates a fresh owner token. A
+      holder whose lease expired and was taken over can neither release nor
+      renew the new holder's lease.
+    * Not re-entrant: acquiring again while the lease is held (including a
+      nested ``with`` block on the same instance) raises
+      :py:class:`TaskLockedException`, matching :py:class:`TaskLock`.
+    * Renewal is explicit via :py:meth:`renew`. No background threads or
+      timers are started, and legacy :py:meth:`Huey.lock_task` calls are
+      never upgraded to leases.
+    * A failed acquire raises and records nothing, so a later
+      context-manager exit cannot delete another holder's lock.
+    * A lease and a legacy lock on the same name mutually exclude each
+      other: at most one valid holder exists per lock name.
+
+    .. py:method:: acquire()
+
+        Acquire the lease, raising :py:class:`TaskLockedException` if an
+        unexpired lease (or a legacy lock) is held for the name. Otherwise
+        returns ``True``.
+
+    .. py:method:: renew(ttl=None)
+
+        Extend this instance's lease by ``ttl`` seconds (defaults to the
+        original lease). :returns: boolean whether the lease was renewed.
+        Returns ``False`` - changing nothing - if this instance does not
+        hold an unexpired lease.
+
+    .. py:method:: release()
+
+        Release the lease if (and only if) this instance currently holds it.
+        :returns: boolean whether a lease was released. Never removes
+        another owner's lease or a legacy lock.
+
+    .. py:method:: clear()
+
+        Alias for :py:meth:`~TaskLease.release`. Unlike
+        :py:meth:`TaskLock.clear`, this is ownership-checked; use
+        :py:meth:`Huey.flush_locks` for administrative removal of a stuck
+        lease.
+
+    .. py:method:: locked()
+
+        :returns: boolean whether an unexpired lease (or legacy lock) is
+        held for the name.
 
 .. py:class:: RateLimit(huey, name, limit, per, retry=True)
 
