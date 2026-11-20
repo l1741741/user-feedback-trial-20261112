@@ -13,6 +13,7 @@ except ImportError:
 import struct
 import threading
 import time
+import uuid
 
 try:
     import cysqlite
@@ -33,6 +34,7 @@ except ImportError:
     psycopg = None
 
 from huey.constants import EmptyData
+from huey.completion import TERMINAL_STATUSES
 from huey.exceptions import ConfigurationError
 from huey.utils import FileLock
 
@@ -43,6 +45,10 @@ class BaseStorage(object):
     """
     blocking = False  # Does dequeue() block until ready, or should we poll?
     priority = True
+    # Durable completion events are opt-in and only implemented by backends
+    # that can write the task result and its event atomically.
+    supports_completion_events = False
+    completion_events = False
 
     def __init__(self, name='huey', **storage_kwargs):
         self.name = name
@@ -295,6 +301,63 @@ class BaseStorage(object):
         :return: No return value.
         """
         raise NotImplementedError
+
+    # Durable completion events (opt-in; implemented by SqliteStorage).
+    def put_result_with_completion(self, key, value, event_id, event_data,
+                                   occurred_at, event_meta=None):
+        """Atomically write a task result and its completion event.
+
+        Backends that do not support completion events fall back to a plain
+        result write.  See :meth:`SqliteStorage.put_result_with_completion`
+        for the durability contract.
+
+        :return: ``True`` if a new event row was written, ``False`` if an
+            event with this id already existed or events are disabled.
+        """
+        self.put_data(key, value, is_result=True)
+        return False
+
+    def put_result_with_pending_completion(self, key, value, event_id,
+                                           event_data, occurred_at,
+                                           event_meta=None):
+        """Fallback write when the atomic result+event write failed."""
+        self.put_data(key, value, is_result=True)
+        return False
+
+    def put_pending_completion(self, event_id, event_data, occurred_at,
+                               event_meta=None):
+        return False
+
+    def drain_pending_completions(self, limit=100):
+        return 0
+
+    def pending_completion_count(self):
+        return 0
+
+    def pending_completion_ids(self):
+        return set()
+
+    def pull_completion_events(self, limit=10, lease_seconds=30,
+                               owner=None):
+        return []
+
+    def ack_completion_event(self, event_id, lease_token):
+        return False
+
+    def release_completion_event(self, event_id, lease_token):
+        return False
+
+    def purge_completion_events(self, retention_seconds, now=None):
+        return 0
+
+    def completion_event_count(self, include_acked=True):
+        return 0
+
+    def completion_event_ids(self):
+        return set()
+
+    def flush_completion_events(self):
+        pass
 
     def flush_all(self):
         """
@@ -850,6 +913,7 @@ class BaseSqlStorage(BaseStorage):
 
 class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
+    supports_completion_events = True
     integrity_error = getattr(sqlite3, 'IntegrityError', None)
     operational_error = getattr(sqlite3, 'OperationalError', None)
     table_kv = ('create table if not exists kv ('
@@ -870,18 +934,62 @@ class SqliteStorage(BaseSqlStorage):
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
+    # Durable completion-event outbox.  The (queue, event_id) primary key gives
+    # every receiver a stable, de-duplicable identity.  Rows are created in the
+    # same transaction as the task result (see put_result_with_completion).
+    table_completion = ('create table if not exists completion_event ('
+                        'queue text not null, '
+                        'event_id text not null, '
+                        'task_id text not null, '
+                        'task_name text not null, '
+                        'status text not null, '
+                        'final integer not null, '
+                        'result_available integer not null default 0, '
+                        'occurred_at real not null, '
+                        'payload blob not null, '
+                        'lease_owner text, '
+                        'lease_token text, '
+                        'lease_expires real, '
+                        'acked_at real, '
+                        'primary key(queue, event_id))')
+    index_completion_ready = (
+        'create index if not exists completion_event_ready '
+        'on completion_event (queue, acked_at, lease_expires, occurred_at)')
+    # Repair queue for outlet failures.  If the atomic result+event write
+    # fails, the execute path writes the result together with a row here (in
+    # one transaction), then reconciliation moves the row into
+    # completion_event.  Keeping this explicit avoids guessing which kv rows
+    # are task results (locks, rate-limits and revocations share the table).
+    table_completion_pending = (
+        'create table if not exists completion_pending ('
+        'queue text not null, '
+        'event_id text not null, '
+        'task_id text not null, '
+        'task_name text not null, '
+        'status text not null, '
+        'retries integer not null default 0, '
+        'result_available integer not null default 0, '
+        'occurred_at real not null, '
+        'payload blob not null, '
+        'primary key(queue, event_id))')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           table_counter, drop_index_task, table_completion,
+           index_completion_ready, table_completion_pending]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
-                 create_tables=True, **kwargs):
+                 create_tables=True, completion_events=False, **kwargs):
         self.filename = filename
         self._cache_mb = cache_mb
         self._fsync = fsync
         self._journal_mode = journal_mode
         self._timeout = timeout  # Busy timeout in seconds, default is 5.
         self._conn_kwargs = kwargs
+        # Completion events are opt-in so existing deployments keep the
+        # schema and write path they had before.  When enabled, the table is
+        # always created (it is harmless when unused).
+        self.completion_events = bool(completion_events)
+        self.supports_completion_events = True
 
         # By default Sqlite may reuse rowids when rows are removed. This means
         # that SqliteHuey may not strictly be a FIFO. If strict FIFO ordering
@@ -1075,6 +1183,346 @@ class SqliteStorage(BaseSqlStorage):
 
     def flush_counters(self):
         self.sql('delete from counter where queue=?', (self.name,), True)
+
+    # -- Durable completion events -----------------------------------------
+    #
+    # Contract:
+    #
+    # * The task result and its completion event are written by a single
+    #   atomic transaction (``put_result_with_completion``).  Either both are
+    #   present or neither is.  The consumer may crash and the task may be
+    #   re-delivered; the event id is deterministic, so the retry re-uses the
+    #   same row instead of creating a duplicate.
+    # * Consequence for consumers: never execute a task twice just because the
+    #   outlet failed.  If we cannot record the event we still store the
+    #   result, raise to the caller (the worker logs it and continues), and
+    #   leave the row available for a later explicit reconciliation.  We never
+    #   re-run the business function to "fix" the outlet.
+    # * Pull marks a row leased by a token; only that token may acknowledge.
+    #   An expired lease may be taken over, invalidating the old token, so a
+    #   late acknowledgement from a previous receiver cannot delete an event
+    #   that another receiver now owns.
+    # * Rows are only deleted by acknowledgement or by retention-based purge
+    #   (``purge_completion_events``), which only removes acknowledged rows.
+    # * Everything is scoped to ``self.name``, so queues sharing one database
+    #   never see or delete each other's events.
+
+    def _event_row(self, row):
+        (event_id, task_id, task_name, status, final, result_available,
+         occurred_at, payload) = row[:8]
+        lease_token = row[8] if len(row) > 8 else None
+        lease_expires = row[9] if len(row) > 9 else None
+        return {
+            'event_id': event_id,
+            'queue': self.name,
+            'task_id': task_id,
+            'task_name': task_name,
+            'status': status,
+            'final': bool(final),
+            'result_available': bool(result_available),
+            'occurred_at': occurred_at,
+            'payload': bytes(payload) if payload is not None else b'',
+            'lease_token': lease_token or '',
+            'lease_expires': lease_expires,
+        }
+
+    def put_result_with_completion(self, key, value, event_id, event_data,
+                                   occurred_at, event_meta=None):
+        if not self.completion_events:
+            self.put_data(key, value, is_result=True)
+            return False
+
+        meta = event_meta or {}
+        params = (
+            self.name,
+            event_id,
+            meta.get('task_id') or key,
+            meta.get('task_name') or '',
+            meta.get('status') or '',
+            1 if meta.get('final') else 0,
+            1 if meta.get('result_available') else 0,
+            occurred_at,
+            self.to_blob(event_data) if event_data is not None else b'',
+        )
+        with self.db(commit=True) as curs:
+            # Event first: if this id was already committed (e.g. a re-delivered
+            # task or a reconcile pass), leave both the event and the existing
+            # result untouched, so they cannot diverge.
+            curs.execute(
+                'insert or ignore into completion_event '
+                '(queue, event_id, task_id, task_name, status, final, '
+                'result_available, occurred_at, payload) '
+                'values (?, ?, ?, ?, ?, ?, ?, ?, ?)', params)
+            if curs.rowcount != 1:
+                return False
+            # Result and event then move together in this transaction: either
+            # both are committed or neither is.
+            curs.execute('insert or replace into kv (queue, key, value) '
+                         'values (?, ?, ?)', (self.name, key,
+                                              self.to_blob(value)))
+            return True
+
+    def put_completion_event(self, event_id, event_data, occurred_at,
+                             event_meta=None):
+        """Record an event without a result (revoked/expired/canceled).
+
+        Uses the same deterministic-id insert-or-ignore semantics, so a
+        redelivered task cannot create a second event for the same attempt.
+        """
+        if not self.completion_events:
+            return False
+
+        meta = event_meta or {}
+        params = (
+            self.name,
+            event_id,
+            meta.get('task_id') or '',
+            meta.get('task_name') or '',
+            meta.get('status') or '',
+            1 if meta.get('final') else 0,
+            1 if meta.get('result_available') else 0,
+            occurred_at,
+            self.to_blob(event_data) if event_data is not None else b'',
+        )
+        with self.db(commit=True) as curs:
+            curs.execute(
+                'insert or ignore into completion_event '
+                '(queue, event_id, task_id, task_name, status, final, '
+                'result_available, occurred_at, payload) '
+                'values (?, ?, ?, ?, ?, ?, ?, ?, ?)', params)
+            return curs.rowcount == 1
+
+    def put_result_with_pending_completion(self, key, value, event_id,
+                                           event_data, occurred_at,
+                                           event_meta=None):
+        """Fallback when the atomic result+event write fails.
+
+        Atomically writes the result and a *pending* outbox row.  The result is
+        not lost, and the pending row records exactly which event needs to be
+        materialized later by ``drain_pending_completions``.  This never runs
+        the task again.
+        """
+        if not self.completion_events:
+            self.put_data(key, value, is_result=True)
+            return False
+
+        meta = event_meta or {}
+        params = (
+            self.name,
+            event_id,
+            meta.get('task_id') or key,
+            meta.get('task_name') or '',
+            meta.get('status') or '',
+            int(meta.get('retries') or 0),
+            1 if meta.get('result_available') else 0,
+            occurred_at,
+            self.to_blob(event_data) if event_data is not None else b'',
+        )
+        with self.db(commit=True) as curs:
+            curs.execute('insert or replace into kv (queue, key, value) '
+                         'values (?, ?, ?)', (self.name, key,
+                                              self.to_blob(value)))
+            curs.execute(
+                'insert or ignore into completion_pending '
+                '(queue, event_id, task_id, task_name, status, retries, '
+                'result_available, occurred_at, payload) '
+                'values (?, ?, ?, ?, ?, ?, ?, ?, ?)', params)
+            return curs.rowcount == 1
+
+    def put_pending_completion(self, event_id, event_data, occurred_at,
+                               event_meta=None):
+        """Record a pending event for outcomes with no result row."""
+        if not self.completion_events:
+            return False
+
+        meta = event_meta or {}
+        params = (
+            self.name,
+            event_id,
+            meta.get('task_id') or '',
+            meta.get('task_name') or '',
+            meta.get('status') or '',
+            int(meta.get('retries') or 0),
+            1 if meta.get('result_available') else 0,
+            occurred_at,
+            self.to_blob(event_data) if event_data is not None else b'',
+        )
+        with self.db(commit=True) as curs:
+            curs.execute(
+                'insert or ignore into completion_pending '
+                '(queue, event_id, task_id, task_name, status, retries, '
+                'result_available, occurred_at, payload) '
+                'values (?, ?, ?, ?, ?, ?, ?, ?, ?)', params)
+            return curs.rowcount == 1
+
+    def pending_completion_count(self):
+        if not self.completion_events:
+            return 0
+        return self.sql('select count(*) from completion_pending '
+                        'where queue = ?', (self.name,), results=True)[0][0]
+
+    def drain_pending_completions(self, limit=100):
+        """Materialize pending events into the outbox.  Returns count moved."""
+        if not self.completion_events:
+            return 0
+
+        moved = 0
+        with self.db(commit=True) as curs:
+            curs.execute(
+                'select event_id, task_id, task_name, status, retries, '
+                'result_available, occurred_at, payload from completion_pending '
+                'where queue = ? order by occurred_at, event_id limit ?',
+                (self.name, max(int(limit), 1)))
+            rows = curs.fetchall()
+            for (event_id, task_id, task_name, status, retries,
+                 result_available, occurred_at, payload) in rows:
+                curs.execute(
+                    'insert or ignore into completion_event '
+                    '(queue, event_id, task_id, task_name, status, final, '
+                    'result_available, occurred_at, payload) '
+                    'values (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (self.name, event_id, task_id, task_name, status,
+                     1 if status in TERMINAL_STATUSES else 0,
+                     result_available, occurred_at, payload))
+                curs.execute(
+                    'delete from completion_pending where queue = ? '
+                    'and event_id = ?', (self.name, event_id))
+                moved += 1
+        return moved
+
+    def pull_completion_events(self, limit=10, lease_seconds=30,
+                               owner=None, now=None):
+        if not self.completion_events:
+            return []
+
+        now = time.time() if now is None else now
+        lease_seconds = max(float(lease_seconds), 0)
+        limit = max(int(limit), 1)
+        lease_expires = now + lease_seconds
+        # The ordering put ready rows first, but we lease inside the write
+        # transaction so competing receivers can never claim the same row.
+        ready = ('select event_id from completion_event '
+                 'where queue = ? and acked_at is null and '
+                 '(lease_expires is null or lease_expires <= ?) '
+                 'order by occurred_at, event_id limit ?')
+        out = []
+        with self.db(commit=True) as curs:
+            curs.execute(ready, (self.name, now, limit))
+            event_ids = [row[0] for row in curs.fetchall()]
+            if not event_ids:
+                return []
+            claimed = []
+            for event_id in event_ids:
+                token = uuid.uuid4().hex
+                curs.execute(
+                    'update completion_event set lease_owner = ?, '
+                    'lease_token = ?, lease_expires = ? '
+                    'where queue = ? and event_id = ? and acked_at is null '
+                    'and (lease_expires is null or lease_expires <= ?)',
+                    (owner, token, lease_expires, self.name, event_id, now))
+                if curs.rowcount == 1:
+                    claimed.append((event_id, token))
+            if not claimed:
+                return []
+            placeholders = ','.join('?' * len(claimed))
+            curs.execute(
+                'select event_id, task_id, task_name, status, final, '
+                'result_available, occurred_at, payload, lease_token, '
+                'lease_expires from completion_event '
+                'where queue = ? and event_id in (%s)' % placeholders,
+                (self.name,) + tuple(e[0] for e in claimed))
+            rows = {row[0]: self._event_row(row) for row in curs.fetchall()}
+            # Preserve the claimed order and only return rows whose token is
+            # exactly the one this transaction installed.
+            for event_id, token in claimed:
+                row = rows.get(event_id)
+                if row is not None and row['lease_token'] == token:
+                    out.append(row)
+        return out
+
+    def ack_completion_event(self, event_id, lease_token, now=None):
+        """Acknowledge an event, but only if ``lease_token`` still owns it.
+
+        Acknowledge is the delete boundary: once an event is acked it is kept
+        (for dedup and retention) until purged, never re-delivered.
+        """
+        if not self.completion_events:
+            return False
+
+        now = time.time() if now is None else now
+        with self.db(commit=True) as curs:
+            curs.execute(
+                'update completion_event set acked_at = ? '
+                'where queue = ? and event_id = ? and lease_token = ? '
+                'and acked_at is null',
+                (now, self.name, event_id, lease_token))
+            return curs.rowcount == 1
+
+    def release_completion_event(self, event_id, lease_token, now=None):
+        """Give up a lease without acknowledging (e.g. handler failed)."""
+        if not self.completion_events:
+            return False
+
+        now = time.time() if now is None else now
+        with self.db(commit=True) as curs:
+            curs.execute(
+                'update completion_event set lease_owner = null, '
+                'lease_token = null, lease_expires = null '
+                'where queue = ? and event_id = ? and lease_token = ? '
+                'and acked_at is null',
+                (self.name, event_id, lease_token))
+            return curs.rowcount == 1
+
+    def purge_completion_events(self, retention_seconds, now=None):
+        """Delete acknowledged events older than the retention window.
+
+        Only acknowledged rows are eligible: live, leased or never-acked
+        events are always retained.  Returns the number of rows deleted.
+        """
+        if not self.completion_events:
+            return 0
+
+        now = time.time() if now is None else now
+        cutoff = now - max(float(retention_seconds), 0)
+        with self.db(commit=True) as curs:
+            curs.execute(
+                'delete from completion_event where queue = ? '
+                'and acked_at is not null and acked_at < ?',
+                (self.name, cutoff))
+            return curs.rowcount
+
+    def completion_event_count(self, include_acked=True):
+        if not self.completion_events:
+            return 0
+        sql = 'select count(*) from completion_event where queue = ?'
+        params = [self.name]
+        if not include_acked:
+            sql += ' and acked_at is null'
+        return self.sql(sql, tuple(params), results=True)[0][0]
+
+    def completion_event_ids(self):
+        if not self.completion_events:
+            return set()
+        rows = self.sql('select event_id from completion_event '
+                        'where queue = ?', (self.name,), results=True)
+        return set(row[0] for row in rows)
+
+    def pending_completion_ids(self):
+        if not self.completion_events:
+            return set()
+        rows = self.sql('select event_id from completion_pending '
+                        'where queue = ?', (self.name,), results=True)
+        return set(row[0] for row in rows)
+
+    def flush_completion_events(self):
+        self.sql('delete from completion_event where queue = ?', (self.name,),
+                 commit=True)
+        self.sql('delete from completion_pending where queue = ?',
+                 (self.name,), commit=True)
+
+    def flush_all(self):
+        super(SqliteStorage, self).flush_all()
+        self.flush_completion_events()
 
 
 class CySqliteStorage(SqliteStorage):

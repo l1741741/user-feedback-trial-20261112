@@ -1,5 +1,6 @@
 import copy
 import datetime
+import hashlib
 import inspect
 import itertools
 import logging
@@ -14,6 +15,18 @@ from functools import partial
 from functools import wraps
 
 from huey import signals as S
+from huey.completion import build_error_summary
+from huey.completion import build_payload
+from huey.completion import COMPLETION_CANCELED
+from huey.completion import COMPLETION_EXPIRED
+from huey.completion import COMPLETION_FAILED
+from huey.completion import COMPLETION_RETRYING
+from huey.completion import COMPLETION_REVOKED
+from huey.completion import COMPLETION_SUCCEEDED
+from huey.completion import CompletionEvent
+from huey.completion import DEFAULT_MAX_PAYLOAD_BYTES
+from huey.completion import MIN_MAX_PAYLOAD_BYTES
+from huey.completion import TERMINAL_STATUSES
 from huey.constants import EmptyData
 from huey.consumer import Consumer
 from huey.exceptions import CancelExecution
@@ -72,6 +85,14 @@ class Huey(object):
     :param bool use_zlib: use zlib for compression instead of gzip.
     :param bool immediate_use_memory: automatically switch to a local in-memory
         storage backend when immediate-mode is enabled.
+    :param bool completion_events: write durable, pull-based completion events
+        for terminal task outcomes (and retry observations) to the storage
+        outbox. Requires a storage backend with completion-event support
+        (``SqliteHuey``). Default is ``False`` -- signals remain the default.
+    :param int completion_max_payload_bytes: upper bound on the serialized
+        completion-event payload. Optional fields are dropped, then identifiers
+        are truncated, if the bound would be exceeded. Default 16 KiB; minimum
+        256 bytes.
     :param storage_kwargs: arbitrary keyword arguments that will be passed to
         the storage backend for additional configuration.
 
@@ -95,7 +116,9 @@ class Huey(object):
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
                  use_zlib=False, immediate_use_memory=True, storage_class=None,
-                 store_intermediate_errors=True, **storage_kwargs):
+                 store_intermediate_errors=True, completion_events=False,
+                 completion_max_payload_bytes=None,
+                 **storage_kwargs):
 
         self.name = name
         self.results = results
@@ -108,11 +131,34 @@ class Huey(object):
             serializer = Serializer(compression, use_zlib=use_zlib)
         self.serializer = serializer
 
-        # Initialize storage.
-        self.storage_kwargs = storage_kwargs
+        # Resolve the storage class before validating the opt-in, so an
+        # explicit storage_class= argument is honored by the check.
         if storage_class is not None:
             self.storage_class = storage_class
+
+        # Durable completion events are opt-in, and only available when the
+        # storage backend can write the result and its event atomically.
+        self.completion_events = bool(completion_events)
+        self.completion_max_payload_bytes = (
+            completion_max_payload_bytes or DEFAULT_MAX_PAYLOAD_BYTES)
+        if self.completion_max_payload_bytes < MIN_MAX_PAYLOAD_BYTES:
+            raise ConfigurationError(
+                'completion_max_payload_bytes must be at least %s.' %
+                MIN_MAX_PAYLOAD_BYTES)
+
+        # Validate the opt-in *before* creating the storage, so a misconfigured
+        # instance fails fast without opening (and possibly creating) a
+        # database.
+        if self.completion_events and not self.supports_completion_events():
+            raise ConfigurationError(
+                'completion_events=True requires a storage backend with '
+                'durable completion-event support (SqliteHuey / '
+                'CySqliteHuey).')
+
+        # Initialize storage.
+        self.storage_kwargs = storage_kwargs
         self.storage = self.create_storage()
+        self._init_storage_completion()
 
         # Allow overriding the default TaskWrapper implementation.
         self.task_wrapper_class = self.get_task_wrapper_class()
@@ -130,13 +176,37 @@ class Huey(object):
     def get_task_wrapper_class(self):
         return TaskWrapper
 
+    def supports_completion_events(self):
+        """Whether this Huey's storage supports durable completion events."""
+        if self._immediate and self.immediate_use_memory:
+            return False  # In-memory immediate mode has no durable storage.
+        Storage = self.storage_class
+        return bool(getattr(Storage, 'supports_completion_events', False))
+
+    def _init_storage_completion(self):
+        if not self.completion_events:
+            return
+        if not getattr(self.storage, 'supports_completion_events', False):
+            raise ConfigurationError(
+                'completion_events=True requires a storage backend with '
+                'durable completion-event support (SqliteHuey / '
+                'CySqliteHuey).')
+        # Enable the outlet on the storage instance.  This keeps the opt-in on
+        # the Huey constructor, where users configure it.
+        self.storage.completion_events = True
+
     def create_storage(self):
         # When using immediate mode, the default behavior is to use an
         # in-memory broker rather than a live one like Redis or Sqlite, however
         # this can be overridden by specifying "immediate_use_memory=False"
         # when initializing Huey.
         if self._immediate and self.immediate_use_memory:
-            return self.get_immediate_storage()
+            storage = self.get_immediate_storage()
+            # Keep the opt-in flag in sync, so immediate mode on a supporting
+            # backend (immediate_use_memory=False) still records events.
+            if hasattr(storage, 'completion_events'):
+                storage.completion_events = self.completion_events
+            return storage
 
         return self.get_storage(**self.storage_kwargs)
 
@@ -293,6 +363,284 @@ class Huey(object):
     def _emit(self, signal, task, *args, **kwargs):
         self._signal.send(signal, task, *args, **kwargs)
 
+    # -- Durable completion events -----------------------------------------
+    #
+    # Signals remain the default, process-local notification mechanism.  When
+    # ``completion_events=True``, terminal outcomes are *also* written to the
+    # storage outbox so they survive consumer restarts.  See the
+    # "Completion events" documentation for the delivery semantics.
+
+    def _completion_event_id(self, task, status):
+        # Deterministic id for terminal outcomes: one event per task id +
+        # outcome.  A task re-delivered after a crash -- or an event backfilled
+        # by reconcile_completion_events() -- produces the same id, so the row
+        # is deduped rather than duplicated.
+        #
+        # Non-final ("retrying") observations use a random suffix: several
+        # attempts can legitimately share the same remaining-retry count
+        # (RetryTask re-increments it), and losing an intermediate observation
+        # to dedup would be worse than occasionally duplicating one.  Terminal
+        # events remain exactly-once per task id.
+        parts = [self.name, str(task.id), status]
+        if status not in TERMINAL_STATUSES:
+            parts.append(uuid.uuid4().hex)
+        raw = '\x1f'.join(parts)
+        return hashlib.sha1(raw.encode('utf8')).hexdigest()
+
+    def _completion_payload(self, task, status, attempt_retries, occurred_at,
+                            exception=None, task_name=None):
+        error = None
+        if exception is not None:
+            error = build_error_summary(exception)
+        if task_name is None:
+            task_name = self._registry.task_to_string(type(task))
+        return build_payload(
+            status=status,
+            task_id=task.id,
+            task_name=task_name,
+            occurred_at=occurred_at,
+            retries=attempt_retries,
+            error=error,
+            max_bytes=self.completion_max_payload_bytes)
+
+    def _completion_meta(self, task, status, result_available=False,
+                         task_name=None):
+        if task_name is None:
+            task_name = self._registry.task_to_string(type(task))
+        return {
+            'task_id': task.id,
+            'task_name': task_name,
+            'status': status,
+            'final': status in TERMINAL_STATUSES,
+            'result_available': result_available,
+        }
+
+    def _record_completion(self, task, status, attempt_retries,
+                           exception=None, result=EmptyData):
+        """Record a completion event, optionally with the task result.
+
+        Called from the execute path.  Any storage error is logged and
+        swallowed: the outlet must never cause a successfully-executed
+        business function to run again, and it must not wedge the consumer.
+        When the primary write fails, a *pending* row is written in the same
+        transaction as the result (or on its own for outcomes without a
+        result), so ``reconcile_completion_events()`` can materialize the
+        event later without re-running the task.
+
+        ``result`` uses the ``EmptyData`` sentinel to mean "no result row for
+        this outcome" (which is also the case for revoked/expired/canceled
+        tasks).
+
+        :return: ``True`` when the event is present or pending after this
+            call.  The caller must *not* fall back to a plain result write on
+            ``True``.
+        """
+        if not self.completion_events:
+            return False
+        if isinstance(task, PeriodicTask):
+            # Periodic tasks store neither results nor events: they run on a
+            # schedule forever, so a per-run event would grow the outbox
+            # without a corresponding result to reconcile against.  This
+            # matches the existing result-store behavior.
+            return False
+
+        store_result = (result is not EmptyData and self.results and
+                        not isinstance(task, PeriodicTask))
+        occurred_at = time.time()
+        payload = self._completion_payload(task, status, attempt_retries,
+                                           occurred_at, exception)
+        meta = self._completion_meta(
+            task, status, result_available=store_result)
+        meta['retries'] = attempt_retries
+        event_id = self._completion_event_id(task, status)
+
+        serialized = None
+        if store_result:
+            serialized = self.serializer.serialize(result)
+
+        # Primary path: event (+ result, if any) atomically.
+        try:
+            if store_result:
+                # A duplicate event id means an earlier attempt already
+                # committed this event *and* its result atomically; the
+                # storage deliberately leaves that pair alone.
+                self.storage.put_result_with_completion(
+                    task.id, serialized, event_id, payload, occurred_at, meta)
+            else:
+                self.storage.put_completion_event(
+                    event_id, payload, occurred_at, meta)
+            return True
+        except Exception:
+            logger.warning('Completion-event outlet failed for task %s; '
+                           'recording a pending event for reconciliation.',
+                           getattr(task, 'id', task), exc_info=True)
+
+        # Repair path: never re-run the task, never lose the result.  The
+        # pending row (and the result, if any) are written together.
+        try:
+            if store_result:
+                self.storage.put_result_with_pending_completion(
+                    task.id, serialized, event_id, payload, occurred_at, meta)
+            else:
+                self.storage.put_pending_completion(
+                    event_id, payload, occurred_at, meta)
+            return True
+        except Exception:
+            logger.exception('Unable to record pending completion event for '
+                             'task %s.', getattr(task, 'id', task))
+        return False
+
+    def reconcile_completion_events(self, scan_limit=100):
+        """Backfill missing completion events (outlet-failure repair).
+
+        If the storage rejected an event write, the task was already executed
+        and must not be run again.  The execute path leaves either a *pending*
+        outbox row (normal case: the result and the pending row are written
+        atomically) or, if even that failed, just the result.  This method:
+
+        * materializes pending rows into the outbox (byte-for-byte, so the
+          recorded status/error is preserved), then
+        * as a last resort, scans UUID-keyed result-store entries that have no
+          pending row and no event, and records a terminal event for them
+          (``failed`` for an ``Error`` result, otherwise ``succeeded``).
+
+        It is safe to run repeatedly and concurrently: event ids are
+        deterministic and inserts are idempotent.  It never re-executes a task
+        and never deletes a result.
+
+        :param int scan_limit: maximum results to inspect per call.
+        :return: number of events materialized/backfilled.
+        """
+        if not self.completion_events:
+            return 0
+
+        backfilled = 0
+        try:
+            backfilled += self.storage.drain_pending_completions(scan_limit)
+        except Exception:
+            logger.exception('Error draining pending completion events.')
+
+        # Last-resort scan for results whose pending row also failed.  Only
+        # UUID-shaped keys are task ids; locks, rate-limits, revocations and
+        # chord partials all have non-UUID keys.
+        try:
+            existing = self.storage.completion_event_ids()
+            pending = getattr(self.storage, 'pending_completion_ids', None)
+            pending_ids = pending() if pending else set()
+            for key, raw in list(self.storage.result_items().items())[:scan_limit]:
+                task_id = key.decode('utf8') if isinstance(key, bytes) else key
+                try:
+                    uuid.UUID(task_id)
+                except (ValueError, TypeError, AttributeError):
+                    continue
+
+                task = Task(id=task_id)
+                try:
+                    value = self.serializer.deserialize(raw)
+                except Exception:
+                    logger.exception('Unable to deserialize result %s.',
+                                     task_id)
+                    continue
+                error = value if isinstance(value, Error) else None
+                status = COMPLETION_FAILED if error is not None else \
+                         COMPLETION_SUCCEEDED
+                attempt_retries = 0
+                if error is not None:
+                    attempt_retries = error.metadata.get('retries', 0) or 0
+                    # An error result with retries remaining came from a
+                    # *retrying* attempt, not a terminal outcome.  Creating a
+                    # terminal event for it would falsely report a failure;
+                    # the eventual terminal attempt will write its own event
+                    # (or be picked up by a later reconcile pass).
+                    if attempt_retries:
+                        continue
+
+                event_id = self._completion_event_id(task, status)
+                if event_id in existing or event_id in pending_ids:
+                    continue
+
+                try:
+                    # The stored error's message/traceback are not copied:
+                    # only the status is reconstructed here.
+                    payload = self._completion_payload(
+                        task, status, attempt_retries, time.time(),
+                        task_name='')
+                    meta = self._completion_meta(
+                        task, status, result_available=True, task_name='')
+                    self.storage.put_completion_event(
+                        event_id, payload, time.time(), meta)
+                    backfilled += 1
+                except Exception:
+                    logger.exception('Unable to backfill event for %s.',
+                                     task_id)
+        except Exception:
+            logger.exception('Error reconciling completion events.')
+        return backfilled
+
+    def pull_completion_events(self, limit=10, lease_seconds=30, owner=None):
+        """Claim up to ``limit`` unacknowledged completion events.
+
+        Each event is returned as a :py:class:`~huey.completion.CompletionEvent`
+        carrying a ``lease_token``.  The same event may be claimed again by
+        another receiver after the lease expires, which invalidates the
+        previous token (at-least-once delivery).  Consumers should de-duplicate
+        on ``event_id``.
+
+        :param int limit: maximum events to claim.
+        :param float lease_seconds: how long the claim is valid.  A short lease
+            with a fast receiver is fine; a long lease reduces redelivery.
+        :param str owner: identity recorded on the lease (diagnostics only).
+        """
+        if not self.completion_events:
+            raise ConfigurationError(
+                'pull_completion_events() requires completion_events=True.')
+
+        # Materialize any events that a failed outlet parked as pending, so a
+        # receiver automatically repairs them without operator intervention.
+        # This is idempotent and bounded; a failure here must not prevent
+        # reading already-materialized events.  The cheap count pre-check
+        # avoids taking a write lock on every idle poll.
+        try:
+            if self.storage.pending_completion_count():
+                self.storage.drain_pending_completions(max(limit, 100))
+        except Exception:
+            logger.exception('Error draining pending completion events.')
+
+        rows = self.storage.pull_completion_events(
+            limit=limit,
+            lease_seconds=30 if lease_seconds is None else lease_seconds,
+            owner=owner)
+        return [CompletionEvent(**row) for row in rows]
+
+    def ack_completion_event(self, event_id, lease_token):
+        """Acknowledge an event claimed via :meth:`pull_completion_events`.
+
+        Only the receiver holding the current lease can acknowledge.  A stale
+        token (from a lease that expired and was taken over) is rejected, so a
+        late acknowledgement can never delete an event that another receiver
+        now owns.
+
+        :return: ``True`` if this call acknowledged the event, ``False`` if
+            the lease was stale or already acknowledged.
+        """
+        return self.storage.ack_completion_event(event_id, lease_token)
+
+    def release_completion_event(self, event_id, lease_token):
+        """Release a claim without acknowledging, so it is redelivered."""
+        release = getattr(self.storage, 'release_completion_event', None)
+        if release is None:
+            return False
+        return release(event_id, lease_token)
+
+    def purge_completion_events(self, retention_seconds, now=None):
+        """Delete acknowledged events older than ``retention_seconds``.
+
+        Unacknowledged (including leased) events are never deleted, no matter
+        how old they are, so purging cannot lose an unconsumed event.
+        """
+        return self.storage.purge_completion_events(retention_seconds,
+                                                    now=now)
+
     def serialize_task(self, task):
         message = self._registry.create_message(task)
         return self.serializer.serialize(message)
@@ -419,10 +767,12 @@ class Huey(object):
         elif self.is_revoked(task, timestamp, False):
             logger.warning('Task %s was revoked, not executing', task)
             self._emit(S.SIGNAL_REVOKED, task)
+            self._record_completion(task, COMPLETION_REVOKED, task.retries)
             self._abort_chord_member(task, SKIPPED)
         elif task.expires_resolved and task.expires_resolved < timestamp:
             logger.info('Task %s expired, not executing.', task)
             self._emit(S.SIGNAL_EXPIRED, task)
+            self._record_completion(task, COMPLETION_EXPIRED, task.retries)
             self._abort_chord_member(task, SKIPPED)
         else:
             logger.info('Executing %s', task)
@@ -433,8 +783,10 @@ class Huey(object):
         if self._pre_execute:
             try:
                 self._run_pre_execute(task)
-            except CancelExecution:
+            except CancelExecution as exc:
                 self._emit(S.SIGNAL_CANCELED, task)
+                self._record_completion(task, COMPLETION_CANCELED,
+                                        task.retries, exception=exc)
                 self._abort_chord_member(task, SKIPPED)
                 return
 
@@ -510,7 +862,19 @@ class Huey(object):
 
         store = self.results and not isinstance(task, PeriodicTask)
         if exception is None:
-            if store and (task_value is not None or self.store_none):
+            store_value = store and (task_value is not None or
+                                     self.store_none)
+            # With durable events enabled, the result and its terminal event
+            # are committed together.  ``_record_completion`` swallows outlet
+            # errors; fall back to a plain result write so an outlet failure
+            # cannot lose the result.  Never re-execute the task to repair the
+            # outlet.
+            recorded = False
+            if self.completion_events:
+                recorded = self._record_completion(
+                    task, COMPLETION_SUCCEEDED, task.retries,
+                    result=task_value if store_value else EmptyData)
+            if store_value and not recorded:
                 self.put_result(task.id, task_value)
             self._run_post_execute(task, task_value, exception)
             self._emit(S.SIGNAL_COMPLETE, task)
@@ -523,12 +887,43 @@ class Huey(object):
             final = not task.retries
             surface = final or (self.store_intermediate_errors and
                                 not isinstance(exception, RETRYING_EXCEPTIONS))
+            error = None
             if surface:
                 error = Error(self.build_error_result(task, exception))
-                next_task = task if store else None
+
+            # A final failure is ``failed``; a failure that will be retried is
+            # a non-terminal ``retrying`` observation and must not be mistaken
+            # for a completion.  Retry-only exceptions (RetryTask, rate-limit,
+            # lock contention) are surfaced on every attempt but never stored
+            # as an error result unless the attempt is final.
+            #
+            # CancelExecution is its own terminal outcome: the task chose to
+            # stop, so it is reported as ``canceled`` (or as a non-terminal
+            # ``retrying`` observation when it asked to be retried).
+            if isinstance(exception, CancelExecution):
+                status = (COMPLETION_CANCELED if final
+                          else COMPLETION_RETRYING)
+            else:
+                status = COMPLETION_FAILED if final else COMPLETION_RETRYING
+            store_this = (store and surface and
+                          (final or
+                           not isinstance(exception, RETRYING_EXCEPTIONS)))
+            recorded = False
+            if self.completion_events:
+                recorded = self._record_completion(
+                    task, status, task.retries, exception=exception,
+                    result=error if store_this else EmptyData)
+            if store_this and not recorded:
+                self.put_result(task.id, error)
+
+            # Propagate a final error through the rest of the pipeline.  The
+            # task's own error was written above (atomically with its event).
+            if final and store:
+                next_task = task.on_complete
                 while next_task is not None:
                     self.put_result(next_task.id, error)
-                    next_task = next_task.on_complete if final else None
+                    next_task = next_task.on_complete
+
             self._run_post_execute(task, task_value, exception)
             if surface and task.on_error:
                 # Copy, as on_error is shared across retries.

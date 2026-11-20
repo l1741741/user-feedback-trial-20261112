@@ -133,6 +133,10 @@ Huey types
         corruption in the event of sudden power loss. By default will use the
         SQLite library's ``synchronous`` setting (typically ``1``, which
         provides a good balance between durability and performance).
+    :param bool completion_events: write terminal task outcomes (and retry
+        observations) to a durable outbox, pullable via
+        :py:meth:`Huey.pull_completion_events`. Default is ``False``. See
+        :ref:`completion-events`.
 
     SqliteHuey fully supports task priorities.
 
@@ -758,6 +762,60 @@ Huey object
         completes (or fails). If the consumer is killed mid-task, those tasks
         remain in the ``_tasks_in_flight`` set, and this method emits
         ``SIGNAL_INTERRUPTED`` for each one.
+
+    .. py:method:: pull_completion_events(limit=10, lease_seconds=30, owner=None)
+
+        :param int limit: maximum number of events to claim.
+        :param float lease_seconds: how long the claim is valid before the
+            event may be taken over by another receiver.
+        :param str owner: identity recorded on the lease (diagnostics only).
+        :returns: a list of :py:class:`~huey.completion.CompletionEvent`.
+
+        Claim unacknowledged completion events (see :ref:`completion-events`).
+        Requires ``completion_events=True``. Each event's ``lease_token`` is
+        required to acknowledge it. Delivery is at-least-once: an event whose
+        lease expires is redelivered, so consumers should de-duplicate on
+        ``event_id``.
+
+    .. py:method:: ack_completion_event(event_id, lease_token)
+
+        :param str event_id: the stable event id.
+        :param str lease_token: the token from the claim being acknowledged.
+        :returns: ``True`` if this call acknowledged the event.
+
+        Acknowledge a claimed event. Only the token holding the current lease
+        may acknowledge -- a late acknowledgement from a superseded lease is
+        rejected, so it cannot delete an event another receiver now owns.
+        Acknowledgement is idempotent and does not delete the row; retention
+        cleanup does.
+
+    .. py:method:: release_completion_event(event_id, lease_token)
+
+        :param str event_id: the stable event id.
+        :param str lease_token: the token from the claim being released.
+        :returns: ``True`` if the lease was released.
+
+        Release a claim without acknowledging it (for example, when the
+        handler failed), making the event immediately redeliverable.
+
+    .. py:method:: purge_completion_events(retention_seconds, now=None)
+
+        :param float retention_seconds: minimum age of an acknowledged event.
+        :param float now: override the current timestamp (testing).
+        :returns: number of rows deleted.
+
+        Delete acknowledged events older than ``retention_seconds``.
+        Unacknowledged and leased events are never deleted, however old they
+        are. Scoped to this queue.
+
+    .. py:method:: reconcile_completion_events(scan_limit=100)
+
+        :param int scan_limit: maximum number of results to inspect.
+        :returns: number of events backfilled.
+
+        Rebuild missing completion events from the result store after an outlet
+        failure. Does not re-execute tasks and reads results non-destructively.
+        Safe to run repeatedly and concurrently.
 
     .. py:method:: build_error_result(task, exception)
 
@@ -2539,6 +2597,50 @@ Huey comes with several built-in storage implementations:
 
     Storage class that discards all data written to it, and thus always appears
     to be empty. Intended for testing only.
+
+
+Completion events
+-----------------
+
+See :ref:`completion-events` for the delivery contract.
+
+.. py:class:: huey.completion.CompletionEvent
+
+    A completion event claimed from the outbox. Attributes: ``event_id``,
+    ``queue``, ``task_id``, ``task_name``, ``status``, ``final``,
+    ``result_available``, ``occurred_at``, ``payload``, ``lease_token`` and
+    ``lease_expires``. ``event.data`` decodes the versioned JSON payload and
+    ``event.to_dict()`` merges the payload with the row metadata.
+
+.. py:class:: huey.completion.LocalCompletionReceiver(huey, limit=10, lease_seconds=None, owner=None)
+
+    :param Huey huey: a Huey instance with ``completion_events=True``.
+    :param int limit: events per pull batch.
+    :param float lease_seconds: lease duration for claimed events.
+    :param str owner: receiver identity recorded on leases.
+
+    Small pull/ack receiver that acknowledges an event only after the handler
+    returns. Includes ``process_once(handler)`` and
+    ``run(handler, interval=1.0, stop_event=None)`` helpers.
+
+.. py:function:: huey.completion.build_payload(status, task_id, task_name, occurred_at, retries=0, error=None, truncation_note=None, max_bytes=16384)
+
+    Build a versioned, size-bounded JSON payload. Never includes task
+    arguments/kwargs or a traceback. Optional fields are dropped, then
+    identifiers truncated, to satisfy ``max_bytes``; the result carries
+    ``truncated: true`` when that happens.
+
+.. py:function:: huey.completion.build_error_summary(exception, include_message=False, max_chars=500)
+
+    Return a short, non-secret exception summary. By default only the
+    exception type is included; ``str(exception)`` is excluded unless
+    ``include_message=True``.
+
+.. py:function:: huey.completion.receiver_main(argv=None)
+
+    Entry point for ``python -m huey.completion_receiver path.to.huey``.
+    Supports ``--once``, ``--drain``, ``--interval``, ``--limit``,
+    ``--lease-seconds``, ``--owner`` and ``--no-ack``.
 
 
 .. autoclass:: huey.storage.BaseStorage

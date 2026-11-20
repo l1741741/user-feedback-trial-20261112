@@ -3,6 +3,18 @@ Changelog
 
 ## Master
 
+* Add an optional durable completion-event outbox for `SqliteHuey`
+  (`completion_events=True`). Terminal outcomes (succeeded / failed /
+  canceled / revoked / expired) and non-terminal retry observations are
+  written to the database in the same transaction as the result, and can be
+  consumed with a local pull/ack receiver (`Huey.pull_completion_events`,
+  `ack_completion_event`, `release_completion_event`,
+  `purge_completion_events`, and the `huey.completion_receiver` module).
+  Delivery is at-least-once with stable event ids and lease-scoped
+  acknowledgement; a failing outlet never re-runs a task or blocks the
+  consumer, and `reconcile_completion_events()` can backfill missing events
+  from the result store. Signals are unchanged and remain the default.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4

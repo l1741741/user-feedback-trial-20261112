@@ -319,3 +319,12 @@ that may be used by signal handlers, such as database connections or open file
 handles. Signal handlers are called by the consumer workers, which (depending
 on how you are running the consumer) may be separate processes, threads or
 greenlets.
+
+Durable completion events
+-------------------------
+
+Signals are process-local: if no process is listening when a task finishes,
+the notification is gone. For a downstream system that must observe every
+finished task, use the durable completion-event outbox instead (or in
+addition): see :ref:`completion-events`. Enabling it does not change or
+suppress any signal.
