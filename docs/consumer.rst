@@ -150,6 +150,22 @@ Options for the consumer
     use ``TERM`` for graceful and ``INT`` to shutdown immediately. See
     :ref:`deployment-signals`.
 
+``-u``, ``--startup-timeout``
+    Maximum number of seconds to wait for every worker and the scheduler to
+    complete their startup initialization (including ``on_startup`` hooks)
+    before startup is declared failed. The default is ``10`` seconds. A
+    failed startup stops and reclaims every already-started unit and causes
+    the consumer process to exit with code ``1``, rather than running with a
+    partial set of workers. See :ref:`consumer-readiness`.
+
+``-R``, ``--readiness-file``
+    Write a machine-readable JSON *readiness receipt* to the given path once
+    startup reaches a terminal state (success or failure). The file is
+    written atomically and contains only operational fields — status,
+    generation, worker type, unit names, timeout, and on failure a
+    machine-readable reason — never command-line arguments, storage DSNs,
+    credentials, task data or tracebacks. See :ref:`consumer-readiness`.
+
 ``-s``, ``--scheduler-interval``
     The frequency with which the scheduler should run. By default this will run
     every second, but you can increase the interval to as much as 60 seconds.
@@ -267,6 +283,87 @@ acknowledgement of completed tasks. This means that if you terminate the
 consumer **without** letting it finish any currently-executing tasks, those
 tasks will be lost. To be alerted when this occurs, you can use Huey's
 :ref:`signals` (specifically ``signals.SIGNAL_INTERRUPTED``).
+
+.. _consumer-readiness:
+
+Startup readiness
+-----------------
+
+A running consumer process is not necessarily a *ready* consumer. Each worker
+runs its ``on_startup`` hooks and the scheduler must be running before the
+consumer can honestly accept work. Treating "the process exists" as "the
+consumer is up" can let a deployment route traffic at a half-started worker
+that then keeps getting rebuilt by the health check.
+
+Huey therefore tracks an explicit startup state, independently of process
+liveness:
+
+* The consumer is **pending** while units are starting.
+* It becomes **ready** only once *every* worker and the scheduler have each
+  reported successful initialization.
+* It becomes **failed** if a startup hook raises, a unit exits during
+  startup, the storage backend is unreachable, the unified
+  ``--startup-timeout`` elapses, or the consumer is shut down before
+  readiness. On failure every already-started unit is stopped and reclaimed,
+  and (when run from the command line) the process exits with code ``1``.
+
+Failures carry a stable, machine-readable ``reason`` — one of
+``startup_hook``, ``unit_died``, ``storage_unavailable``, ``timeout`` or
+``shutdown`` — together with the name of the offending unit, so deployment
+tooling can report or branch on the cause without parsing log text.
+
+Waiting programmatically
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+When embedded in your own code, :meth:`~huey.consumer.Consumer.start` only
+launches the units; call :meth:`~huey.consumer.Consumer.wait_until_ready` to
+block until the authoritative startup decision. It returns the readiness
+payload on success or raises
+:class:`~huey.exceptions.ConsumerStartupError` on failure::
+
+    consumer = huey.create_consumer(startup_timeout=10)
+    consumer.start()
+    try:
+        consumer.wait_until_ready()
+    except ConsumerStartupError as exc:
+        # exc.reason identifies the failure; the started units have already
+        # been cleaned up.
+        raise
+
+The command-line entry point (and ``Consumer.run()``) perform this wait for
+you, so a consumer that cannot become ready exits non-zero instead of
+entering the normal task loop.
+
+Readiness receipt
+^^^^^^^^^^^^^^^^^
+
+Pass ``--readiness-file=PATH`` (or set ``readiness_file`` on the consumer)
+to atomically write a JSON receipt when startup settles. A successful
+receipt looks like::
+
+    {
+      "status": "ready",
+      "generation": 1,
+      "worker_type": "thread",
+      "units": ["Scheduler", "Worker-1", "Worker-2"],
+      "startup_timeout": 10.0
+    }
+
+A failed receipt adds an ``error`` object with ``reason``, ``unit``,
+``error_type`` and a short ``message``. The receipt is a fixed whitelist of
+non-sensitive fields: it never includes command-line arguments, the storage
+DSN, credentials, task payloads or tracebacks.
+
+Generations
+^^^^^^^^^^^
+
+Every (re)start of the consumer increments a *generation*. Readiness
+messages are tagged with the generation of the unit that sent them, so a
+late report from a previous generation — for example from a worker being
+recycled by ``--max-tasks`` or replaced by the health check — can never mark
+a newer generation ready. Ordinary business-task failures and normal
+``max_tasks`` recycling do not rewrite the initial startup state; only
+failures that occur while startup is still pending do.
 
 .. _consumer-deployments:
 

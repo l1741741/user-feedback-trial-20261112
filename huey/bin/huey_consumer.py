@@ -52,7 +52,13 @@ def consumer_main():
     config.setup_logger(logger)
 
     consumer = huey_instance.create_consumer(**config.values)
-    consumer.run()
+    # run() waits for full readiness before entering the task loop and
+    # returns 1 when startup fails (a startup hook error, a unit that exits
+    # immediately, an unreachable storage backend, startup timeout or an
+    # early shutdown) so deployment scripts can detect the failure instead of
+    # watching a half-started consumer get rebuilt by its health check.
+    exit_code = consumer.run()
+    sys.exit(exit_code or 0)
 
 
 if __name__ == '__main__':

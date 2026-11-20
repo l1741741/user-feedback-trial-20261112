@@ -24,6 +24,8 @@ config_defaults = (
     ('max_tasks', None),
     ('shutdown_timeout', None),
     ('graceful_signal', 'INT'),
+    ('startup_timeout', 10.0),
+    ('readiness_file', None),
 )
 config_keys = [param for param, _ in config_defaults]
 
@@ -41,7 +43,7 @@ def option(name, **options):
 class OptionParserHandler(object):
     def get_worker_options(self):
         return (
-            # -w, -k, -d, -m, -b, -c, -C, -f, -L, -M, -t, -g
+            # -w, -k, -d, -m, -b, -c, -C, -f, -L, -M, -t, -g, -u, -R
             option('workers', type='int',
                    help='number of worker threads/processes (default=1)'),
             option(('k', 'worker-type'), choices=WORKER_TYPES,
@@ -85,6 +87,16 @@ class OptionParserHandler(object):
                    help=('signal that triggers graceful shutdown, INT or '
                          'TERM (default=INT). The other signal interrupts '
                          'running tasks.')),
+            option(('u', 'startup-timeout'), dest='startup_timeout',
+                   metavar='SECONDS', type='float',
+                   help=('seconds to wait for every worker and the scheduler '
+                         'to complete startup initialization before failing '
+                         'with a startup error (default=10)')),
+            option(('R', 'readiness-file'), dest='readiness_file',
+                   metavar='FILE',
+                   help=('write a machine-readable readiness receipt (JSON, '
+                         'no credentials or command-line arguments) to FILE '
+                         'once startup succeeds or fails')),
         )
 
     def get_scheduler_options(self):

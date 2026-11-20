@@ -4,6 +4,26 @@ class TaskLockedException(HueyException): pass
 class ResultTimeout(HueyException): pass
 class TaskTimeout(HueyException): pass
 
+class ConsumerStartupError(HueyException):
+    """
+    The consumer failed to become ready: a worker unit (including its startup
+    hooks) or the scheduler died or reported an error during startup, the
+    storage backend was unavailable, the unified startup timeout elapsed, or
+    the consumer was shut down before readiness was reached.
+
+    ``reason`` is one of the machine-readable constants in
+    :mod:`huey.readiness` (``REASON_*``) so that deployment tooling can branch
+    on the failure without parsing log messages.
+    """
+    def __init__(self, reason, message, unit=None, error_type=None):
+        self.reason = reason
+        self.unit = unit
+        self.error_type = error_type
+        super(ConsumerStartupError, self).__init__(message)
+
+    def __str__(self):
+        return self.args[0]
+
 class RateLimitExceeded(HueyException):
     def __init__(self, key, delay, retry=True):
         self.key, self.delay, self.retry = key, delay, retry

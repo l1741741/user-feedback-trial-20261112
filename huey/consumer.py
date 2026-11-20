@@ -22,7 +22,23 @@ from huey.constants import WORKER_PROCESS
 from huey.constants import WORKER_THREAD
 from huey.constants import WORKER_TYPES
 from huey.exceptions import ConfigurationError
+from huey.exceptions import ConsumerStartupError
 from huey.exceptions import TaskTimeout
+from huey.readiness import ProcessReadinessChannel
+from huey.readiness import REPORT_ERROR
+from huey.readiness import REASON_SHUTDOWN
+from huey.readiness import REASON_STARTUP_HOOK
+from huey.readiness import REASON_STORAGE
+from huey.readiness import REASON_TIMEOUT
+from huey.readiness import REASON_UNIT_DIED
+from huey.readiness import STATE_FAILED
+from huey.readiness import STATE_PENDING
+from huey.readiness import STATE_READY
+from huey.readiness import ThreadReadinessChannel
+from huey.readiness import TERMINAL_STATES
+from huey.readiness import error_message as readiness_error
+from huey.readiness import ready_message
+from huey.readiness import write_readiness_receipt
 from huey.utils import noop_context
 
 
@@ -107,7 +123,11 @@ class Worker(BaseProcess):
             try:
                 startup_hook()
             except Exception:
-                self._logger.exception('startup hook "%s" failed', name)
+                # A failed startup hook means this worker unit never became
+                # ready. Re-raise so the runnable wrapper reports a startup
+                # failure instead of silently entering the task loop
+                # half-initialized; the wrapper logs the full failure.
+                raise
 
     def shutdown(self):
         for name, shutdown_hook in self.huey._shutdown.items():
@@ -240,6 +260,10 @@ class Environment(object):
     def get_stop_flag(self):
         raise NotImplementedError
 
+    def get_readiness_channel(self):
+        # Threads and greenlets share the process and use a plain queue.
+        return ThreadReadinessChannel()
+
     def create_process(self, runnable, name):
         raise NotImplementedError
 
@@ -324,6 +348,11 @@ class ProcessEnvironment(Environment):
     def get_stop_flag(self):
         return ForkSafeFlag()
 
+    def get_readiness_channel(self):
+        # Per-unit pipes: no helper thread is inherited by the forked
+        # children, and a killed worker cannot wedge the parent's reader.
+        return ProcessReadinessChannel()
+
     def create_process(self, runnable, name):
         p = self.mp.Process(target=runnable, name=name)
         p.daemon = True
@@ -394,7 +423,8 @@ class Consumer(object):
                  worker_type=WORKER_THREAD, check_worker_health=True,
                  health_check_interval=10, flush_locks=False,
                  extra_locks=None, max_tasks=None, shutdown_timeout=None,
-                 graceful_signal='INT'):
+                 graceful_signal='INT', startup_timeout=10.0,
+                 readiness_file=None):
 
         self._logger = logging.getLogger('huey.consumer')
         if huey.immediate:
@@ -410,11 +440,21 @@ class Consumer(object):
         self.max_delay = max_delay  # Maximum interval between polling events.
         self.max_tasks = max_tasks  # Max tasks to execute before recycling.
         self.shutdown_timeout = shutdown_timeout
+        # Unified bound on startup: every unit must report readiness before
+        # this many seconds elapse, otherwise startup fails.
+        self.startup_timeout = startup_timeout
+        # Optional path for the machine-readable readiness receipt.
+        self.readiness_file = readiness_file
         self.graceful_signal = graceful_signal
 
         if max_tasks and not check_worker_health:
             raise ConfigurationError('max_tasks requires check_worker_health '
                                      'be enabled.')
+
+        if startup_timeout is not None and startup_timeout <= 0:
+            raise ConfigurationError('startup_timeout must be a positive '
+                                     'number of seconds (or None to wait '
+                                     'indefinitely).')
 
         # Ensure that the scheduler runs at an interval between 1 and 60s.
         self.scheduler_interval = max(min(scheduler_interval, 60), 1)
@@ -448,6 +488,23 @@ class Consumer(object):
         self.huey._timeout_handler = self.environment.timeout
         self.stop_flag = self.environment.get_stop_flag()
 
+        # Startup readiness coordination. The generation identifies each set
+        # of units: it starts at 1 for the units built in __init__ and is
+        # bumped on every restart, so readiness messages produced by a
+        # previous generation (e.g. a late report from a unit being replaced)
+        # can never mark a newer generation ready.
+        self._generation = 1
+        self._startup_state = STATE_PENDING
+        self._startup_error = None
+        self._ready_event = threading.Event()
+        # Serializes terminal startup transitions so teardown completes
+        # before any waiter observes the failed state.
+        self._startup_lock = threading.Lock()
+        self._readiness_channel = self.environment.get_readiness_channel()
+        # unit name -> callable used by the unit to report its readiness.
+        self._readiness_senders = {}
+        self._readiness_thread = None
+
         # In the event the consumer was killed while running a task that held
         # a lock, this ensures that all locks are flushed before starting.
         if flush_locks or extra_locks:
@@ -468,6 +525,19 @@ class Consumer(object):
             # The worker impl is not currently referenced in any consumer code,
             # but it is referenced in the test-suite.
             self.worker_threads.append((worker, process))
+
+    @property
+    def startup_state(self):
+        """Current startup lifecycle state (pending/ready/failed)."""
+        return self._startup_state
+
+    @property
+    def generation(self):
+        """Generation of the current (or most recent) set of units."""
+        return self._generation
+
+    def is_ready(self):
+        return self._startup_state == STATE_READY
 
     def flush_locks(self, *names):
         self._logger.debug('Flushing locks before starting up.')
@@ -499,23 +569,64 @@ class Consumer(object):
             interval=self.scheduler_interval,
             periodic=self.periodic)
 
-    def _create_process(self, process, name):
+    def _create_process(self, process, name, generation=None):
         """
         Repeatedly call the `loop()` method of the given process. Unhandled
         exceptions in the `loop()` method will cause the process to terminate.
+
+        Each unit reports readiness exactly once, after its ``initialize()``
+        completes successfully. Startup hook failures (and any other error
+        raised by initialization) are reported as errors instead; a unit that
+        dies without reporting anything is detected by liveness check.
+
+        Units recreated by the health check after startup pass a generation
+        older than the current one, so their re-reports are discarded as
+        stale rather than re-entering the readiness state machine.
         """
+        report = self._readiness_senders.get(name)
+        if report is None:
+            # New unit name: allocate its endpoint. Units recreated by the
+            # health check keep the same name and reuse their endpoint.
+            report = self._readiness_channel.sender_for(name)
+            self._readiness_senders[name] = report
+        # The generation is captured when the runnable is built, so a unit
+        # always reports for the generation it belongs to even when the
+        # consumer is restarted in-process later.
+        generation = self._generation if generation is None else generation
+
         def _run():
+            # Close inherited readiness descriptors this unit does not own
+            # (no-op for the in-process channel). Must run before anything
+            # that could block, so a forked unit never pins a sibling's pipe.
+            self._readiness_channel.init_child(name)
             self.environment.init_child(process)
             try:
                 process.initialize()
-                while not self.stop_flag.is_set():
-                    process.loop()
             except KeyboardInterrupt:
-                pass
-            except WorkerRecycle:
-                self._logger.info('Process %s restarting (max tasks).', name)
-            except:
-                self._logger.exception('Process %s died!', name)
+                return
+            except SystemExit:
+                # An explicit unit exit (e.g. a startup check that gives up)
+                # must actually terminate the unit, not be downgraded into a
+                # reported error while the runnable keeps living. Re-raise so
+                # the thread ends / the forked process exits, and the
+                # readiness liveness check reports "unit_died".
+                raise
+            except BaseException as exc:
+                self._logger.exception('Process %s failed during startup.',
+                                       name)
+                report(readiness_error(generation, name, exc))
+            else:
+                report(ready_message(generation, name))
+                try:
+                    while not self.stop_flag.is_set():
+                        process.loop()
+                except KeyboardInterrupt:
+                    pass
+                except WorkerRecycle:
+                    self._logger.info('Process %s restarting (max tasks).',
+                                      name)
+                except:
+                    self._logger.exception('Process %s died!', name)
             finally:
                 try:
                     process.shutdown()
@@ -526,12 +637,30 @@ class Consumer(object):
     def start(self):
         """
         Start all consumer processes and register signal handlers.
+
+        Startup is split from readiness: this method returns once the units
+        have been launched; use :meth:`wait_until_ready` (or :meth:`run`,
+        which waits automatically) to block until every worker unit and the
+        scheduler have actually completed their initialization.
         """
         if self.huey.immediate:
             raise ConfigurationError(
                 'Consumer cannot be run with Huey instances where immediate '
                 'is enabled. Please check your configuration and ensure that '
                 '"huey.immediate = False".')
+
+        if self._readiness_thread is not None:
+            # An in-process restart (the SIGHUP path normally execs a fresh
+            # process, but programmatic users may call start() again): bump
+            # the generation first so every rebuilt runnable captures the new
+            # number, then rebuild every unit. Late reports from the old
+            # generation can then never mark this generation ready.
+            self._generation += 1
+            self._reset_for_restart()
+
+        self._startup_state = STATE_PENDING
+        self._startup_error = None
+        self._ready_event.clear()
 
         # Log startup message.
         self._logger.info('Huey consumer started with %s %s, PID %s at %s',
@@ -548,6 +677,25 @@ class Consumer(object):
 
         self._logger.info('\n'.join(msg))
 
+        # Verify the storage backend is reachable before any unit is started.
+        # A failure here is reported as a locatable startup failure with
+        # nothing to clean up yet, instead of producing workers that crash in
+        # a health-check restart loop.
+        try:
+            self.huey.storage.queue_size()
+        except Exception as exc:
+            error = ConsumerStartupError(
+                REASON_STORAGE,
+                'storage backend is unavailable at startup: %s' % exc)
+            self._startup_state = STATE_FAILED
+            self._startup_error = error
+            self._logger.error('Consumer startup failed (%s): %s',
+                               error.reason, error)
+            if self.readiness_file:
+                self._write_receipt(error)
+            self._ready_event.set()
+            raise error
+
         # Forked children must not share the parent's storage connection.
         if self.environment.forks:
             self.huey.storage.close()
@@ -557,8 +705,296 @@ class Consumer(object):
         for _, worker_process in self.worker_threads:
             worker_process.start()
 
+        # Watch the readiness channel until the full unit set has reported or
+        # something fails.
+        self._start_readiness_monitor()
+
         # Finally set the signal handlers for main process.
         self._set_signal_handlers()
+
+    def _reset_for_restart(self):
+        """Rebuild stop flag, channel endpoints and units for a new start."""
+        if any(self.environment.is_alive(p)
+               for p in self._all_processes()):
+            self.stop()
+        self.stop_flag = self.environment.get_stop_flag()
+        # Close the previous generation's pipe ends before replacing the
+        # channel, so descriptors do not leak across in-process restarts.
+        self._readiness_channel.close()
+        # A fresh channel guarantees no message from the previous generation
+        # can reach the new readiness monitor.
+        self._readiness_channel = self.environment.get_readiness_channel()
+        self._readiness_senders = {}
+        self._readiness_thread = None
+
+        scheduler = self._create_scheduler()
+        self.scheduler = self._create_process(scheduler, 'Scheduler')
+
+        self.worker_threads = []
+        for i in range(self.workers):
+            worker = self._create_worker()
+            process = self._create_process(worker, 'Worker-%d' % (i + 1))
+            self.worker_threads.append((worker, process))
+
+    def _all_processes(self):
+        return [p for _, p in self.worker_threads] + [self.scheduler]
+
+    def _unit_processes(self):
+        units = dict(('Worker-%d' % (i + 1), p)
+                     for i, (_, p) in enumerate(self.worker_threads))
+        units['Scheduler'] = self.scheduler
+        return units
+
+    def _start_readiness_monitor(self):
+        self._readiness_thread = threading.Thread(
+            target=self._readiness_loop, name='HueyReadiness', daemon=True)
+        self._readiness_thread.start()
+
+    def _readiness_loop(self):
+        """
+        Drive the startup state machine until a terminal state is reached.
+
+        A unit becomes confirmed only with a generation-matching readiness
+        message. Messages from an older generation are discarded. A unit that
+        dies or reports an error before all units are confirmed fails the
+        whole startup; the unified timeout and an early shutdown do the same.
+
+        The monitor only *decides* the outcome. Publication of the terminal
+        state and failure cleanup are serialized under a lock, so by the time
+        a waiter returns from :meth:`wait_until_ready` every started unit has
+        already been reclaimed.
+        """
+        generation = self._generation
+        expected = set(self._unit_processes())
+        confirmed = set()
+        deadline = (None if self.startup_timeout is None
+                    else time.monotonic() + self.startup_timeout)
+
+        while True:
+            if self.stop_flag.is_set():
+                self._fail_startup(ConsumerStartupError(
+                    REASON_SHUTDOWN,
+                    'consumer was shut down before readiness was reached.'))
+                return
+
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    pending = sorted(expected - confirmed)
+                    self._fail_startup(ConsumerStartupError(
+                        REASON_TIMEOUT,
+                        'startup timeout of %ss elapsed before units %s '
+                        'reported ready.' % (self.startup_timeout, pending),
+                        unit=pending[0] if pending else None))
+                    return
+            else:
+                remaining = None
+
+            # Liveness check: a unit that exits before startup completes can
+            # never report readiness. This also catches a unit that dies at
+            # the same time as its (now stale) message arrives.
+            for name, proc in self._unit_processes().items():
+                if name not in confirmed and not self.environment.is_alive(proc):
+                    self._fail_startup(ConsumerStartupError(
+                        REASON_UNIT_DIED,
+                        'unit %s exited during startup before reporting '
+                        'ready.' % name, unit=name))
+                    return
+
+            message = self._readiness_channel.recv(
+                timeout=min(0.1, remaining) if remaining is not None else 0.1)
+            if message is None:
+                continue
+            if message.generation != generation:
+                # Late report from a previous generation: never let it confirm
+                # a unit of the current generation.
+                self._logger.warning(
+                    'Ignoring readiness message from generation %s (current '
+                    'generation is %s).', message.generation, generation)
+                continue
+            if message.unit not in expected:
+                self._logger.warning('Ignoring readiness message from unknown '
+                                     'unit %s.', message.unit)
+                continue
+
+            if message.status == REPORT_ERROR:
+                self._fail_startup(ConsumerStartupError(
+                    REASON_STARTUP_HOOK,
+                    'unit %s failed its startup initialization: %s' % (
+                        message.unit, message.error_message),
+                    unit=message.unit, error_type=message.error_type))
+                return
+
+            confirmed.add(message.unit)
+            self._logger.info('Unit %s reported ready (%d/%d).',
+                              message.unit, len(confirmed), len(expected))
+            if confirmed == expected:
+                # A shutdown requested concurrently with the final report
+                # wins: units are already exiting, so this is an early
+                # shutdown rather than a unit failure.
+                if self.stop_flag.is_set():
+                    self._fail_startup(ConsumerStartupError(
+                        REASON_SHUTDOWN,
+                        'consumer was shut down before readiness was '
+                        'reached.'))
+                    return
+                # Re-check liveness so a unit cannot report ready and die
+                # before we publish the ready state.
+                dead = [name for name, proc in self._unit_processes().items()
+                        if not self.environment.is_alive(proc)]
+                if dead:
+                    self._fail_startup(ConsumerStartupError(
+                        REASON_UNIT_DIED,
+                        'unit %s exited immediately after reporting ready.'
+                        % ', '.join(sorted(dead)), unit=sorted(dead)[0]))
+                    return
+                self._succeed_startup()
+                return
+
+    def _succeed_startup(self):
+        with self._startup_lock:
+            if self._startup_state in TERMINAL_STATES:
+                return
+            self._startup_state = STATE_READY
+            self._startup_error = None
+            self._logger.info('All %d units reported ready; consumer is '
+                              'accepting tasks.', self.workers + 1)
+            # Write the receipt before releasing waiters so that any process
+            # unblocked by wait_until_ready() is guaranteed the receipt is
+            # already on disk.
+            if self.readiness_file:
+                self._write_receipt(None)
+            self._ready_event.set()
+
+    def _fail_startup(self, error):
+        """
+        Record a terminal startup failure and tear down every unit.
+
+        The whole transition is serialized under a lock. The failure receipt
+        is persisted *before* unit cleanup begins and before waiters are
+        released, so a process unblocked by :meth:`wait_until_ready` is
+        guaranteed to find both the failed state and the on-disk receipt,
+        rather than racing the monitor while it is still reclaiming units.
+        """
+        with self._startup_lock:
+            if self._startup_state in TERMINAL_STATES:
+                return
+            self._startup_state = STATE_FAILED
+            self._startup_error = error
+            self._logger.error('Consumer startup failed (%s): %s',
+                               error.reason, error)
+            if self.readiness_file:
+                self._write_receipt(error)
+            self._teardown_startup()
+            # Release waiters only after the receipt is durable and the
+            # cleanup has completed.
+            self._ready_event.set()
+
+    def _teardown_startup(self):
+        """Stop and reclaim every unit started for this generation."""
+        try:
+            self.stop_flag.set()
+        except Exception:
+            pass
+        # Interrupt units blocked inside startup work so they observe the stop
+        # flag instead of holding the teardown hostage.
+        try:
+            self._interrupt_workers()
+        except Exception:
+            self._logger.exception('Error interrupting workers during startup '
+                                   'failure cleanup.')
+        # Wait until every unit has actually exited (the readiness monitor
+        # terminates as soon as the failure is recorded, so nothing else is
+        # policing the sibling units from this point). Bounded by
+        # shutdown_timeout, falling back to a grace period long enough to
+        # cover a full unit polling interval.
+        grace = self.shutdown_timeout or (self._stop_flag_timeout + 0.5)
+        deadline = time.monotonic() + grace
+        for proc in self._all_processes():
+            if not self.environment.is_alive(proc):
+                continue  # Never started or already reaped.
+            # Re-check with the remaining budget so a unit that only wakes on
+            # its next stop-flag poll is still reclaimed within the deadline.
+            while self.environment.is_alive(proc):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                proc.join(min(remaining, self._stop_flag_timeout + 0.1))
+        # Hard-reclaim forked units that ignored the graceful path. Threads
+        # cannot be killed from outside; their startup code must cooperate with
+        # the stop flag (as the worker loop does).
+        if self.environment.forks:
+            for proc in self._all_processes():
+                if proc.is_alive():
+                    try:
+                        proc.terminate()
+                    except OSError:
+                        pass
+                    proc.join(1)
+        # Every unit is reclaimed; release the parent-side channel
+        # descriptors so they do not leak (the readiness monitor has already
+        # reached a terminal state and will not read from them again).
+        self._readiness_channel.close()
+
+    def _write_receipt(self, error):
+        try:
+            write_readiness_receipt(
+                self.readiness_file, self._startup_state, self._generation,
+                self.worker_type, sorted(self._unit_processes()),
+                self.startup_timeout, error)
+        except Exception:
+            self._logger.exception('Could not write readiness receipt to %s',
+                                   self.readiness_file)
+
+    def wait_until_ready(self, timeout=None):
+        """
+        Block until every worker unit and the scheduler have completed their
+        startup initialization.
+
+        :param timeout: maximum seconds to wait. When ``None`` (the default),
+            wait indefinitely for the consumer's own authoritative startup
+            decision, which is always bounded by the consumer's unified
+            ``startup_timeout``. Passing an explicit value adds a caller-side
+            bound on top.
+        :raises ConsumerStartupError: with a machine-readable ``reason`` if
+            startup failed, timed out, or was shut down first.
+        :raises RuntimeError: if called before :meth:`start`.
+        :returns: the readiness receipt payload (same dictionary written to
+            ``readiness_file`` when configured).
+        """
+        if self._readiness_thread is None:
+            raise RuntimeError('Consumer has not been started; call start() '
+                               'before wait_until_ready().')
+        # Poll instead of one blocking wait so a shutdown signal delivered
+        # while startup is still pending is serviced here rather than only
+        # after the readiness monitor happens to notice the stop flag.
+        poll = self._stop_flag_timeout
+        remaining = timeout
+        while not self._ready_event.wait(poll if remaining is None
+                                         else min(poll, remaining)):
+            if remaining is not None:
+                remaining -= poll
+                if remaining <= 0:
+                    break
+            if self._signum is not None:
+                self.stop(graceful=self._graceful)
+        if self._ready_event.is_set():
+            if self._startup_state == STATE_READY:
+                return self._receipt_payload(None)
+            raise self._startup_error
+        raise ConsumerStartupError(
+            REASON_TIMEOUT,
+            'wait_until_ready() timed out after %ss before the consumer '
+            'reported ready.' % timeout)
+
+    def _receipt_payload(self, error):
+        return {
+            'status': self._startup_state,
+            'generation': self._generation,
+            'worker_type': self.worker_type,
+            'units': sorted(self._unit_processes()),
+            'startup_timeout': self.startup_timeout,
+        }
 
     def stop(self, graceful=False):
         """
@@ -605,8 +1041,24 @@ class Consumer(object):
     def run(self):
         """
         Run the consumer.
+
+        Blocks until the consumer is ready (every worker unit and the
+        scheduler completed startup) before entering the main loop. If startup
+        fails, the already-started units are cleaned up and the failure is
+        returned to the caller as an exit code (1) instead of entering the
+        health-check restart loop with half of the units missing.
+
+        :returns: 0 after a clean shutdown, 1 when startup failed.
         """
         self.start()
+        try:
+            self.wait_until_ready()
+        except ConsumerStartupError as exc:
+            # _fail_startup() already tore the units down and (optionally)
+            # wrote the failure receipt.
+            self._logger.error('Consumer exiting: startup did not complete.')
+            return 1
+
         health_check_ts = time.monotonic()
 
         while True:
@@ -623,6 +1075,7 @@ class Consumer(object):
             os.execl(python, python, *sys.argv)
         else:
             self._logger.info('Consumer exiting.')
+        return 0
 
     def loop(self, health_check_ts=None):
         try:
@@ -643,10 +1096,31 @@ class Consumer(object):
                 stopped = True
 
         if stopped:
+            # A shutdown requested while startup is still pending must release
+            # every readiness waiter rather than leaving it blocked. This only
+            # applies once start() has actually launched units; loop() may be
+            # driven directly by tests and embedders without a startup phase.
+            if (self._startup_state == STATE_PENDING
+                    and self._readiness_thread is not None):
+                self._fail_startup(ConsumerStartupError(
+                    REASON_SHUTDOWN,
+                    'consumer was shut down before readiness was reached.'))
             # Flag to caller that the main consumer loop should shut down.
             raise ConsumerStopped
 
-        if self._health_check and health_check_ts:
+        if self.is_ready():
+            # Units recreated by the health check re-report on their reused
+            # endpoint; those messages (and any other late reports) are
+            # discarded after startup so the channel cannot fill up. Failures
+            # at this stage never rewrite the initial startup state: business
+            # task errors and max_tasks recycling are normal operation.
+            self._readiness_channel.drain()
+
+        if self._health_check and health_check_ts and self.is_ready():
+            # Health checks (and their restart loop) only run after the
+            # consumer is ready. Before that, the readiness monitor owns
+            # failure handling and fails startup instead of silently
+            # rebuilding units.
             now = time.monotonic()
             if now >= health_check_ts + self._health_check_interval:
                 health_check_ts = now
@@ -658,6 +1132,11 @@ class Consumer(object):
         """
         Check the health of the worker processes. Workers that have died will
         be replaced with new workers.
+
+        Replacement units belong to the same runtime generation but their
+        readiness re-reports are tagged with the previous generation so they
+        are treated as stale: post-ready restarts never rewrite the initial
+        startup state.
         """
         self._logger.debug('Checking worker health.')
         workers = []
@@ -666,7 +1145,9 @@ class Consumer(object):
             if not self.environment.is_alive(worker_t):
                 self._logger.warning('Worker %d died, restarting.', i + 1)
                 worker = self._create_worker()
-                worker_t = self._create_process(worker, 'Worker-%d' % (i + 1))
+                worker_t = self._create_process(
+                    worker, 'Worker-%d' % (i + 1),
+                    generation=self._generation - 1)
                 worker_t.start()
                 restart_occurred = True
             workers.append((worker, worker_t))
@@ -679,7 +1160,8 @@ class Consumer(object):
         if not self.environment.is_alive(self.scheduler):
             self._logger.warning('Scheduler died, restarting.')
             scheduler = self._create_scheduler()
-            self.scheduler = self._create_process(scheduler, 'Scheduler')
+            self.scheduler = self._create_process(
+                scheduler, 'Scheduler', generation=self._generation - 1)
             self.scheduler.start()
         else:
             self._logger.debug('Scheduler is up and running.')
