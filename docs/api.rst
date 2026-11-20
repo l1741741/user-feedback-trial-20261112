@@ -216,6 +216,15 @@ Huey types
     :param bool use_thread_lock: use the standard lib ``threading.Lock``
         instead of a lockfile for file-system operations. This should only be
         enabled when using the greenlet or thread consumer worker models.
+    :param bool reliable: enable crash-safe delivery. Messages are published
+        atomically (temp file, ``flush()`` + ``fsync()``, then rename) so
+        consumers never see partial writes; consumers claim messages with an
+        atomic rename so no two processes take the same delivery; claims from
+        dead processes are requeued by an automatic recovery scan; and damaged
+        messages are quarantined and reported rather than being mistaken for
+        an empty queue. Requires a local filesystem with atomic ``rename()``
+        and working ``fsync()`` (e.g. ext4, XFS, APFS -- not NFS/SMB).
+        Delivery is at-least-once. Defaults to ``False``.
 
     FileHuey supports task priorities, limited to integers from 0 to 65535.
 

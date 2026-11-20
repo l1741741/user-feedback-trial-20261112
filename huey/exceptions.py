@@ -1,5 +1,11 @@
 class HueyException(Exception): pass
 class ConfigurationError(HueyException): pass
+class CorruptMessageError(HueyException):
+    """
+    A queue or schedule message file failed integrity validation. Raised by
+    FileStorage in reliable mode instead of silently treating the queue as
+    empty or discarding the damaged data.
+    """
 class TaskLockedException(HueyException): pass
 class ResultTimeout(HueyException): pass
 class TaskTimeout(HueyException): pass

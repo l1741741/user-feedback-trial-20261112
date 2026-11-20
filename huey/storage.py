@@ -6,6 +6,7 @@ import itertools
 import os
 import re
 import shutil
+import stat
 try:
     import sqlite3
 except ImportError:
@@ -13,6 +14,7 @@ except ImportError:
 import struct
 import threading
 import time
+import zlib
 
 try:
     import cysqlite
@@ -34,6 +36,7 @@ except ImportError:
 
 from huey.constants import EmptyData
 from huey.exceptions import ConfigurationError
+from huey.exceptions import CorruptMessageError
 from huey.utils import FileLock
 
 
@@ -1377,6 +1380,42 @@ class PostgresStorage(BaseSqlStorage):
             self.table_counter), (self.name,))
 
 
+# Framing for messages written by FileStorage in reliable mode: a magic
+# tag, the payload length and a CRC32 of the payload. Files written by
+# older versions (raw payload, no magic) are still accepted as-is.
+_MESSAGE_MAGIC = b'HMF1'
+_MESSAGE_HEADER = struct.Struct('>4sII')
+
+# Process-wide monotonic sequence so concurrently-open FileStorage objects
+# never generate colliding temp-file names.
+_tmp_file_seq = itertools.count()
+
+# Recovery filename patterns. All in-flight names end with ".tmp" so that
+# both old and new listings ignore them.
+_CLAIM_RE = re.compile(r'^(?P<base>.+)\.claim\.(?P<pid>\d+)\.(?P<seq>\d+)'
+                       r'\.tmp$')
+_PUBLISH_TMP_RE = re.compile(r'^(?P<base>.+)\.(?P<pid>\d+)\.(?P<seq>\d+)'
+                             r'\.tmp$')
+_LEGACY_TMP_RE = re.compile(r'^(?P<base>.+)\.tmp$')
+
+
+def _pid_alive(pid):
+    # Conservative: when we cannot determine liveness (non-POSIX platforms
+    # lack a safe signal-0 probe), assume the process is alive so recovery
+    # never touches files an active process may still own.
+    if pid <= 0 or os.name != 'posix':
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 class FileStorage(BaseStorage):
     """
     Simple file-system storage implementation.
@@ -1384,11 +1423,50 @@ class FileStorage(BaseStorage):
     This storage implementation should NOT be used in production as it utilizes
     exclusive locks around all file-system operations. This is done to prevent
     race-conditions when reading from the file-system.
+
+    An optional "reliable" delivery mode (``reliable=True``) is provided for
+    deployments where only the filesystem is available and processes may die
+    at any point. In this mode:
+
+    * Messages are published by writing a pid-tagged temporary file, calling
+      ``flush()`` + ``fsync()``, then atomically renaming it into place and
+      fsync-ing the containing directory. A consumer can therefore never
+      observe a partially-written message, and an unpublished temp file is
+      never treated as a task. If the write, flush, fsync or rename fails,
+      the error propagates (no false success) and the temp file is left
+      behind as a recoverable artifact.
+    * Reliable-mode messages carry a small framing header (magic, length,
+      CRC32). Files written by older versions (raw payload, no header) are
+      still accepted unchanged, so legacy and new deliveries coexist in the
+      same directories. A message whose framing fails validation is
+      quarantined with a ``.corrupt`` suffix and reported via
+      :py:exc:`huey.exceptions.CorruptMessageError` -- damaged content is
+      never mistaken for a legitimately empty queue.
+    * Consumers claim a message by atomically renaming it to a
+      pid-tagged ``.claim`` name before reading it, so two processes can
+      never take the same delivery. The claim is only deleted after the
+      contents have been read and validated -- a read failure restores the
+      original name rather than deleting the only copy.
+    * If a process dies after claiming, the claim file is recognizable
+      recovery state: :py:meth:`recover` (run automatically on startup and
+      before each dequeue / schedule read) requeues claims whose recorded
+      pid is no longer alive, and discards never-published temp files left
+      by dead writers. Files owned by live processes are never touched.
+    * Recovery never crosses the storage root directory and never follows
+      symlinks; anything that is not a regular file directly inside the
+      queue/schedule/result/counter directories is left alone.
+
+    Guarantees assume a local filesystem with atomic ``rename()`` and working
+    ``fsync()`` (e.g. ext4, XFS, APFS). Network filesystems (NFS, SMB) do not
+    reliably provide these semantics. Delivery is at-least-once: a crash
+    between claiming a message and finishing its processing can lead to
+    redelivery. Do not mix reliable and non-reliable storage objects on the
+    same directory.
     """
     MAX_PRIORITY = 0xffff
 
     def __init__(self, name, path, levels=2, use_thread_lock=False,
-                 **storage_kwargs):
+                 reliable=False, **storage_kwargs):
         super(FileStorage, self).__init__(name, **storage_kwargs)
 
         self.path = path
@@ -1402,6 +1480,7 @@ class FileStorage(BaseStorage):
         self.result_path = os.path.join(self.path, 'results')
         self.counter_path = os.path.join(self.path, 'counters')
         self.levels = levels
+        self.reliable = reliable
 
         if use_thread_lock:
             self.lock = threading.Lock()
@@ -1409,10 +1488,207 @@ class FileStorage(BaseStorage):
             self.lock_file = os.path.join(self.path, '.lock')
             self.lock = FileLock(self.lock_file)
 
+        if self.reliable:
+            # Requeue deliveries claimed by processes that have since died
+            # and discard never-published temp files from dead writers.
+            self.recover()
+
     def _flush_dir(self, path):
         if os.path.exists(path):
             shutil.rmtree(path)
             os.makedirs(path)
+
+    # -- Reliable delivery primitives ------------------------------------
+
+    def _tmp_name(self, filename, tag=None):
+        parts = [filename]
+        if tag is not None:
+            parts.append(tag)
+        parts.extend((str(os.getpid()), str(next(_tmp_file_seq))))
+        return '.'.join(parts) + '.tmp'
+
+    def _encode_message(self, data):
+        crc = zlib.crc32(data) & 0xffffffff
+        return _MESSAGE_HEADER.pack(_MESSAGE_MAGIC, len(data), crc) + data
+
+    def _decode_message(self, payload, filename=None):
+        if not payload.startswith(_MESSAGE_MAGIC):
+            return payload  # Legacy raw message, pass through unchanged.
+        if len(payload) < _MESSAGE_HEADER.size:
+            raise CorruptMessageError(
+                'truncated message header in %s' % (filename or '<data>'))
+        _, size, crc = _MESSAGE_HEADER.unpack_from(payload)
+        body = payload[_MESSAGE_HEADER.size:]
+        if len(body) != size or (zlib.crc32(body) & 0xffffffff) != crc:
+            raise CorruptMessageError(
+                'message failed integrity check in %s' % (filename or
+                                                          '<data>'))
+        return body
+
+    def _fsync_dir(self, dirname):
+        # Best-effort directory fsync so the rename itself is durable.
+        flags = os.O_RDONLY
+        if hasattr(os, 'O_DIRECTORY'):
+            flags |= os.O_DIRECTORY
+        try:
+            fd = os.open(dirname, flags)
+        except OSError:
+            return
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+    def _publish(self, filename, payload):
+        """
+        Atomically and durably publish ``payload`` to ``filename``: write a
+        pid-tagged temp file, flush + fsync it, rename it into place, then
+        fsync the directory. Any failure before the rename leaves the temp
+        file behind as a recoverable artifact and propagates -- the caller
+        is never told a publish succeeded when it did not.
+        """
+        tmp = self._tmp_name(filename)
+        fh = open(tmp, 'wb')
+        try:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        finally:
+            fh.close()
+        os.replace(tmp, filename)
+        self._fsync_dir(os.path.dirname(filename) or '.')
+
+    def _claim_file(self, filename):
+        """
+        Atomically claim ``filename`` by renaming it to a pid-tagged claim
+        name. Returns the claim path, or None if another consumer won.
+        """
+        claim = self._tmp_name(filename, tag='claim')
+        try:
+            os.rename(filename, claim)
+        except FileNotFoundError:
+            return None
+        return claim
+
+    def _restore_claim(self, claim, filename):
+        # Best-effort: if the restore itself fails, the claim file remains
+        # and a later recovery pass will requeue it.
+        try:
+            os.rename(claim, filename)
+        except OSError:
+            pass
+
+    def _quarantine(self, claim, filename):
+        try:
+            os.rename(claim, filename + '.corrupt')
+        except OSError:
+            pass
+
+    # -- Crash recovery ---------------------------------------------------
+
+    @staticmethod
+    def _is_within(root, path):
+        try:
+            return os.path.commonpath((root, path)) == root
+        except ValueError:
+            return False
+
+    def recover(self):
+        """
+        Scan for interrupted deliveries and clean up. Claims left behind by
+        dead processes are requeued (queue and schedule); never-published
+        temp files left by dead writers are discarded. Files owned by live
+        processes, symlinks, and anything outside the storage root are left
+        untouched. Returns a dict with ``requeued`` and ``discarded``
+        counts.
+        """
+        if not self.reliable:
+            return {'requeued': 0, 'discarded': 0}
+        requeued = discarded = 0
+        with self.lock:
+            for path, requeue in ((self.queue_path, True),
+                                  (self.schedule_path, True),
+                                  (self.result_path, False),
+                                  (self.counter_path, False)):
+                r, d = self._recover_tree(path, requeue=requeue)
+                requeued += r
+                discarded += d
+        return {'requeued': requeued, 'discarded': discarded}
+
+    def _recover_tree(self, base, requeue):
+        # Caller holds the lock. Never crosses the storage root and never
+        # follows symlinks. Returns a (requeued, discarded) 2-tuple.
+        if not os.path.isdir(base):
+            return 0, 0
+        root_real = os.path.realpath(self.path)
+        base_real = os.path.realpath(base)
+        if not self._is_within(root_real, base_real):
+            return 0, 0
+
+        requeued = discarded = 0
+        for dirpath, dirnames, filenames in os.walk(base_real):
+            # Do not descend into symlinked directories.
+            dirnames[:] = [d for d in dirnames
+                           if not os.path.islink(os.path.join(dirpath, d))]
+            for name in filenames:
+                filename = os.path.join(dirpath, name)
+                try:
+                    st = os.lstat(filename)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue  # Never touch symlinks or special files.
+
+                match = _CLAIM_RE.match(name)
+                if match is not None:
+                    if requeue and not _pid_alive(int(match.group('pid'))):
+                        self._rename_recovered(
+                            filename, os.path.join(dirpath,
+                                                   match.group('base')))
+                        requeued += 1
+                    continue
+
+                match = _PUBLISH_TMP_RE.match(name)
+                if match is not None:
+                    # Temp file from an interrupted publish: the message was
+                    # never visible, so it is safe to discard once the
+                    # writer is gone.
+                    if not _pid_alive(int(match.group('pid'))):
+                        os.unlink(filename)
+                        discarded += 1
+                    continue
+
+                if requeue and _LEGACY_TMP_RE.match(name):
+                    # A pre-reliable consumer crashed after renaming the
+                    # message to "<name>.tmp"; put it back. Cross-process
+                    # exclusion is provided by the file lock we hold.
+                    self._rename_recovered(
+                        filename, os.path.join(dirpath, name[:-4]))
+                    requeued += 1
+        return requeued, discarded
+
+    def _rename_recovered(self, src, dest):
+        if os.path.lexists(dest):
+            base, conflict = dest, 0
+            while os.path.lexists(dest):
+                conflict += 1
+                dest = '%s.%03d' % (base, conflict)
+        os.rename(src, dest)
+
+    def corrupted_files(self):
+        """
+        List quarantined message files (queue and schedule) whose contents
+        failed integrity validation. These require manual intervention.
+        """
+        found = []
+        for path in (self.queue_path, self.schedule_path):
+            if os.path.isdir(path):
+                for name in sorted(os.listdir(path)):
+                    if name.endswith('.corrupt'):
+                        found.append(os.path.join(path, name))
+        return found
 
     def enqueue(self, data, priority=None):
         priority = int(priority or 0)
@@ -1436,16 +1712,23 @@ class FileStorage(BaseStorage):
                 conflict += 1
                 filename = '%s.%03d' % (base, conflict)
 
-            with open(filename, 'wb') as fh:
-                fh.write(data)
+            if self.reliable:
+                self._publish(filename, self._encode_message(data))
+            else:
+                with open(filename, 'wb') as fh:
+                    fh.write(data)
 
     def _get_sorted_filenames(self, path):
         if not os.path.exists(path):
             return ()
-        return [f for f in sorted(os.listdir(path)) if not f.endswith('.tmp')]
+        return [f for f in sorted(os.listdir(path))
+                if not f.endswith('.tmp') and not f.endswith('.corrupt')]
 
     def dequeue(self):
         with self.lock:
+            if self.reliable:
+                return self._dequeue_reliable()
+
             filenames = self._get_sorted_filenames(self.queue_path)
             if not filenames:
                 return
@@ -1459,6 +1742,36 @@ class FileStorage(BaseStorage):
             os.unlink(tmp_dest)
         return data
 
+    def _dequeue_reliable(self):
+        # Caller holds the lock.
+        self._recover_tree(self.queue_path, requeue=True)
+        filenames = self._get_sorted_filenames(self.queue_path)
+        if not filenames:
+            return None
+
+        filename = os.path.join(self.queue_path, filenames[0])
+        claim = self._claim_file(filename)
+        if claim is None:
+            return None  # Another consumer won the race; next call retries.
+
+        try:
+            with open(claim, 'rb') as fh:
+                payload = fh.read()
+        except Exception:
+            # Reading failed: restore the original name so the only copy of
+            # the message is not lost, then re-raise.
+            self._restore_claim(claim, filename)
+            raise
+
+        try:
+            data = self._decode_message(payload, claim)
+        except CorruptMessageError:
+            self._quarantine(claim, filename)
+            raise
+
+        os.unlink(claim)
+        return data
+
     def queue_size(self):
         return len(self._get_sorted_filenames(self.queue_path))
 
@@ -1467,7 +1780,10 @@ class FileStorage(BaseStorage):
         accum = []
         for filename in filenames:
             with open(os.path.join(self.queue_path, filename), 'rb') as fh:
-                accum.append(fh.read())
+                data = fh.read()
+            if self.reliable:
+                data = self._decode_message(data, filename)
+            accum.append(data)
         return accum
 
     def flush_queue(self):
@@ -1489,11 +1805,17 @@ class FileStorage(BaseStorage):
                 conflict += 1
                 filename = '%s.%03d' % (base, conflict)
 
-            with open(filename, 'wb') as fh:
-                fh.write(data)
+            if self.reliable:
+                self._publish(filename, self._encode_message(data))
+            else:
+                with open(filename, 'wb') as fh:
+                    fh.write(data)
 
     def read_schedule(self, ts):
         with self.lock:
+            if self.reliable:
+                return self._read_schedule_reliable(ts)
+
             prefix = self._timestamp_to_prefix(ts)
             accum = []
             for basename in self._get_sorted_filenames(self.schedule_path):
@@ -1512,6 +1834,48 @@ class FileStorage(BaseStorage):
 
         return tasks
 
+    def _read_schedule_reliable(self, ts):
+        # Caller holds the lock. Claim all due files first; only delete the
+        # claims once their contents have been read and validated, so a
+        # failure never destroys the only copy of a scheduled task.
+        self._recover_tree(self.schedule_path, requeue=True)
+        prefix = self._timestamp_to_prefix(ts)
+        claimed = []
+        corrupt = None
+        for basename in self._get_sorted_filenames(self.schedule_path):
+            if basename[:12] > prefix:
+                break
+            filename = os.path.join(self.schedule_path, basename)
+            claim = self._claim_file(filename)
+            if claim is None:
+                continue  # Another consumer won the race.
+            try:
+                with open(claim, 'rb') as fh:
+                    payload = fh.read()
+                data = self._decode_message(payload, claim)
+            except CorruptMessageError as exc:
+                self._quarantine(claim, filename)
+                if corrupt is None:
+                    corrupt = exc
+                continue
+            except Exception:
+                self._restore_claim(claim, filename)
+                for prev_claim, prev_filename, _ in claimed:
+                    self._restore_claim(prev_claim, prev_filename)
+                raise
+            claimed.append((claim, filename, data))
+
+        if corrupt is not None:
+            # Do not deliver anything while damaged content is present;
+            # restore the remaining claims so nothing is lost.
+            for prev_claim, prev_filename, _ in claimed:
+                self._restore_claim(prev_claim, prev_filename)
+            raise corrupt
+
+        for claim, _, _ in claimed:
+            os.unlink(claim)
+        return [data for _, _, data in claimed]
+
     def schedule_size(self):
         return len(self._get_sorted_filenames(self.schedule_path))
 
@@ -1520,7 +1884,10 @@ class FileStorage(BaseStorage):
         accum = []
         for filename in filenames:
             with open(os.path.join(self.schedule_path, filename), 'rb') as fh:
-                accum.append(fh.read())
+                data = fh.read()
+            if self.reliable:
+                data = self._decode_message(data, filename)
+            accum.append(data)
         return accum
 
     def flush_schedule(self):
@@ -1548,6 +1915,11 @@ class FileStorage(BaseStorage):
 
         if not os.path.exists(dirname):
             os.makedirs(dirname)
+
+        if self.reliable:
+            payload = struct.pack('>I', len(key)) + key + value
+            self._publish(filename, payload)
+            return
 
         tmp = filename + '.tmp'
         with open(tmp, 'wb') as fh:
@@ -1617,8 +1989,11 @@ class FileStorage(BaseStorage):
                     value = int(fh.read()) + amount
             except Exception:
                 value = amount
-            with open(filename, 'wt') as fh:
-                fh.write(str(value))
+            if self.reliable:
+                self._publish(filename, str(value).encode('utf8'))
+            else:
+                with open(filename, 'wt') as fh:
+                    fh.write(str(value))
 
         return value
 

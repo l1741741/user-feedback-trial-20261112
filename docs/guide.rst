@@ -1668,6 +1668,34 @@ Storage Options
     operations (list directory, read file, unlink file, e.g.) are typically
     required for each storage primitive (enqueue, dequeue, store result, etc).
 
+    For deployments that can only use the filesystem and where processes may
+    be killed at any time, ``FileHuey(..., reliable=True)`` enables a
+    crash-safe delivery mode on top of the same directory layout:
+
+    * Publishing writes a temp file, fsyncs it, then atomically renames it
+      into place, so consumers never observe a half-written message and
+      unpublished temp files are never treated as tasks. A failed write,
+      flush, fsync or rename raises instead of falsely reporting success.
+    * Consumers claim a message with an atomic rename before reading it, so
+      concurrent consumers never take the same delivery, and a read failure
+      never deletes the only copy. If a process dies after claiming, the
+      claim is recognizable recovery state and is requeued by the next
+      recovery scan (run on startup and before each dequeue).
+    * Messages carry a length + CRC32 framing header. Damaged content is
+      quarantined (``.corrupt``) and reported with
+      ``huey.exceptions.CorruptMessageError`` rather than being mistaken
+      for an empty queue. Files written by older versions (no header) are
+      still read unchanged.
+    * Recovery never follows symlinks and never operates outside the
+      storage root, and it only touches files whose recorded owner pid is
+      no longer alive, so active processes' files are left alone.
+
+    These guarantees require a local filesystem with atomic ``rename()``
+    and working ``fsync()`` (e.g. ext4, XFS, APFS -- not NFS/SMB), and
+    delivery is at-least-once: a crash between claiming a task and
+    finishing it can lead to redelivery. Do not mix reliable and
+    non-reliable storage on the same directory.
+
 :py:class:`MemoryHuey`
     In-memory implementation of the storage layer used for :ref:`immediate`.
 

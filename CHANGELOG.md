@@ -3,6 +3,12 @@ Changelog
 
 ## Master
 
+* Add optional crash-safe delivery mode to ``FileStorage`` / ``FileHuey``
+  (``reliable=True``): atomic publish with ``fsync``, atomic claim with
+  crash recovery, message integrity checks with quarantine of damaged
+  files, and a recovery scan that never crosses the storage root or
+  follows symlinks. Default behavior is unchanged.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4
