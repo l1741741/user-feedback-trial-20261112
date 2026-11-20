@@ -2115,11 +2115,77 @@ Result
     around a number of individual :py:meth:`Result` instances, and provides a
     convenience API for fetching the results in bulk.
 
-    .. py:method:: get(*args, **kwargs)
+    .. py:method:: get(blocking=False, timeout=None, backoff=1.15, max_delay=1.0, revoke_on_timeout=False, preserve=False, group_timeout=None)
 
-        Call :py:meth:`~Result.get` on each individual :py:meth:`Result`
-        instance in the group and returns a list of return values. Any keyword
-        arguments are passed along.
+        :param bool blocking: whether to block while waiting for task results.
+        :param timeout: seconds to block **per member** (if ``blocking=True``).
+            When ``group_timeout`` is also given, this further caps the wait
+            for each individual member within the shared group budget.
+        :param backoff: amount to backoff delay each iteration of loop.
+        :param max_delay: maximum amount of time to wait between iterations
+            when attempting to fetch results.
+        :param bool revoke_on_timeout: if a timeout occurs, revoke the
+            task(s) that timed out, thereby preventing them from running if
+            they have not started yet.
+        :param bool preserve: when set to ``True``, task results are
+            preserved in the result store after having been successfully
+            retrieved.
+        :param group_timeout: seconds to block for the **whole group**, as a
+            single shared deadline. Specifying this implies blocking.
+        :raises: ResultTimeout if the results are not ready within the
+            applicable timeout, or TaskException if a member task failed.
+        :returns: a list of return values, in the same positions (and
+            nesting) as the input tasks.
+
+        Call :py:meth:`~Result.get` on each individual :py:class:`Result`
+        instance in the group and return a list of return values.
+
+        By default (``group_timeout=None``) each member is fetched in turn
+        and ``timeout`` applies independently to every member, so the
+        per-member timeouts stack: a group of *n* tasks may block for up to
+        ``n * timeout`` seconds.
+
+        When ``group_timeout`` is specified, the whole group shares a single
+        monotonic-clock budget that is computed once, up-front. The number of
+        members, the number of times the wait is woken up, and the early
+        arrival of partial results never reset the deadline. Nested groups
+        and chords are flattened to their leaf tasks and share the same
+        budget, and :py:class:`Result` handles that already hold a cached
+        value are used as-is (they are neither waited on nor read from the
+        result store again). The wait is delegated to the storage layer,
+        which blocks without busy-polling.
+
+        .. code-block:: python
+
+            result_group = huey.enqueue(group([
+                fetch.s(url) for url in urls]))
+
+            # Wait at most 2 seconds for the entire batch:
+            try:
+                values = result_group.get(blocking=True, group_timeout=2.0)
+            except ResultTimeout:
+                values = None
+
+        Consumption semantics with ``group_timeout`` are atomic with respect
+        to the result store:
+
+        * On success, each unique task's result is read exactly once and
+          removed from the store (duplicate references to the same task are
+          not destructively read multiple times), unless ``preserve=True``,
+          in which case nothing is removed.
+        * On timeout, a :py:class:`ResultTimeout` is raised naming the
+          pending task id(s). **No result is consumed**: every result that
+          arrived remains in the result store and can be fetched again by
+          retrying the call or by reading the individual :py:class:`Result`.
+          With ``revoke_on_timeout=True``, each member whose result was not
+          ready by the deadline is revoked; members that finished in time
+          are left alone.
+        * If a member task failed, a :py:class:`TaskException` is raised for
+          the first failed member (in input order). The failing task is
+          identifiable via ``exc.task_id`` (also present as
+          ``exc.metadata['task_id']``). Again, no result is consumed, so the
+          call can be retried once the failure has been addressed (e.g. the
+          failed task was retried and produced a new result).
 
     .. py:method:: as_completed(backoff=1.15, max_delay=1.0)
 

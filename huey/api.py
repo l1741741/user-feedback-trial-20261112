@@ -1309,9 +1309,163 @@ class ResultGroup(object):
     def __init__(self, results):
         self._results = results
 
-    def get(self, *args, **kwargs):
-        return [result.get(*args, **kwargs) for result in self._results]
+    def get(self, blocking=False, timeout=None, backoff=1.15, max_delay=1.0,
+            revoke_on_timeout=False, preserve=False, group_timeout=None):
+        """
+        Fetch the results for every member of the group, returning a list of
+        values in the same positions (and nesting) as the input tasks.
+
+        By default (``group_timeout=None``) each member is fetched in turn
+        via :py:meth:`Result.get` and the given ``timeout`` applies
+        independently to every member, so a slow member does not shorten the
+        wait granted to the others -- the per-member timeouts stack.
+
+        When ``group_timeout`` is specified, the whole group shares a single
+        monotonic-clock budget that is computed once, up-front. The number of
+        members, the number of times the wait is woken up, and the early
+        arrival of partial results never reset the deadline. Specifying
+        ``group_timeout`` implies blocking. The wait itself is delegated to
+        the storage layer (``wait_result``), which blocks without
+        busy-polling. Nested groups and chords are flattened to their leaf
+        tasks and share the same budget; ``Result`` handles that already hold
+        a cached value are used as-is and are neither waited on nor read from
+        the result store again.
+
+        Consumption semantics with ``group_timeout`` are atomic:
+
+        * On success, each unique task's result is read from the store
+          exactly once (duplicate references to the same task are not
+          destructively read multiple times) and removed, unless
+          ``preserve=True`` is specified, in which case nothing is removed.
+        * On timeout a :py:class:`ResultTimeout` is raised identifying the
+          pending task(s). No result is consumed: every result that arrived
+          remains in the result store and can be fetched again by retrying
+          this call or by reading the individual :py:class:`Result`. When
+          ``revoke_on_timeout=True``, each member whose result was not ready
+          by the deadline is revoked (members that finished in time are left
+          alone).
+        * If a member task failed, a :py:class:`TaskException` is raised for
+          the first failed member (in input order) with the failing task's id
+          available as ``exc.task_id`` (and in ``exc.metadata['task_id']``).
+          Again, no result is consumed, so the call can be retried once the
+          failure has been addressed (e.g. the task was retried).
+        """
+        if group_timeout is None:
+            # Legacy behavior: each member is fetched in turn and the given
+            # timeout applies independently to each one.
+            return [result.get(blocking, timeout, backoff, max_delay,
+                               revoke_on_timeout, preserve)
+                    for result in self._results]
+
+        return self._get_by_deadline(group_timeout, timeout, backoff,
+                                     max_delay, revoke_on_timeout, preserve)
     __call__ = get
+
+    @staticmethod
+    def _collect_leaves(node, accum):
+        # Flatten nested groups and chords into their leaf Result handles.
+        if isinstance(node, ResultGroup):
+            for member in node._results:
+                ResultGroup._collect_leaves(member, accum)
+        elif isinstance(node, ChordResult):
+            accum.append(node.callback)
+        else:
+            accum.append(node)
+
+    @staticmethod
+    def _build_result(node, values):
+        # Rebuild the result values in the positions (and nesting) of the
+        # input tasks.
+        if isinstance(node, ResultGroup):
+            return [ResultGroup._build_result(member, values)
+                    for member in node._results]
+        elif isinstance(node, ChordResult):
+            return values[node.callback.id]
+        return values[node.id]
+
+    def _get_by_deadline(self, group_timeout, timeout, backoff, max_delay,
+                         revoke_on_timeout, preserve):
+        # The whole group shares a single monotonic-clock budget, computed
+        # once, up-front. The number of members, the number of times we are
+        # woken up, and the early arrival of partial results never reset the
+        # deadline.
+        deadline = time.monotonic() + group_timeout
+
+        leaves = []
+        self._collect_leaves(self, leaves)
+
+        # Handles that already hold a cached value need no waiting and must
+        # not be read from (or popped out of) the result store a second time.
+        pending = {}
+        values = {}
+        for result in leaves:
+            if result._result is not EmptyData:
+                values[result.id] = result._result
+            elif result.id not in pending:
+                # Duplicate references to the same task share a single wait
+                # and a single (destructive) read.
+                pending[result.id] = result
+
+        if pending:
+            huey = leaves[0].huey
+            storage = huey.storage
+
+            # Wait on each pending task in turn using whatever remains of the
+            # shared budget. wait_result() blocks without busy-polling and
+            # returns as soon as its key is ready.
+            for task_id in pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if timeout is not None:
+                    remaining = min(remaining, timeout)
+                storage.wait_result(task_id, remaining, backoff, max_delay)
+
+            # Final non-destructive read of everything we waited on. A
+            # producer that wrote its result just before (or just after) the
+            # last wakeup is still observed here, so a late or missed
+            # notification cannot hide a real result.
+            raw = storage.peek_many(list(pending))
+            missing = [task_id for task_id in pending if task_id not in raw]
+            if missing:
+                # Nothing has been consumed: every result that did arrive
+                # remains in the result store and can be fetched again by
+                # retrying this call or reading the individual Result.
+                if revoke_on_timeout:
+                    for task_id in missing:
+                        pending[task_id].revoke()
+                raise ResultTimeout(
+                    'timed out waiting for group results: %d of %d task(s) '
+                    'not ready: %s' % (len(missing), len(pending),
+                                       ', '.join(sorted(missing))))
+
+            deserialize = huey.serializer.deserialize
+            for task_id, data in raw.items():
+                values[task_id] = deserialize(data)
+
+        # Report the first failed member (in input order), identifying the
+        # task. No result has been consumed, so the caller may retry the read
+        # once the failure has been addressed.
+        for result in leaves:
+            value = values[result.id]
+            if value is not None and isinstance(value, Error):
+                exc = TaskException(value.metadata)
+                exc.task_id = result.id
+                raise exc
+
+        if pending:
+            # All members are ready and none failed. Consume the results,
+            # popping each unique task exactly once (unless preserve=True),
+            # and cache the values on the individual Result handles.
+            if not preserve:
+                pop_data = storage.pop_data
+                for task_id in pending:
+                    pop_data(task_id)
+            for result in leaves:
+                if result._result is EmptyData:
+                    result._result = values[result.id]
+
+        return self._build_result(self, values)
 
     def __getitem__(self, idx):
         return self._results[idx].get(True)

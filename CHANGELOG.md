@@ -3,6 +3,13 @@ Changelog
 
 ## Master
 
+* Add optional `group_timeout` parameter to `ResultGroup.get()`, giving the
+  whole group a single monotonic-clock deadline instead of stacking a
+  per-member `timeout` for every task. Works with nested groups/chords and
+  previously-cached `Result` handles; on timeout or member failure no results
+  are consumed, so the read can be retried, and member failures are
+  identifiable via `TaskException.task_id`.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4
