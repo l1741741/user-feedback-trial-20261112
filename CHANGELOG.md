@@ -3,6 +3,18 @@ Changelog
 
 ## Master
 
+* Add `retry_deadline` task option: an overall retry budget (seconds,
+  timedelta, or absolute datetime) resolved once at the first enqueue and
+  persisted with the task, so retries, consumer restarts, delayed scheduling
+  and re-serialization do not reset it. A retry whose eta would fall beyond
+  the deadline is never published; the task fails finally instead.
+* Add `retry_backoff_max` (ceiling on the backoff delay), `retry_jitter`
+  (full or additive jitter, with an injectable `retry_random` source), and
+  support for callable `retry_backoff` strategies that receive the persisted
+  retry attempt counter.
+* Existing count-based retry behavior is unchanged when the new options are
+  not used.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4

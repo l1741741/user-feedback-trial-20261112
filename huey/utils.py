@@ -2,6 +2,7 @@ from collections import namedtuple
 import calendar
 import contextlib
 import datetime
+import math
 import os
 import sys
 import threading
@@ -82,6 +83,61 @@ def normalize_expire_time(expires, utc=True):
     if isinstance(expires, datetime.datetime):
         return normalize_time(eta=expires, utc=utc)
     return normalize_time(delay=expires, utc=utc)
+
+
+def validate_duration_seconds(name, value):
+    """
+    Validate a duration expressed as a number of seconds (int/float) or as a
+    ``datetime.timedelta``, returning the equivalent number of seconds.
+
+    Booleans and other types are rejected with a ``TypeError``; negative and
+    non-finite (inf/nan) values are rejected with a ``ValueError``. Zero is a
+    valid duration.
+    """
+    if isinstance(value, bool) or \
+            not isinstance(value, (int, float, datetime.timedelta)):
+        raise TypeError('%s must be a number of seconds or a timedelta, '
+                        'got %r' % (name, value))
+    if isinstance(value, datetime.timedelta):
+        seconds = value.total_seconds()
+    else:
+        seconds = value
+    if not math.isfinite(seconds):
+        raise ValueError('%s must be a finite number of seconds, '
+                         'got %r' % (name, value))
+    if seconds < 0:
+        raise ValueError('%s must not be negative, got %r' % (name, value))
+    return seconds
+
+
+def validate_retry_deadline(value):
+    """
+    Validate a retry deadline: ``None``, an absolute ``datetime``, or a
+    duration (seconds / ``timedelta``) relative to the first enqueue.
+    """
+    if value is None or isinstance(value, datetime.datetime):
+        return
+    validate_duration_seconds('retry_deadline', value)
+
+
+def validate_retry_backoff_max(value):
+    """Validate a backoff ceiling, returning seconds (or ``None``)."""
+    if value is None:
+        return None
+    return validate_duration_seconds('retry_backoff_max', value)
+
+
+def validate_retry_jitter(value):
+    """
+    Validate a jitter setting, returning the normalized value: ``None``
+    (disabled), ``True`` (full jitter), or a non-negative number of seconds
+    of additive jitter.
+    """
+    if value is None or value is False:
+        return None
+    if value is True:
+        return True
+    return validate_duration_seconds('retry_jitter', value)
 
 
 def normalize_time(eta=None, delay=None, utc=True):

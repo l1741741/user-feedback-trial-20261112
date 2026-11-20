@@ -363,7 +363,7 @@ Huey object
             # ... later ...
             consumer.stop(graceful=True)
 
-    .. py:method:: task(retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
+    .. py:method:: task(retries=0, retry_delay=0, retry_backoff=0, retry_deadline=None, retry_backoff_max=None, retry_jitter=None, retry_random=None, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
 
         :param int retries: number of times to retry the function if an
             unhandled exception occurs when it is executed.
@@ -372,8 +372,31 @@ Huey object
             attempt, giving exponentially-growing waits between retries. The
             first retry waits ``retry_delay`` seconds. Defaults to ``0``, which
             disables backoff. A value of ``1`` leaves the delay constant, and
-            values below ``1`` shrink it. Floats are accepted. See
+            values below ``1`` shrink it. Floats are accepted. A callable is
+            also accepted, called as ``backoff(retry_delay, attempt)`` with the
+            base delay and the (persistent) retry attempt counter, and must
+            return the delay in seconds. See
             :ref:`recipe-exponential-backoff`.
+        :param retry_deadline: overall retry budget, measured from the first
+            time the task is enqueued. Accepts seconds (int/float), a
+            ``timedelta``, or an absolute ``datetime``. Once the next retry
+            would run later than the deadline, it is not published and the
+            task fails finally instead. The deadline is resolved once, at the
+            first enqueue, and is serialized with the task, so retries,
+            consumer restarts, delayed scheduling and re-serialization do not
+            reset it. Defaults to ``None`` (no deadline; retries are bounded
+            only by ``retries``).
+        :param retry_backoff_max: ceiling, in seconds (or a ``timedelta``),
+            on the delay between retries when using ``retry_backoff``.
+        :param retry_jitter: add randomness to the delay between retries.
+            ``True`` applies "full" jitter (a uniform random wait between 0
+            and the computed, capped delay); a number of seconds (or a
+            ``timedelta``) adds up to that much extra delay. Defaults to
+            ``None`` (no jitter).
+        :param retry_random: source of randomness for ``retry_jitter`` -- any
+            object exposing ``uniform(a, b)``, e.g. a ``random.Random``
+            instance. Defaults to the ``random`` module. Not serialized with
+            the task.
         :param int priority: priority assigned to task, higher numbers are
             processed first by the consumer when there is a backlog. See
             :ref:`priority` (supported by every storage backend except
@@ -453,7 +476,7 @@ Huey object
         revocation, etc.), see :py:class:`TaskWrapper`, :py:class:`Task`,
         and :py:class:`Result`.
 
-    .. py:method:: periodic_task(validate_datetime, retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
+    .. py:method:: periodic_task(validate_datetime, retries=0, retry_delay=0, retry_backoff=0, retry_deadline=None, retry_backoff_max=None, retry_jitter=None, retry_random=None, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
 
         :param function validate_datetime: function which accepts a
             ``datetime`` instance and returns whether the task should be
@@ -463,6 +486,15 @@ Huey object
         :param int retry_delay: number of seconds to wait in-between retries.
         :param retry_backoff: multiplier applied to the delay after each failed
             attempt. See :py:meth:`~Huey.task`.
+        :param retry_deadline: overall retry budget for each run of the
+            periodic task, measured from the time the run is enqueued. See
+            :py:meth:`~Huey.task`.
+        :param retry_backoff_max: ceiling on the delay between retries. See
+            :py:meth:`~Huey.task`.
+        :param retry_jitter: randomize the delay between retries. See
+            :py:meth:`~Huey.task`.
+        :param retry_random: source of randomness for ``retry_jitter``. See
+            :py:meth:`~Huey.task`.
         :param int priority: priority assigned to task, higher numbers are
             processed first by the consumer when there is a backlog. See
             :ref:`priority` (supported by every storage backend except
@@ -1187,7 +1219,7 @@ Huey object
         directly. The :py:meth:`Huey.task` and :py:meth:`Huey.periodic_task`
         decorators will create the appropriate TaskWrapper automatically.
 
-    .. py:method:: schedule(args=None, kwargs=None, eta=None, delay=None, priority=None, retries=None, retry_delay=None, retry_backoff=None, expires=None, timeout=None, id=None)
+    .. py:method:: schedule(args=None, kwargs=None, eta=None, delay=None, priority=None, retries=None, retry_delay=None, retry_backoff=None, retry_deadline=None, retry_backoff_max=None, retry_jitter=None, expires=None, timeout=None, id=None)
 
         :param tuple args: arguments for decorated function.
         :param dict kwargs: keyword arguments for decorated function.
@@ -1200,6 +1232,12 @@ Huey object
         :param int retry_delay: number of seconds to wait between retries.
         :param retry_backoff: multiplier applied to the delay after each failed
             attempt. See :py:meth:`~Huey.task`.
+        :param retry_deadline: overall retry budget, resolved when the task is
+            enqueued (not when it becomes due). See :py:meth:`~Huey.task`.
+        :param retry_backoff_max: ceiling on the delay between retries. See
+            :py:meth:`~Huey.task`.
+        :param retry_jitter: randomize the delay between retries. See
+            :py:meth:`~Huey.task`.
         :param expires: set expiration time for task. If the task is not run
             before ``expires``, it will be discarded. The ``expires`` parameter
             can be either an integer (seconds), a timedelta, or a datetime. For

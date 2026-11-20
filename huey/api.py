@@ -3,6 +3,7 @@ import datetime
 import inspect
 import itertools
 import logging
+import random
 import re
 import time
 import traceback
@@ -44,6 +45,10 @@ from huey.utils import noop_context
 from huey.utils import normalize_expire_time
 from huey.utils import normalize_time
 from huey.utils import utcnow
+from huey.utils import validate_duration_seconds
+from huey.utils import validate_retry_backoff_max
+from huey.utils import validate_retry_deadline
+from huey.utils import validate_retry_jitter
 
 
 logger = logging.getLogger('huey')
@@ -168,8 +173,17 @@ class Huey(object):
     def create_consumer(self, **options):
         return Consumer(self, **options)
 
-    def task(self, retries=0, retry_delay=0, retry_backoff=0, priority=None,
-             context=False, name=None, expires=None, timeout=None, **kwargs):
+    def task(self, retries=0, retry_delay=0, retry_backoff=0,
+             retry_deadline=None, retry_backoff_max=None, retry_jitter=None,
+             retry_random=None, priority=None, context=False, name=None,
+             expires=None, timeout=None, **kwargs):
+        validate_retry_deadline(retry_deadline)
+        validate_retry_backoff_max(retry_backoff_max)
+        validate_retry_jitter(retry_jitter)
+        if callable(retry_backoff):
+            # Prevent the callable from being bound as a method when it is
+            # stored as a task-class attribute.
+            retry_backoff = staticmethod(retry_backoff)
         TaskWrapper = self.task_wrapper_class
         def decorator(func):
             return TaskWrapper(
@@ -180,6 +194,10 @@ class Huey(object):
                 default_retries=retries,
                 default_retry_delay=retry_delay,
                 default_retry_backoff=retry_backoff,
+                default_retry_deadline=retry_deadline,
+                default_retry_backoff_max=retry_backoff_max,
+                default_retry_jitter=retry_jitter,
+                retry_random=retry_random,
                 default_priority=priority,
                 default_expires=expires,
                 default_timeout=timeout,
@@ -187,8 +205,15 @@ class Huey(object):
         return decorator
 
     def periodic_task(self, validate_datetime, retries=0, retry_delay=0,
-                      retry_backoff=0, priority=None, context=False, name=None,
-                      expires=None, timeout=None, **kwargs):
+                      retry_backoff=0, retry_deadline=None,
+                      retry_backoff_max=None, retry_jitter=None,
+                      retry_random=None, priority=None, context=False,
+                      name=None, expires=None, timeout=None, **kwargs):
+        validate_retry_deadline(retry_deadline)
+        validate_retry_backoff_max(retry_backoff_max)
+        validate_retry_jitter(retry_jitter)
+        if callable(retry_backoff):
+            retry_backoff = staticmethod(retry_backoff)
         TaskWrapper = self.task_wrapper_class
         def decorator(func):
             def method_validate(self, timestamp):
@@ -202,6 +227,10 @@ class Huey(object):
                 default_retries=retries,
                 default_retry_delay=retry_delay,
                 default_retry_backoff=retry_backoff,
+                default_retry_deadline=retry_deadline,
+                default_retry_backoff_max=retry_backoff_max,
+                default_retry_jitter=retry_jitter,
+                retry_random=retry_random,
                 default_priority=priority,
                 default_expires=expires,
                 default_timeout=timeout,
@@ -311,6 +340,12 @@ class Huey(object):
         if task.expires:
             task.resolve_expires(self.utc)
 
+        # Resolve the retry deadline on the first enqueue only. The resolved
+        # deadline is serialized with the task, so retries, consumer restarts,
+        # delayed scheduling and re-serialization do not reset the budget.
+        if task.retry_deadline is not None:
+            task.resolve_retry_deadline(self.utc, self._get_timestamp())
+
         self._emit(S.SIGNAL_ENQUEUED, task)
 
         if self._immediate:
@@ -410,6 +445,16 @@ class Huey(object):
         return (utcnow() if self.utc else
                 datetime.datetime.now())
 
+    def _retry_timestamp(self, eta=None, delay=None):
+        # Like normalize_time(), except that relative delays are computed
+        # against this instance's clock (see _get_timestamp()), keeping the
+        # retry path consistent and controllable in tests.
+        if eta is not None:
+            return normalize_time(eta=eta, utc=self.utc)
+        if not isinstance(delay, datetime.timedelta):
+            delay = datetime.timedelta(seconds=delay)
+        return self._get_timestamp() + delay
+
     def execute(self, task, timestamp=None):
         if timestamp is None:
             timestamp = self._get_timestamp()
@@ -465,7 +510,7 @@ class Huey(object):
             if exc.retry or task.retries:
                 logger.info('Task %s rate-limited on "%s", retrying in %s',
                             task.id, exc.key, delay)
-                retry_eta = normalize_time(None, delay, self.utc)
+                retry_eta = self._retry_timestamp(delay=delay)
                 if exc.retry:
                     task.retries += 1
             else:
@@ -480,7 +525,7 @@ class Huey(object):
             logger.info('Task %s raised RetryTask, retrying.', task.id)
             task.retries += 1
             if exc.eta or exc.delay is not None:
-                retry_eta = normalize_time(exc.eta, exc.delay, self.utc)
+                retry_eta = self._retry_timestamp(exc.eta, exc.delay)
             exception = exc
         except CancelExecution as exc:
             if exc.retry or (exc.retry is None and task.retries):
@@ -521,6 +566,22 @@ class Huey(object):
                 self._check_chord(task.chord_config, task_value)
         else:
             final = not task.retries
+            if not final:
+                # Determine when the next retry would run, and whether the
+                # task's retry deadline permits publishing it. A retry whose
+                # eta falls beyond the deadline is never enqueued or
+                # scheduled -- the failure is treated as final instead.
+                timestamp = self._get_timestamp()
+                if retry_eta is None and task.retry_delay:
+                    retry_eta = timestamp + datetime.timedelta(
+                        seconds=self._current_retry_delay(task))
+                    self._grow_retry_delay(task)
+                prospective = retry_eta if retry_eta is not None else timestamp
+                if task.retry_deadline_exceeded(prospective):
+                    final = True
+                    logger.info('Task %s not retried, retry deadline %s '
+                                'reached.', task.id,
+                                task.retry_deadline_resolved)
             surface = final or (self.store_intermediate_errors and
                                 not isinstance(exception, RETRYING_EXCEPTIONS))
             if surface:
@@ -539,7 +600,7 @@ class Huey(object):
                 self._abort_chord_member(task, error)
             else:
                 self._emit(S.SIGNAL_RETRYING, task)
-                self._requeue_task(task, self._get_timestamp(), retry_eta)
+                self._requeue_task(task, retry_eta)
 
         return task_value
 
@@ -569,20 +630,59 @@ class Huey(object):
             callback.extend_data((results,))
             self.enqueue(callback)
 
-    def _requeue_task(self, task, timestamp, retry_eta=None):
+    def _requeue_task(self, task, retry_eta=None):
         task.retries -= 1
+        task.retry_attempt += 1
         logger.info('Requeueing %s, %s retries', task.id, task.retries)
         if retry_eta is not None:
             task.eta = retry_eta
             self.add_schedule(task)
-        elif task.retry_delay:
-            delay = datetime.timedelta(seconds=task.retry_delay)
-            task.eta = timestamp + delay
-            if task.retry_backoff:
-                task.retry_delay *= task.retry_backoff
-            self.add_schedule(task)
         else:
             self.enqueue(task)
+
+    def _current_retry_delay(self, task):
+        """
+        Compute the delay, in seconds, before the next retry attempt. Applies
+        the backoff ceiling and jitter, but does not modify the task.
+        """
+        backoff = task.retry_backoff
+        if callable(backoff):
+            # A callable backoff receives the base retry_delay and the
+            # (persisted) retry attempt counter, and returns the delay.
+            delay = backoff(task.retry_delay, task.retry_attempt)
+            try:
+                delay = validate_duration_seconds('retry_backoff() result',
+                                                  delay)
+            except (TypeError, ValueError) as exc:
+                raise ConfigurationError('invalid retry_backoff() result: '
+                                         '%s' % exc)
+        else:
+            delay = task.retry_delay
+
+        if task.retry_backoff_max is not None:
+            delay = min(delay, task.retry_backoff_max)
+
+        if task.retry_jitter:
+            rng = task.retry_random or random
+            if task.retry_jitter is True:
+                # "Full" jitter: wait a random amount between 0 and the
+                # computed (and capped) delay.
+                delay = rng.uniform(0, delay)
+            else:
+                # Additive jitter: up to retry_jitter extra seconds.
+                delay += rng.uniform(0, task.retry_jitter)
+        return delay
+
+    def _grow_retry_delay(self, task):
+        # Grow the serialized retry_delay by the backoff multiplier, capping
+        # it at retry_backoff_max. Callable backoffs instead receive the
+        # persisted retry_attempt counter and need no mutation.
+        backoff = task.retry_backoff
+        if backoff and not callable(backoff):
+            delay = task.retry_delay * backoff
+            if task.retry_backoff_max is not None:
+                delay = min(delay, task.retry_backoff_max)
+            task.retry_delay = delay
 
     def _run_pre_execute(self, task):
         for name, callback in self._pre_execute.items():
@@ -798,12 +898,21 @@ class Task(object):
     default_retries = 0
     default_retry_delay = 0
     default_retry_backoff = 0
+    default_retry_deadline = None
+    default_retry_backoff_max = None
+    default_retry_jitter = None
     default_timeout = None
+    # Source of randomness for retry jitter (anything exposing uniform(a, b),
+    # e.g. a random.Random instance). Not serialized with the task.
+    retry_random = None
 
     def __init__(self, args=None, kwargs=None, id=None, eta=None, retries=None,
                  retry_delay=None, priority=None, expires=None,
                  on_complete=None, on_error=None, expires_resolved=None,
-                 timeout=None, chord_config=None, retry_backoff=None):
+                 timeout=None, chord_config=None, retry_backoff=None,
+                 retry_deadline=None, retry_deadline_resolved=None,
+                 retry_attempt=None, retry_backoff_max=None,
+                 retry_jitter=None):
         self.name = type(self).__name__
         self.args = () if args is None else args
         self.kwargs = {} if kwargs is None else kwargs
@@ -822,6 +931,23 @@ class Task(object):
         self.timeout = timeout if timeout is not None else self.default_timeout
         self.chord_config = chord_config
         self._deadline = None
+
+        self.retry_deadline = retry_deadline if retry_deadline is not None \
+                else self.default_retry_deadline
+        self.retry_deadline_resolved = retry_deadline_resolved
+        self.retry_attempt = retry_attempt if retry_attempt is not None else 0
+        self.retry_backoff_max = retry_backoff_max if retry_backoff_max is \
+                not None else self.default_retry_backoff_max
+        self.retry_jitter = retry_jitter if retry_jitter is not None else \
+                self.default_retry_jitter
+
+        # Validate and normalize the retry budget configuration. Durations
+        # are expressed in seconds (or as timedeltas); booleans, negative and
+        # non-finite values are rejected.
+        validate_retry_deadline(self.retry_deadline)
+        self.retry_backoff_max = validate_retry_backoff_max(
+            self.retry_backoff_max)
+        self.retry_jitter = validate_retry_jitter(self.retry_jitter)
 
         self.on_complete = on_complete
         self.on_error = on_error
@@ -843,6 +969,11 @@ class Task(object):
             rep += ' p=%s' % self.priority
         if self.retries:
             rep += ' %s retries' % self.retries
+        if self.retry_deadline is not None:
+            if self.retry_deadline_resolved is not None:
+                rep += ' deadline=%s' % self.retry_deadline_resolved
+            else:
+                rep += ' deadline=%s' % self.retry_deadline
         if self.timeout:
             rep += ' timeout=%s' % self.timeout
         if self.on_complete:
@@ -863,6 +994,32 @@ class Task(object):
         if self.expires:
             self.expires_resolved = normalize_expire_time(self.expires, utc)
         return self.expires_resolved
+
+    def resolve_retry_deadline(self, utc=True, now=None):
+        """
+        Resolve the retry deadline to an absolute datetime. This happens once,
+        when the task is first enqueued; the resolved value is serialized with
+        the task and is never recomputed, so the budget starts at the first
+        publish and survives retries, restarts and re-serialization.
+        """
+        if self.retry_deadline is None:
+            return None
+        if self.retry_deadline_resolved is None:
+            if isinstance(self.retry_deadline, datetime.datetime):
+                self.retry_deadline_resolved = normalize_time(
+                    eta=self.retry_deadline, utc=utc)
+            else:
+                if now is None:
+                    now = utcnow() if utc else datetime.datetime.now()
+                delay = self.retry_deadline
+                if not isinstance(delay, datetime.timedelta):
+                    delay = datetime.timedelta(seconds=delay)
+                self.retry_deadline_resolved = now + delay
+        return self.retry_deadline_resolved
+
+    def retry_deadline_exceeded(self, timestamp):
+        resolved = self.retry_deadline_resolved
+        return resolved is not None and timestamp > resolved
 
     @property
     def time_remaining(self):
@@ -959,6 +1116,10 @@ class TaskWrapper(object):
     def retry_delay(self):
         return self.task_class.default_retry_delay
 
+    @property
+    def retry_deadline(self):
+        return self.task_class.default_retry_deadline
+
     def unregister(self):
         return self.huey._registry.unregister(self.task_class)
 
@@ -998,7 +1159,9 @@ class TaskWrapper(object):
 
     def schedule(self, args=None, kwargs=None, eta=None, delay=None,
                  priority=None, retries=None, retry_delay=None,
-                 retry_backoff=None, expires=None, timeout=None, id=None):
+                 retry_backoff=None, retry_deadline=None,
+                 retry_backoff_max=None, retry_jitter=None, expires=None,
+                 timeout=None, id=None):
         if eta is None and delay is None:
             if isinstance(args, (int, float)):
                 delay = args
@@ -1022,6 +1185,9 @@ class TaskWrapper(object):
             retries=retries,
             retry_delay=retry_delay,
             retry_backoff=retry_backoff,
+            retry_deadline=retry_deadline,
+            retry_backoff_max=retry_backoff_max,
+            retry_jitter=retry_jitter,
             priority=priority,
             expires=expires,
             timeout=timeout)
@@ -1055,6 +1221,10 @@ class TaskWrapper(object):
                                retries=kwargs.pop('retries', None),
                                retry_delay=kwargs.pop('retry_delay', None),
                                retry_backoff=kwargs.pop('retry_backoff', None),
+                               retry_deadline=kwargs.pop('retry_deadline', None),
+                               retry_backoff_max=kwargs.pop('retry_backoff_max',
+                                                            None),
+                               retry_jitter=kwargs.pop('retry_jitter', None),
                                priority=kwargs.pop('priority', None),
                                expires=kwargs.pop('expires', None),
                                timeout=kwargs.pop('timeout', None))
@@ -1293,6 +1463,9 @@ class Result(object):
             retries=self.task.retries,
             retry_delay=self.task.retry_delay,
             retry_backoff=self.task.retry_backoff,
+            retry_deadline=self.task.retry_deadline,
+            retry_backoff_max=self.task.retry_backoff_max,
+            retry_jitter=self.task.retry_jitter,
             priority=priority if priority is not None else self.task.priority,
             expires=expires if expires is not None else self.task.expires,
             timeout=self.task.timeout,

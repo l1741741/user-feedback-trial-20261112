@@ -210,9 +210,87 @@ multiplier. The task below is retried after 10 seconds, then 20, then 40:
     def call_external_service():
         # ...
 
+The grown delay can be capped with ``retry_backoff_max`` (seconds), and
+randomized with ``retry_jitter``. ``retry_jitter=True`` applies "full"
+jitter, waiting a uniform random amount between 0 and the computed (and
+capped) delay; a number adds up to that many extra seconds. The randomness
+comes from the ``random`` module by default, but any object exposing
+``uniform(a, b)`` (e.g. a seeded ``random.Random``) can be injected with
+``retry_random``:
+
+.. code-block:: python
+
+    @huey.task(retries=5, retry_delay=10, retry_backoff=2,
+               retry_backoff_max=300, retry_jitter=True,
+               retry_random=random.Random())
+    def call_external_service():
+        # ...
+
+A callable can also be used as the ``retry_backoff`` for full control over
+the backoff strategy. It is called with the base ``retry_delay`` and the
+retry attempt counter (which is persisted with the task, so the sequence
+does not restart when the task is re-serialized), and must return the delay
+in seconds:
+
+.. code-block:: python
+
+    def fibonacci_backoff(base, attempt):
+        a, b = 1, 1
+        for _ in range(attempt):
+            a, b = b, a + b
+        return base * a
+
+    @huey.task(retries=5, retry_delay=10, retry_backoff=fibonacci_backoff)
+    def call_external_service():
+        # ...
+
+.. _retry-deadline:
+
+Bounding retries with an overall deadline
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A retry count and a fixed delay cannot express "keep trying for at most ten
+minutes". The ``retry_deadline`` parameter sets an overall retry budget,
+measured from the moment the task is **first enqueued**. It accepts a number
+of seconds, a ``datetime.timedelta``, or an absolute ``datetime.datetime``:
+
+.. code-block:: python
+
+    @huey.task(retries=100, retry_delay=15, retry_deadline=600)
+    def sync_with_flaky_api():
+        # Retried every 15s, for at most 10 minutes after first publish.
+        # After that the task fails finally, with retries left unused.
+        ...
+
+The deadline is resolved once, when the task is first enqueued, and the
+resolved timestamp is serialized with the task. Retries, consumer restarts,
+delayed scheduling and re-serialization therefore do not reset the budget.
+When a retry would run *after* the deadline, it is never enqueued or
+scheduled: the failure is treated as final instead (the error is stored,
+the ``on_error`` handler runs once, and no ``retrying`` signal is emitted).
+A deadline of ``0`` effectively disables retries.
+
+The deadline applies to every kind of retry:
+
+* ordinary exceptions, retried after ``retry_delay`` (with any backoff and
+  jitter applied),
+* :py:class:`RetryTask`, including an explicit ``delay`` or ``eta`` that
+  falls beyond the deadline,
+* rate-limit retries (:py:class:`RateLimitExceeded`),
+* lock failures (:py:class:`TaskLockedException`), which are re-enqueued
+  using the task's ``retry_delay``.
+
 .. note::
-    ``retries``, ``retry_delay`` and ``retry_backoff`` can also be specified
-    for periodic tasks.
+    ``retries``, ``retry_delay``, ``retry_backoff``, ``retry_deadline``,
+    ``retry_backoff_max`` and ``retry_jitter`` can also be specified for
+    periodic tasks, where the budget applies to each individual run.
+
+.. note::
+    Every task has its own retry budget. In a :ref:`pipeline <task-pipelines>`,
+    each member's deadline is resolved when that member is enqueued -- members
+    do not share deadline or backoff state. Calling
+    :py:meth:`Result.reschedule` publishes a new task, which starts a fresh
+    budget from the rescheduled publish time.
 
 It is also possible to explicitly retry a task from within the task, by raising
 a :py:class:`RetryTask` exception. When this exception is used, the task will
@@ -961,6 +1039,8 @@ Equivalent example using a context-manager instead of a decorator:
             service.apply_updates(data)
 
 See :py:meth:`Huey.rate_limit` for API documentation.
+
+.. _task-pipelines:
 
 Task pipelines
 --------------
@@ -1782,6 +1862,9 @@ to your task function:
 * ``retries``
 * ``retry_delay``
 * ``retry_backoff``
+* ``retry_deadline``
+* ``retry_backoff_max``
+* ``retry_jitter``
 * ``priority``
 * ``expires``
 * ``timeout``
