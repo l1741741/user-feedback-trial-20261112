@@ -22,5 +22,6 @@ from huey.tests.test_signals import *
 from huey.tests.test_sql_huey import *
 from huey.tests.test_stats import *
 from huey.tests.test_storage import *
+from huey.tests.test_task_alias import *
 from huey.tests.test_utils import *
 from huey.tests.test_wrappers import *

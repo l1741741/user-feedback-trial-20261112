@@ -353,6 +353,69 @@ For more information, see:
 * :py:class:`Result`
 * :py:class:`TaskException`
 
+.. _task-rename-migration:
+
+Renaming a task without losing queued messages
+-----------------------------------------------
+
+A task's queue name is derived from its module and function name (or from the
+``name`` passed to :py:meth:`~Huey.task`). Messages already in the queue,
+scheduled messages and pending retries store that name. Simply renaming the
+function therefore strands the existing backlog: the consumer can no longer
+deserialize those messages.
+
+During a rename, register the old name as an alias for the new task:
+
+.. code-block:: python
+
+    @huey.task()
+    def generate_report(day):
+        ...
+
+    # The old name may have been, e.g., "reports.tasks.build_report".
+    huey.register_task_alias('reports.tasks.build_report', generate_report)
+
+Messages written under the alias are executed by the new task. The task keeps
+its original ID, so its :py:class:`Result` remains valid, and it keeps its
+remaining retries, pipeline and expiration metadata. Retries of an aliased
+message are written back under the old name while the alias is registered,
+which keeps the backlog visible to the accounting API.
+
+Once operators have confirmed that the old name is drained, close the mapping:
+
+.. code-block:: python
+
+    status = huey.task_alias_status('reports.tasks.build_report')
+    # {'registered': True, 'queue': 0, 'schedule': 0, 'inflight': 0,
+    #  'total': 0}
+
+    huey.unregister_task_alias('reports.tasks.build_report')
+
+``inflight`` counts messages a worker has already dequeued but not yet
+finished executing. They are no longer in the queue, but if they fail they
+will be re-enqueued under the old name, so they must be zero before the alias
+is retired. The count is shared through the storage backend, so a message
+claimed by any process using the same queue is included. ``queue`` and
+``schedule`` are counted by reading the queue and schedule; the in-flight
+counters are maintained for aliased messages only.
+
+:py:meth:`~Huey.unregister_task_alias` refuses to remove an alias while
+``total`` is non-zero and raises :py:class:`TaskAliasInUse`. This closes the
+race where a worker claims a message just as the mapping is removed. Use
+``force=True`` only when you accept that a remaining old-name message will no
+longer be executable, and :py:meth:`~Huey.wait_for_task_alias` to block until
+the backlog drains.
+
+.. note::
+    If a worker process dies after claiming a message, its in-flight count is
+    not released automatically. Confirm the process is gone, then retire with
+    ``force=True`` (or reset the counter) rather than waiting forever.
+
+.. note::
+    The alias mapping lives on the :py:class:`Huey` instance and must be
+    registered by every consumer process. Until all consumers run code that
+    knows the new task, keep the old task registered as well.
+
 .. _immediate:
 
 Immediate mode

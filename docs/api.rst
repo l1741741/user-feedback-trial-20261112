@@ -797,6 +797,72 @@ Huey object
             :py:meth:`~Huey.enqueue` directly when working with pipelines,
             groups, or chords.
 
+    .. py:method:: register_task_alias(alias, target)
+
+        :param str alias: the legacy task name as written into the queue, a
+            string such as ``"myapp.tasks.generate_report"``.
+        :param target: the renamed task class (a :py:class:`Task` subclass), a
+            :py:class:`TaskWrapper`, or the new task name string.
+        :returns: ``True``.
+
+        Map a legacy task name onto its replacement so that messages already
+        written under the old name can still be deserialized and executed.
+        This is the migration entry-point described in
+        :ref:`task-rename-migration`.
+
+        The mapping is resolved when a message is deserialized, so it covers
+        messages in the queue, messages in the schedule and future retries.
+        A message executed through the alias keeps its task ID (and therefore
+        its :py:class:`Result`), keeps its remaining retries, and keeps its
+        pipeline, expiration and priority metadata. While the alias remains
+        registered, retries of such a message are re-serialized under the old
+        name, so the old-name backlog stays observable.
+
+        The target may be given by name before the new task is imported.
+
+    .. py:method:: unregister_task_alias(alias, force=False)
+
+        :param str alias: the legacy task name to retire.
+        :param bool force: retire the alias even if messages still reference
+            it. Default is ``False``.
+        :returns: ``True`` if the alias was removed, ``False`` if it was not
+            registered.
+        :raises TaskAliasInUse: if any message still references ``alias`` and
+            ``force`` is false.
+
+        Close the mapping once the old name is drained. Drainage is checked
+        with :py:meth:`task_alias_status`, which counts queued and scheduled
+        messages plus messages a worker has already claimed but not finished
+        executing. The in-flight count is shared through the storage backend,
+        so it is visible to every process using the same queue.
+
+    .. py:method:: task_aliases()
+
+        :returns: a dict mapping each registered alias to its target name.
+
+    .. py:method:: task_alias_status(alias)
+
+        :param str alias: the legacy task name to inspect.
+        :returns: a dict with ``registered`` (bool), ``queue``, ``schedule``,
+            ``inflight`` and ``total`` counts.
+
+        Report how many messages still need ``alias``. ``inflight`` counts
+        messages a process has dequeued but not yet finished executing: they
+        are no longer in the queue, but a failure will re-enqueue them under
+        the old name, so they must be included before declaring the alias
+        drained.
+
+    .. py:method:: wait_for_task_alias(alias, timeout=None, interval=1.0)
+
+        :param str alias: the legacy task name to watch.
+        :param float timeout: maximum number of seconds to wait, or ``None``
+            (the default) to wait indefinitely.
+        :param float interval: seconds between status checks.
+        :returns: ``True`` if the backlog drained, ``False`` if ``timeout``
+            elapsed.
+
+        Poll :py:meth:`task_alias_status` until nothing references ``alias``.
+
     .. py:method:: revoke(task, revoke_until=None, revoke_once=False)
 
         .. seealso:: Use :py:meth:`Result.revoke` instead.
@@ -2346,6 +2412,16 @@ Exceptions
 
     General exception raised by :py:class:`Result` handles when reading the
     result of a task that failed due to an error.
+
+.. py:class:: TaskAliasInUse(alias, status)
+
+    :param str alias: the legacy task name that could not be retired.
+    :param dict status: the result of :py:meth:`Huey.task_alias_status` at the
+        time retirement was attempted.
+
+    Raised by :py:meth:`Huey.unregister_task_alias` when queued, scheduled, or
+    in-flight messages still carry the old task name. See
+    :ref:`task-rename-migration`.
 
 Storage
 -------

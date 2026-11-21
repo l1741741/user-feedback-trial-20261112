@@ -4,6 +4,7 @@ import inspect
 import itertools
 import logging
 import re
+import threading
 import time
 import traceback
 import uuid
@@ -22,6 +23,7 @@ from huey.exceptions import RateLimitExceeded
 from huey.exceptions import RETRYING_EXCEPTIONS
 from huey.exceptions import ResultTimeout
 from huey.exceptions import RetryTask
+from huey.exceptions import TaskAliasInUse
 from huey.exceptions import TaskException
 from huey.exceptions import TaskLockedException
 from huey.exceptions import TaskTimeout
@@ -125,6 +127,12 @@ class Huey(object):
         self._registry = Registry()
         self._signal = S.Signal()
         self._tasks_in_flight = set()
+        # Counts executions the process has claimed but not yet finished, per
+        # (queue, name). The set above is process-local; these counters are
+        # shared through the storage backend.
+        self._inflight_tasks = {}
+        self._inflight_lock = threading.Lock()
+        self._alias_lock = threading.Lock()
         self._timeout_handler = None  # This is consumer-specific.
 
     def get_task_wrapper_class(self):
@@ -273,6 +281,144 @@ class Huey(object):
             name = name.__name__
         return self._shutdown.pop(name, None) is not None
 
+    # -- Task-name aliases (migration support) --------------------------------
+
+    def register_task_alias(self, alias, target):
+        """
+        Map the legacy task name ``alias`` onto ``target`` so that messages
+        still carrying the old name can be deserialized and executed.
+
+        :param str alias: the old, canonical task name as written to the
+            queue, e.g. ``"myapp.tasks.generate_report"``.
+        :param target: the new task class (a :py:class:`Task` subclass), a
+            :py:class:`TaskWrapper`, or the new task name string.
+        :returns: True.
+
+        The mapping is resolved at deserialization time, so messages already
+        on the queue, in the schedule, and retries re-enqueued from an
+        in-flight worker all keep working. A message executed through an alias
+        keeps its original task ID, writes its result under that ID, and
+        retains its remaining retries. Retries are re-serialized under the
+        old name while the alias remains registered, so the backlog stays
+        visible to :py:meth:`task_alias_status`.
+        """
+        with self._alias_lock:
+            target_name = self._registry.task_name(target)
+            return self._registry.register_task_alias(alias, target_name)
+
+    def unregister_task_alias(self, alias, force=False):
+        """
+        Remove a task-name alias. By default this refuses while messages
+        carrying the old name are still queued, scheduled, or in-flight, so a
+        worker cannot lose a message it claimed just before the mapping was
+        removed.
+
+        :param str alias: the legacy task name to retire.
+        :param bool force: retire the alias even if a backlog remains.
+        :returns: True if the alias was removed, False if it was not mapped.
+        :raises TaskAliasInUse: if a backlog remains and ``force`` is false.
+        """
+        with self._alias_lock:
+            status = self.task_alias_status(alias)
+            if not status['registered']:
+                return False
+            if status['total'] and not force:
+                raise TaskAliasInUse(alias, status)
+            removed = self._registry.unregister_task_alias(alias)
+            if removed and not status['inflight']:
+                # Safe to drop the counter only when no execution is still
+                # holding a claim; a forced retirement leaves it so the
+                # eventual decrement balances cleanly.
+                try:
+                    self.storage.delete_counter(self._inflight_key(alias))
+                except NotImplementedError:
+                    pass
+            return removed
+
+    def task_aliases(self):
+        """:returns: a dict mapping each registered alias to its target."""
+        return self._registry.task_aliases
+
+    def _iter_message_names(self, items):
+        """Yield the set of task names referenced by each queued message."""
+        def walk(message, seen):
+            name = getattr(message, 'name', None)
+            if name is not None:
+                yield name
+            children = [getattr(message, 'on_complete', None),
+                        getattr(message, 'on_error', None)]
+            chord_config = getattr(message, 'chord_config', None)
+            if chord_config is not None:
+                children.append(chord_config[3])
+            for child in children:
+                if child is not None and id(child) not in seen:
+                    seen.add(id(child))
+                    for child_name in walk(child, seen):
+                        yield child_name
+
+        for data in items:
+            try:
+                message = self.serializer.deserialize(data)
+            except Exception:
+                logger.exception('Unable to deserialize task for alias check.')
+                continue
+            if hasattr(message, 'name'):
+                yield set(walk(message, set([id(message)])))
+
+    def task_alias_status(self, alias):
+        """
+        Report whether any messages still need the given alias.
+
+        :returns: a dict with boolean ``registered``, plus ``queue``,
+            ``schedule``, ``inflight`` and ``total`` counts of messages that
+            were written under ``alias``. ``inflight`` counts messages a
+            process has already claimed but not yet finished executing, which
+            are no longer in the queue but still need the alias to be
+            deserialized for a retry.
+        """
+        registered = alias in self._registry.task_aliases
+        queue = sum(1 for names in self._iter_message_names(
+            self.storage.enqueued_items()) if alias in names)
+        schedule = sum(1 for names in self._iter_message_names(
+            self.storage.scheduled_items()) if alias in names)
+        if self._registry.resolve_name(alias) != alias:
+            local = 0
+            with self._inflight_lock:
+                for (queue_name, task_name), count in self._inflight_tasks.items():
+                    if queue_name == self.name and task_name == alias:
+                        local += count
+            try:
+                inflight = self.storage.incr(self._inflight_key(alias), 0)
+            except NotImplementedError:
+                inflight = 0
+            # The shared counter includes every process; the local tally is a
+            # fallback for storages with no counter support.
+            inflight = max(inflight or 0, local, 0)
+        else:
+            inflight = 0
+        return {
+            'alias': alias,
+            'registered': registered,
+            'queue': queue,
+            'schedule': schedule,
+            'inflight': inflight,
+            'total': queue + schedule + inflight,
+        }
+
+    def wait_for_task_alias(self, alias, timeout=None, interval=1.0):
+        """
+        Poll :py:meth:`task_alias_status` until nothing references ``alias``.
+
+        :returns: True if the backlog drained, False if ``timeout`` elapsed.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if not self.task_alias_status(alias)['total']:
+                return True
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(interval)
+
     def notify_interrupted_tasks(self):
         while self._tasks_in_flight:
             try:
@@ -373,7 +519,62 @@ class Huey(object):
     def dequeue(self):
         data = self.storage.dequeue()
         if data is not None:
-            return self.deserialize_task(data)
+            task = self.deserialize_task(data)
+            if task is not None:
+                self.claim_execution(task)
+            return task
+
+    def claim_execution(self, task):
+        """
+        Record that this process has taken responsibility for ``task`` before
+        executing it.
+
+        Only messages that arrived under an alias are tracked. The claim is
+        keyed by the wire-name recorded on the task, so an old-name message is
+        counted against the old name even though it is executed by the new
+        task class. The counter is shared through the storage backend, so
+        other processes -- including an operator deciding whether the old name
+        is drained -- can see it.
+        """
+        if getattr(task, '_execution_claimed', False):
+            return
+        task._execution_claimed = True
+        name = getattr(task, '_wire_name', None)
+        if not name or name == self._registry.task_to_string(type(task)):
+            return  # Not an aliased message, nothing to account for.
+        key = (self.name, name)
+        with self._inflight_lock:
+            self._inflight_tasks[key] = self._inflight_tasks.get(key, 0) + 1
+        try:
+            self.storage.incr(self._inflight_key(name))
+        except NotImplementedError:
+            pass
+
+    def finish_execution(self, task, claimed=True):
+        """Release the claim made by :meth:`claim_execution`."""
+        if not getattr(task, '_execution_claimed', False):
+            return
+        task._execution_claimed = False
+        name = getattr(task, '_wire_name', None)
+        if not name or name == self._registry.task_to_string(type(task)):
+            return
+        key = (self.name, name)
+        with self._inflight_lock:
+            count = self._inflight_tasks.get(key, 0)
+            if count <= 1:
+                self._inflight_tasks.pop(key, None)
+            else:
+                self._inflight_tasks[key] = count - 1
+        if claimed:
+            try:
+                # Leave a zero row in place: deleting it here would race with
+                # another worker claiming the same alias concurrently.
+                self.storage.incr(self._inflight_key(name), -1)
+            except NotImplementedError:
+                pass
+
+    def _inflight_key(self, name):
+        return 'huey.inflight.%s' % name
 
     def put(self, key, data):
         return self.storage.put_data(key, self.serializer.serialize(data))
@@ -414,20 +615,27 @@ class Huey(object):
         if timestamp is None:
             timestamp = self._get_timestamp()
 
-        if not self.ready_to_run(task, timestamp):
-            self.add_schedule(task)
-        elif self.is_revoked(task, timestamp, False):
-            logger.warning('Task %s was revoked, not executing', task)
-            self._emit(S.SIGNAL_REVOKED, task)
-            self._abort_chord_member(task, SKIPPED)
-        elif task.expires_resolved and task.expires_resolved < timestamp:
-            logger.info('Task %s expired, not executing.', task)
-            self._emit(S.SIGNAL_EXPIRED, task)
-            self._abort_chord_member(task, SKIPPED)
-        else:
-            logger.info('Executing %s', task)
-            self._emit(S.SIGNAL_EXECUTING, task)
-            return self._execute(task, timestamp)
+        # The task may have been claimed in dequeue(); if it was executed
+        # directly, claim it here. Either way the claim is released when this
+        # call returns, whether the task ran, was scheduled, or was skipped.
+        self.claim_execution(task)
+        try:
+            if not self.ready_to_run(task, timestamp):
+                self.add_schedule(task)
+            elif self.is_revoked(task, timestamp, False):
+                logger.warning('Task %s was revoked, not executing', task)
+                self._emit(S.SIGNAL_REVOKED, task)
+                self._abort_chord_member(task, SKIPPED)
+            elif task.expires_resolved and task.expires_resolved < timestamp:
+                logger.info('Task %s expired, not executing.', task)
+                self._emit(S.SIGNAL_EXPIRED, task)
+                self._abort_chord_member(task, SKIPPED)
+            else:
+                logger.info('Executing %s', task)
+                self._emit(S.SIGNAL_EXECUTING, task)
+                return self._execute(task, timestamp)
+        finally:
+            self.finish_execution(task, claimed=True)
 
     def _execute(self, task, timestamp):
         if self._pre_execute:
@@ -822,6 +1030,10 @@ class Task(object):
         self.timeout = timeout if timeout is not None else self.default_timeout
         self.chord_config = chord_config
         self._deadline = None
+        # Set when a message arrives under a task-name alias (see
+        # Registry.create_task) so retries keep the same wire name.
+        self._wire_name = None
+        self._execution_claimed = False
 
         self.on_complete = on_complete
         self.on_error = on_error

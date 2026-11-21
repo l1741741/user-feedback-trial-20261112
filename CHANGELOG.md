@@ -3,6 +3,14 @@ Changelog
 
 ## Master
 
+* Add task-name aliases for renaming a task without stranding queued,
+  scheduled, or retrying messages. Messages executed through an alias keep
+  their task ID, result, and remaining retries. Retries continue to be written
+  under the old name until the alias is retired. Add
+  `task_alias_status()` / `wait_for_task_alias()` and refuse to retire an alias
+  while messages remain queued, scheduled, or in-flight (claimed by a worker
+  but not yet finished).
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4

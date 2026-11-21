@@ -4,6 +4,20 @@ class TaskLockedException(HueyException): pass
 class ResultTimeout(HueyException): pass
 class TaskTimeout(HueyException): pass
 
+
+class TaskAliasInUse(HueyException):
+    """
+    Raised when retiring a task-name alias while messages carrying the old
+    name are still queued, scheduled, or being executed.
+    """
+    def __init__(self, alias, status):
+        self.alias = alias
+        self.status = status
+        super(TaskAliasInUse, self).__init__(
+            'Cannot retire task alias "%s": %s queued, %s scheduled, '
+            '%s in-flight.' % (alias, status['queue'], status['schedule'],
+                               status['inflight']))
+
 class RateLimitExceeded(HueyException):
     def __init__(self, key, delay, retry=True):
         self.key, self.delay, self.retry = key, delay, retry
