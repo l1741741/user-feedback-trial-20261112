@@ -35,6 +35,32 @@ SKIPPED = _Skipped()
 
 ChordConfig = namedtuple('ChordConfig', ('cid', 'size', 'idx', 'callback'))
 
+# Batch (task-family) join outcomes. A batch member settles in exactly one of
+# these states; the SQLite join record distinguishes a withdrawn member from
+# one that failed during execution.
+BATCH_SUCCESS = 'success'
+BATCH_FAILED = 'failed'
+BATCH_CANCELLED = 'cancelled'
+BATCH_OUTCOMES = (BATCH_SUCCESS, BATCH_FAILED, BATCH_CANCELLED)
+
+# Carried by tasks enqueued through the batch entry-point. The generation is
+# stamped when the task is delivered; a region-level cancellation covers all
+# deliveries whose generation is less-than-or-equal to the generation recorded
+# at cancel time, so resuming a region (which bumps the generation) only
+# re-enables subsequent deliveries and never revives older ones.
+BatchConfig = namedtuple('BatchConfig', ('bid', 'region', 'generation', 'idx'))
+
+
+class _Cancelled(object):
+    def __repr__(self):
+        return 'CANCELLED'
+    def __reduce__(self):
+        return 'CANCELLED'
+
+# Placeholder contributed to the batch join (and to the tail step's payload)
+# for members that were withdrawn before their result could be delivered.
+CANCELLED = _Cancelled()
+
 
 def load_class(s):
     path, klass = s.rsplit('.', 1)

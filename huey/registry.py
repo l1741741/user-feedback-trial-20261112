@@ -1,13 +1,15 @@
 from collections import namedtuple
 
 from huey.exceptions import HueyException
+from huey.utils import BatchConfig
 from huey.utils import ChordConfig
 
 
 Message = namedtuple('Message', ('id', 'name', 'eta', 'retries', 'retry_delay',
                                  'priority', 'args', 'kwargs', 'on_complete',
                                  'on_error', 'expires', 'expires_resolved',
-                                 'timeout', 'chord_config', 'retry_backoff'))
+                                 'timeout', 'chord_config', 'retry_backoff',
+                                 'batch_config'))
 
 # Automatically set missing parameters to None. This is kind-of a hack, but it
 # allows us to add new parameters while continuing to be able to handle
@@ -76,6 +78,10 @@ class Registry(object):
                 task.chord_config.idx,
                 self.create_message(task.chord_config.callback))
 
+        batch_config = None
+        if task.batch_config is not None:
+            batch_config = tuple(task.batch_config)
+
         return Message(
             task.id,
             task_str,
@@ -91,7 +97,8 @@ class Registry(object):
             task.expires_resolved,
             task.timeout,
             chord_config,
-            task.retry_backoff)
+            task.retry_backoff,
+            batch_config)
 
     def create_task(self, message):
         TaskClass = self.string_to_task(message.name)
@@ -110,6 +117,10 @@ class Registry(object):
             callback = self.create_task(cb_ser)
             chord_config = ChordConfig(cid, size, idx, callback)
 
+        batch_config = None
+        if message.batch_config is not None:
+            batch_config = BatchConfig(*message.batch_config)
+
         return TaskClass(
             message.args,
             message.kwargs,
@@ -124,7 +135,8 @@ class Registry(object):
             message.expires_resolved,
             message.timeout,
             chord_config,
-            message.retry_backoff)
+            message.retry_backoff,
+            batch_config=batch_config)
 
     @property
     def periodic_tasks(self):

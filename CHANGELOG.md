@@ -3,6 +3,13 @@ Changelog
 
 ## Master
 
+* Add `huey.contrib.batch`: business batches (task families) on
+  `BatchSqliteHuey` that join multiple region tasks into an exactly-once
+  tail step. Region-level cancellation skips queued deliveries and prevents
+  in-flight deliveries from dispatching successors; the SQLite join record
+  distinguishes cancelled members from failed ones. Resuming a region only
+  re-enables subsequent deliveries and never revives withdrawn generations.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4

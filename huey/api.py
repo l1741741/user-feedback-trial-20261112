@@ -37,6 +37,10 @@ from huey.storage import PriorityRedisStorage
 from huey.storage import RedisExpireStorage
 from huey.storage import RedisStorage
 from huey.storage import SqliteStorage
+from huey.utils import BATCH_CANCELLED
+from huey.utils import BATCH_FAILED
+from huey.utils import BATCH_SUCCESS
+from huey.utils import CANCELLED
 from huey.utils import ChordConfig
 from huey.utils import Error
 from huey.utils import SKIPPED
@@ -420,10 +424,22 @@ class Huey(object):
             logger.warning('Task %s was revoked, not executing', task)
             self._emit(S.SIGNAL_REVOKED, task)
             self._abort_chord_member(task, SKIPPED)
+            if task.batch_config is not None:
+                self._settle_batch_member(task, BATCH_CANCELLED, None)
+        elif task.batch_config is not None and self._batch_cancelled(task):
+            # The region this member belongs to was withdrawn before the task
+            # started: do not run the function and settle the member as
+            # cancelled in the batch join.
+            logger.warning('Batch member %s was cancelled, not executing.',
+                           task)
+            self._emit(S.SIGNAL_CANCELED, task)
+            self._settle_batch_member(task, BATCH_CANCELLED, None)
         elif task.expires_resolved and task.expires_resolved < timestamp:
             logger.info('Task %s expired, not executing.', task)
             self._emit(S.SIGNAL_EXPIRED, task)
             self._abort_chord_member(task, SKIPPED)
+            if task.batch_config is not None:
+                self._settle_batch_member(task, BATCH_CANCELLED, None)
         else:
             logger.info('Executing %s', task)
             self._emit(S.SIGNAL_EXECUTING, task)
@@ -436,6 +452,8 @@ class Huey(object):
             except CancelExecution:
                 self._emit(S.SIGNAL_CANCELED, task)
                 self._abort_chord_member(task, SKIPPED)
+                if task.batch_config is not None:
+                    self._settle_batch_member(task, BATCH_CANCELLED, None)
                 return
 
         start = time.monotonic()
@@ -514,7 +532,19 @@ class Huey(object):
                 self.put_result(task.id, task_value)
             self._run_post_execute(task, task_value, exception)
             self._emit(S.SIGNAL_COMPLETE, task)
-            if task.on_complete:
+            if task.batch_config is not None:
+                # Settle first: the storage layer atomically records the
+                # outcome and reports whether the member was withdrawn at
+                # this delivery's generation. A withdrawn member does not
+                # dispatch successors, even if the cancel raced the settle.
+                cancelled = self._settle_batch_member(
+                    task, BATCH_SUCCESS, task_value)
+                if cancelled:
+                    self._emit(S.SIGNAL_CANCELED, task)
+                elif task.on_complete:
+                    task.on_complete.extend_data(task_value)
+                    self.enqueue(task.on_complete)
+            elif task.on_complete:
                 task.on_complete.extend_data(task_value)
                 self.enqueue(task.on_complete)
             if task.chord_config is not None:
@@ -537,6 +567,12 @@ class Huey(object):
                 self.enqueue(handler)
             if final:
                 self._abort_chord_member(task, error)
+                if task.batch_config is not None:
+                    # The storage layer downgrades the outcome to cancelled
+                    # if the member was withdrawn at this delivery's
+                    # generation; otherwise the failure is recorded as an
+                    # execution failure.
+                    self._settle_batch_member(task, BATCH_FAILED, error)
             else:
                 self._emit(S.SIGNAL_RETRYING, task)
                 self._requeue_task(task, self._get_timestamp(), retry_eta)
@@ -568,6 +604,48 @@ class Huey(object):
             callback = cc.callback
             callback.extend_data((results,))
             self.enqueue(callback)
+
+    def _batch_cancelled(self, task):
+        # Whether the batch member was withdrawn at the generation the task
+        # was delivered with. Only batch-capable storages implement this.
+        bc = task.batch_config
+        return self.storage.batch_member_cancelled(
+            bc.bid, bc.region, bc.generation)
+
+    def _settle_batch_member(self, task, outcome, value):
+        # Record the member's outcome in the join. The storage layer performs
+        # the record-and-claim atomically, so the batch's tail step is
+        # enqueued exactly once even when multiple members settle
+        # concurrently in different processes. Returns whether the delivery
+        # was cancelled at its generation (in which case the recorded
+        # outcome was downgraded to cancelled and successors must not be
+        # dispatched).
+        bc = task.batch_config
+        if outcome == BATCH_CANCELLED:
+            payload = None
+        else:
+            # Success values (including None) and Error instances are stored
+            # serialized; only cancelled members have a NULL payload.
+            payload = self.serializer.serialize(value)
+        settled, claimed, cancelled = self.storage.settle_batch_member(
+            bc.bid, bc.idx, bc.region, bc.generation, outcome, payload)
+        if claimed:
+            self._enqueue_batch_callback(bc.bid)
+        return cancelled
+
+    def _enqueue_batch_callback(self, bid):
+        callback = self.deserialize_task(self.storage.batch_callback_data(bid))
+        results = []
+        for _, _, outcome, value in self.storage.batch_member_outcomes(bid):
+            if outcome == BATCH_SUCCESS or outcome == BATCH_FAILED:
+                # Success values and Error instances are both stored
+                # serialized; cancelled members contribute the CANCELLED
+                # placeholder instead.
+                results.append(self.serializer.deserialize(value))
+            else:
+                results.append(CANCELLED)
+        callback.extend_data((results,))
+        self.enqueue(callback)
 
     def _requeue_task(self, task, timestamp, retry_eta=None):
         task.retries -= 1
@@ -803,7 +881,8 @@ class Task(object):
     def __init__(self, args=None, kwargs=None, id=None, eta=None, retries=None,
                  retry_delay=None, priority=None, expires=None,
                  on_complete=None, on_error=None, expires_resolved=None,
-                 timeout=None, chord_config=None, retry_backoff=None):
+                 timeout=None, chord_config=None, retry_backoff=None,
+                 batch_config=None):
         self.name = type(self).__name__
         self.args = () if args is None else args
         self.kwargs = {} if kwargs is None else kwargs
@@ -821,6 +900,7 @@ class Task(object):
         self.expires_resolved = expires_resolved
         self.timeout = timeout if timeout is not None else self.default_timeout
         self.chord_config = chord_config
+        self.batch_config = batch_config
         self._deadline = None
 
         self.on_complete = on_complete
@@ -851,6 +931,9 @@ class Task(object):
             rep += ', on error %s' % self.on_error
         if self.chord_config:
             rep += ', chord %s' % self.chord_config.cid
+        if self.batch_config:
+            rep += ', batch %s/%s' % (self.batch_config.bid,
+                                      self.batch_config.region)
         return rep
 
     def __hash__(self):

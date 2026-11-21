@@ -9,6 +9,8 @@ The ``huey.contrib`` package contains modules that provide extra functionality.
 
 .. include:: asyncio.rst
 
+.. include:: batch.rst
+
 .. include:: stats.rst
 
 .. include:: flask_admin.rst
