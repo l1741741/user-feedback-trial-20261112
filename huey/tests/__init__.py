@@ -14,6 +14,8 @@ from huey.tests.test_django_tasks import *
 from huey.tests.test_helpers import *
 from huey.tests.test_immediate import *
 from huey.tests.test_mini import *
+from huey.tests.test_partition_store import *
+from huey.tests.test_partition_store_multiproc import *
 from huey.tests.test_postgres import *
 from huey.tests.test_priority import *
 from huey.tests.test_registry import *
