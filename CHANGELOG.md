@@ -3,6 +3,14 @@ Changelog
 
 ## Master
 
+* Add optional `schedule_grace` fault-tolerance window (seconds) to
+  `SqliteStorage` / `SqliteHuey`. When set, due tasks still within the window
+  are dispatched immediately, tasks past the window are recorded in the
+  ops-readable `schedule_log` table instead of being dispatched, and recorded
+  decisions are never repeated -- a scheduler restart cannot re-dispatch a
+  task that was already dispatched or skipped. Defaults to `None`, which
+  preserves the original behavior.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4

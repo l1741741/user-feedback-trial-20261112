@@ -870,18 +870,37 @@ class SqliteStorage(BaseSqlStorage):
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
+    # Durable, ops-readable record of the decision made for each scheduled
+    # task when the grace window is enabled. One row per (queue, task, eta):
+    # once a decision exists it is never repeated, so a scheduler restart
+    # cannot re-dispatch a task that was already dispatched or skipped.
+    table_schedule_log = ('create table if not exists schedule_log ('
+                          'queue text not null, task_key text not null, '
+                          'data blob not null, eta real not null, '
+                          'decision text not null, decided_at real not null, '
+                          'primary key(queue, task_key))')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter, drop_index_task]
+           table_counter, drop_index_task, table_schedule_log]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
-                 create_tables=True, **kwargs):
+                 create_tables=True, schedule_grace=None, **kwargs):
         self.filename = filename
         self._cache_mb = cache_mb
         self._fsync = fsync
         self._journal_mode = journal_mode
         self._timeout = timeout  # Busy timeout in seconds, default is 5.
         self._conn_kwargs = kwargs
+
+        # Optional fault-tolerance window (in seconds) for the schedule. When
+        # a scheduler comes back up after an outage, due tasks whose eta is
+        # still within the window are dispatched immediately, while tasks
+        # past the window are recorded in the "schedule_log" table instead of
+        # being dispatched. When None (the default) the original behavior is
+        # preserved and every due task is dispatched regardless of its age.
+        if schedule_grace is not None and schedule_grace < 0:
+            raise ValueError('schedule_grace must be >= 0')
+        self._schedule_grace = schedule_grace
 
         # By default Sqlite may reuse rowids when rows are removed. This means
         # that SqliteHuey may not strictly be a FIFO. If strict FIFO ordering
@@ -971,6 +990,9 @@ class SqliteStorage(BaseSqlStorage):
                  'values (?, ?, ?)', params, commit=True)
 
     def read_schedule(self, ts):
+        if self._schedule_grace is not None:
+            return self._read_schedule_grace(ts)
+
         with self.db(commit=True) as curs:
             params = (self.name, ts.timestamp())
             curs.execute('select id, data from schedule where '
@@ -985,6 +1007,68 @@ class SqliteStorage(BaseSqlStorage):
                 curs.execute('delete from schedule where id in (%s)' %
                              ','.join('?' * len(chunk)), chunk)
             return data
+
+    def _read_schedule_grace(self, ts):
+        # Grace window enabled. Due tasks still within the window are
+        # returned for immediate dispatch; tasks past the window are recorded
+        # in the schedule_log table ("skipped") instead of being dispatched.
+        # Every decision is written to the log in the same transaction that
+        # removes the row from the schedule, keyed by the task data and eta,
+        # so a later scan (e.g. after a scheduler restart, or a duplicate
+        # schedule row) can never dispatch or skip the same task twice.
+        now = ts.timestamp()
+        cutoff = now - self._schedule_grace
+        with self.db(commit=True) as curs:
+            curs.execute('select id, data, timestamp from schedule where '
+                         'queue = ? and timestamp <= ? order by timestamp, id',
+                         (self.name, now))
+            id_list, data = [], []
+            for task_id, task_data, task_ts in curs.fetchall():
+                id_list.append(task_id)
+                task_key = self._schedule_log_key(task_data, task_ts)
+                curs.execute('select 1 from schedule_log where queue = ? and '
+                             'task_key = ?', (self.name, task_key))
+                if curs.fetchone() is not None:
+                    # A decision was already recorded for this exact task and
+                    # eta. Drop the row without dispatching it again.
+                    continue
+                decision = 'dispatched' if task_ts >= cutoff else 'skipped'
+                curs.execute(
+                    'insert into schedule_log (queue, task_key, data, eta, '
+                    'decision, decided_at) values (?, ?, ?, ?, ?, ?)',
+                    (self.name, task_key, self.to_blob(task_data), task_ts,
+                     decision, now))
+                if decision == 'dispatched':
+                    data.append(task_data)
+            for i in range(0, len(id_list), 500):
+                chunk = id_list[i:i + 500]
+                curs.execute('delete from schedule where id in (%s)' %
+                             ','.join('?' * len(chunk)), chunk)
+            return data
+
+    def _schedule_log_key(self, data, task_ts):
+        digest = hashlib.sha1(bytes(data)).hexdigest()
+        return '%s@%s' % (digest, task_ts)
+
+    def schedule_log_entries(self, decision=None):
+        """
+        Read the ops-facing record of schedule decisions, oldest first.
+
+        :param str decision: optionally filter on "dispatched" or "skipped".
+        :return: List of (data, eta, decision, decided_at) tuples.
+        """
+        sql = ('select data, eta, decision, decided_at from schedule_log '
+               'where queue = ?')
+        params = (self.name,)
+        if decision is not None:
+            sql += ' and decision = ?'
+            params += (decision,)
+        return self.sql(sql + ' order by eta, decided_at', params,
+                        results=True)
+
+    def flush_schedule_log(self):
+        self.sql('delete from schedule_log where queue = ?', (self.name,),
+                 True)
 
     def schedule_size(self):
         return self.sql('select count(id) from schedule where queue=?',
