@@ -5,6 +5,8 @@ docs/_build
 venv/
 huey.egg-info/
 huey.db
+huey_storage.db*
 build/
 dist/
 .mypy_cache/
+examples/shard_migration/runtime/

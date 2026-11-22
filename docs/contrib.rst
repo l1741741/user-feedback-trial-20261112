@@ -14,3 +14,5 @@ The ``huey.contrib`` package contains modules that provide extra functionality.
 .. include:: flask_admin.rst
 
 .. include:: mini.rst
+
+.. include:: shard_migration.rst

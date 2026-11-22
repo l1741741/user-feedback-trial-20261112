@@ -3,6 +3,15 @@ Changelog
 
 ## Master
 
+* Add optional `huey.contrib.migrate.ShardMigrator` (and the
+  `python -m huey.bin.migrate_shard` entry point) for moving one business
+  group's pending queue/schedule/KV/counter rows between two SQLite databases
+  while other groups keep being consumed. The migration preserves relative
+  FIFO order and scheduled ETAs, resumes from a persistent progress table keyed
+  by business identity (task UUID), and never re-creates already-migrated
+  messages. Producer messages from Huey >=2.0.0,<4.0.0 are readable, provided
+  both sides use identical serializer settings.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4
